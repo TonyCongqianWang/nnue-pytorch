@@ -981,10 +981,77 @@ def ft_permute(model: NNUEModel, ft_perm_path: str) -> None:
 
     ft_permute_impl(model, permutation)
 
+def simple_eval(board: chess.Board) -> int:
+    """
+    Replicates the C++ simple_eval function.
+    Calculates material imbalance from the perspective of the side to move.
+    """
+    PAWN_VALUE   = 208
+    KNIGHT_VALUE = 781
+    BISHOP_VALUE = 825
+    ROOK_VALUE   = 1276
+    QUEEN_VALUE  = 2538
 
-def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bool_]:
+    # Piece values map for non-pawn material calculation
+    piece_values = {
+        chess.KNIGHT: KNIGHT_VALUE,
+        chess.BISHOP: BISHOP_VALUE,
+        chess.ROOK:   ROOK_VALUE,
+        chess.QUEEN:  QUEEN_VALUE,
+    }
+
+    # Counts for current side (c) and opponent (~c)
+    us = board.turn
+    them = not us
+
+    # 1. Pawn Difference
+    # (pos.count<PAWN>(c) - pos.count<PAWN>(~c))
+    pawn_score = (
+        len(board.pieces(chess.PAWN, us)) - 
+        len(board.pieces(chess.PAWN, them))
+    ) * PAWN_VALUE
+
+    # 2. Non-Pawn Material (pos.non_pawn_material(c))
+    def non_pawn_material(color: chess.Color) -> int:
+        mat = 0
+        for piece_type, value in piece_values.items():
+            mat += len(board.pieces(piece_type, color)) * value
+        return mat
+
+    us_non_pawn = non_pawn_material(us)
+    them_non_pawn = non_pawn_material(them)
+
+    # return PawnValue * (...) + pos.non_pawn_material(c) - pos.non_pawn_material(~c)
+    return pawn_score + us_non_pawn - them_non_pawn
+
+
+def filter_samples_impl(fens: list[str]) -> list[str]:
+    """
+    Filters FENs to keep only those that are NOT evaluated by the small net.
+    Logic: use_smallnet returns true if abs(simple_eval) > 962.
+    We want the inverse: keep if abs(simple_eval) <= 962.
+    """
+    THRESHOLD = 962
+    filtered = []
+    
+    for fen in fens:
+        board = chess.Board(fen)
+        
+        # Original filter: Check for check (engine limitation)
+        if board.is_check():
+            continue
+            
+        # New filter: Big Net logic
+        score = simple_eval(board)
+        if abs(score) <= THRESHOLD:
+            filtered.append(fen)
+            
+    return filtered
+
+
+def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool = True) -> npt.NDArray[np.bool_]:
     ZERO_POINT = 0.0  # Vary this to check hypothetical forced larger truncation to zero
-    BATCH_SIZE = 1000
+    BATCH_SIZE = 1024
 
     quantized_model = copy.deepcopy(model)
     quantize_ft(quantized_model)
@@ -995,24 +1062,49 @@ def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bo
     actmats = []
 
     done = 0
-    print("Processed {} positions.".format(done))
-    while done < count:
-        fens = filter_fens(next(fen_batch_provider))
+    print(f"Target count: {count}")
+    
+    try:
+        while done < count:
+            # Fetch raw FENs
+            raw_fens = next(fen_batch_provider)
+            
+            # Apply combined filtering (Valid Position + BigNet Only)
+            fens = filter_samples_impl(raw_fens)
+            
+            # If batch is empty after filtering, skip to next
+            if not fens:
+                continue
 
-        b = data_loader.get_sparse_batch_from_fens(
-            quantized_model.feature_set.name,
-            fens,
-            [0] * len(fens),
-            [1] * len(fens),
-            [0] * len(fens),
-        )
-        actmat = eval_ft(quantized_model, b).cpu()
-        actmat = actmat <= ZERO_POINT
-        actmats.append(actmat.numpy())
-        data_loader.destroy_sparse_batch(b)
+            # Limit to remaining count if we have too many
+            needed = count - done
+            if len(fens) > needed:
+                fens = fens[:needed]
 
-        done += len(fens)
-        print("Processed {} positions.".format(done))
+            b = data_loader.get_sparse_batch_from_fens(
+                quantized_model.feature_set.name,
+                fens,
+                [0] * len(fens),
+                [1] * len(fens),
+                [0] * len(fens),
+            )
+            
+            with torch.no_grad():
+                actmat = eval_ft(quantized_model, b).cpu()
+            
+            actmat = actmat <= ZERO_POINT
+            actmats.append(actmat.numpy())
+            
+            data_loader.destroy_sparse_batch(b)
+
+            done += len(fens)
+            print(f"Processed {done}/{count} positions.")
+            
+    except StopIteration:
+        print(f"Warning: Dataset exhausted. Gathered {done} samples.")
+
+    if not actmats:
+        raise ValueError("No samples passed the filter criteria.")
 
     return np.concatenate(actmats, axis=0)
 
@@ -1034,7 +1126,7 @@ def command_gather(args: argparse.Namespace) -> None:
 
     model.eval()
 
-    actmat = gather_impl(model, args.data, args.count)
+    actmat = gather_impl(model, args.data, args.count, args.filter_samples)
 
     with open(args.out, "wb") as file:
         np.save(file, actmat)
@@ -1141,6 +1233,9 @@ def main() -> None:
     )
     parser_gather.add_argument(
         "--count", type=int, default=1000, help="number of datapoints to process"
+    )
+    parser_gather.add_argument(
+        "--filter_samples", type=bool, default=True help="Filter samples or not according to small_net deferral logic."
     )
     parser_gather.add_argument(
         "--out", type=str, help="Filename under which to save the resulting ft matrix"

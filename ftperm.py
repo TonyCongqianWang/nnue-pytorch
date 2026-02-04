@@ -757,8 +757,9 @@ def find_perm_impl(
     # ------------------------------------------
     
     if skip_init or len(perm) != n_neurons:
-        print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
         perm = np.arange(n_neurons)
+    if len(perm) != n_neurons:
+        print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
 
     # Initial Validation Score
     init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)

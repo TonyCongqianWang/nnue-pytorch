@@ -797,7 +797,7 @@ def find_perm_impl(
     # -----------------------------
     for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
-        if i in [int(frac * max_iters) for frac in [0.5, 0.8, 0.9, 0.97]]:
+        if i in [int(frac * max_iters) for frac in [0.4, 0.8, 0.9, 0.97, 0.99]]:
             W1 /= 2
             current_batch_size *= 2
             
@@ -864,7 +864,7 @@ def find_perm_impl(
 
 
         # --- Periodic Validation (Indentation fixed: Runs every step check) ---
-        if validation_steps > 0 and (i + 1) % validation_steps == 0:
+        if validation_steps > 0 and (i + 1) % validation_steps == 0 or i > 0.99 * max_iters:
             val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
             elapsed = time.time() - start_time_global
             print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")

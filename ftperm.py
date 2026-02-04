@@ -6,20 +6,18 @@ Example use:
 
 1. Generate the activation matrix for some sample dataset.
 
-python ftperm.py gather --data=data\fishpack32.binpack --net=networks\nn-5af11540bbfe.nnue --count=1000000 --features=HalfKAv2_hm --out ftact1m.npy
-
-python ftperm.py gather --data=noob_master_leaf_static_d12_85M_0.binpack --net=nn-5af11540bbfe.nnue --count=10000 --features=HalfKAv2_hm --out ftact1m.npy
+python ftperm.py gather -data="/kaggle/input/fishtest-data/fishpack32.binpack" --net=networks/nn-c288c895ea92.nnue --count=1000000 --features=Full_Threats --l1=1024 --out ftact1m.npy
 
 2. Find a permutation
 
-python ftperm.py find_perm --data=ftact1m.npy --out=ftact.perm
+python ftperm.py find_perm --data=ftact1m.npy --out=ftact.perm --l1=1024
 
 3. Test the permutation against the baseline
 
 python ftperm.py eval_perm --data=ftact1m.npy --perm=ftact.perm
 
 4. Apply permutation and save
-python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm --ft_perm=ftact.perm
+python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=Full_Threats --ft_perm=ftact.perm
 
 ----------------------------------------------------------------
 

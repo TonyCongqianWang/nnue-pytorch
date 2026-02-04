@@ -294,6 +294,124 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
 
     return SwapResult(swaps, total_improvement)
 
+def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
+    """
+    Returns a series of independent left-rotates using a MIP solver 
+    to find the optimal 3-Set Packing.
+    """
+    print("Starting make_swaps_3 (MIP Optimization)")
+    start_time = time.time()
+
+    n_neurons = actmat.shape[1]
+    n_samples = actmat.shape[0]
+    n_blocks = n_neurons // ZERO_BLOCK_SIZE
+
+    score_changes = get_score_change(actmat, use_cupy=use_cupy)
+
+    score_changes = (
+        score_changes[:, :, None]
+        + score_changes[None, :, :]
+        + (score_changes.T)[:, None, :]
+    )
+
+    if use_cupy:
+        score_changes = cp.asnumpy(score_changes)
+
+    # 2. Aggregate to Block-level
+    block_view = score_changes.reshape(
+        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
+    )
+    
+    # --- FIX START ---
+    # Transpose to group block indices (0, 2, 4) and neuron indices (1, 3, 5)
+    # New shape: (Nb, Nb, Nb, 4, 4, 4)
+    block_view_t = block_view.transpose(0, 2, 4, 1, 3, 5)
+    
+    # Flatten last 3 dimensions: (Nb, Nb, Nb, 64)
+    flat_local = block_view_t.reshape(n_blocks, n_blocks, n_blocks, -1)
+    
+    max_gains = np.max(flat_local, axis=3)
+    max_indices_flat = np.argmax(flat_local, axis=3)
+    # --- FIX END ---
+
+    candidates = [] 
+    
+    # We iterate carefully to find unique cycles
+    it = np.nditer(max_gains, flags=['multi_index'])
+    for gain in it:
+        if gain <= 1e-9:
+            continue
+            
+        i, j, k = it.multi_index
+        
+        # Distinct blocks only
+        if i == j or j == k or i == k:
+            continue
+            
+        # Canonical order to avoid duplicates (i, j, k) vs (j, k, i)
+        if i > j or i > k:
+            continue
+            
+        candidates.append((gain, i, j, k, max_indices_flat[i, j, k]))
+
+    print(f"Found {len(candidates)} candidate cycles with positive gain.")
+    
+    if not candidates:
+        return SwapResult([], 0.0)
+
+    # 4. Formulate MIP
+    num_vars = len(candidates)
+    c_obj = -np.array([cand[0] for cand in candidates]) # Negative because scipy minimizes
+    
+    row_ind = []
+    col_ind = []
+    data = []
+    
+    for c_idx, (_, b1, b2, b3, _) in enumerate(candidates):
+        for b in [b1, b2, b3]:
+            row_ind.append(b)
+            col_ind.append(c_idx)
+            data.append(1)
+            
+    A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
+    constraints = LinearConstraint(A_eq, -np.inf, 1) # sum <= 1
+    bounds = Bounds(0, 1)
+    integrality = np.ones(num_vars) 
+    
+    res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
+    
+    if not res.success:
+        print("MIP Solver failed or found no solution.")
+        return SwapResult([], 0.0)
+        
+    # 5. Reconstruct
+    selected_indices = np.where(res.x > 0.5)[0]
+    
+    cycles = []
+    total_score_change = 0.0
+    
+    for idx in selected_indices:
+        gain, b_i, b_j, b_k, local_flat = candidates[idx]
+        total_score_change += gain
+        
+        # Unravel local neuron indices (base 4)
+        u_local = local_flat // 16
+        rem = local_flat % 16
+        v_local = rem // 4
+        w_local = rem % 4
+        
+        neuron_i = b_i * ZERO_BLOCK_SIZE + u_local
+        neuron_j = b_j * ZERO_BLOCK_SIZE + v_local
+        neuron_k = b_k * ZERO_BLOCK_SIZE + w_local
+        
+        cycles.append((neuron_i, neuron_j, neuron_k))
+
+    total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
+    print(f"Time elapsed: {time.time() - start_time:0.3f}")
+    print(f"Improvement this iteration: {total_improvement:0.3f}")
+    
+    return SwapResult(cycles, total_improvement)
+
 def get_best_cycles_n(
     actmat: npt.NDArray[np.bool_], n: int, use_cupy: bool = True
 ) -> SwapResult:
@@ -581,7 +699,8 @@ def find_perm_impl(
 
     stages: list[SwapFunction] = [
         make_swaps_2,
-        lambda m, c: get_best_cycles_n(m, 3, c),
+        make_swaps_3,
+        #lambda m, c: get_best_cycles_n(m, 3, c),
         #lambda m, c: get_best_cycles_n(m, 4, c),
     ]
     # The optimization routines are deterministic, so no need to retry.

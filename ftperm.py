@@ -748,7 +748,7 @@ def find_perm_impl(
     print("Running hierarchical initialization on training data...")
     
     # --- Reintroduced INIT_BATCH_SIZE logic ---
-    INIT_BATCH_SIZE = 2 ** 18
+    INIT_BATCH_SIZE = 2 ** 16
     if train_data.shape[0] > INIT_BATCH_SIZE:
         # Randomly sample a subset for the heavy initialization step
         init_indices = np.random.choice(train_data.shape[0], INIT_BATCH_SIZE, replace=False)

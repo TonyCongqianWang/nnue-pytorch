@@ -746,8 +746,18 @@ def find_perm_impl(
     # 3. Initialization (On Training Data Only)
     # -----------------------------
     print("Running hierarchical initialization on training data...")
-    # NOTE: hierarchical_initialization must accept actmat (the training portion)
-    perm = hierarchical_initialization(train_data, use_cupy=use_cupy)
+    
+    # --- Reintroduced INIT_BATCH_SIZE logic ---
+    INIT_BATCH_SIZE = 2 ** 18
+    if train_data.shape[0] > INIT_BATCH_SIZE:
+        # Randomly sample a subset for the heavy initialization step
+        init_indices = np.random.choice(train_data.shape[0], INIT_BATCH_SIZE, replace=False)
+        init_data = train_data[init_indices]
+    else:
+        init_data = train_data
+        
+    perm = hierarchical_initialization(init_data, use_cupy=use_cupy)
+    # ------------------------------------------
     
     if len(perm) != n_neurons:
         print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
@@ -767,8 +777,14 @@ def find_perm_impl(
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 2 ** 10
+    BASE_BATCH_SIZE = 2 ** 10
+    current_batch_size = BASE_BATCH_SIZE # Fixed: Was undefined 'BATCH_SIZE'
     W1 = 0.6
+
+    if train_data.shape[0] < current_batch_size * 2:
+        current_batch_size = train_data.shape[0] // 2
+        if current_batch_size < 16:
+            current_batch_size = train_data.shape[0]
     
     start_time_global = time.time()
     
@@ -778,14 +794,13 @@ def find_perm_impl(
         # --- Schedule & Batch Sizing ---
         if i in [int(frac * max_iters) for frac in [0.5, 0.8, 0.9, 0.97]]:
             W1 /= 2
-            BATCH_SIZE *= 2
-        
-        # Check if Training Data supports this Batch Size
-        current_batch_size = BATCH_SIZE
-        if train_data.shape[0] < current_batch_size * 2:
-            current_batch_size = train_data.shape[0] // 2
-            if current_batch_size < 16: # Safety floor
-                current_batch_size = train_data.shape[0]
+            current_batch_size *= 2
+            
+            # Check if Training Data supports this Batch Size
+            if train_data.shape[0] < current_batch_size * 2:
+                current_batch_size = train_data.shape[0] // 2
+                if current_batch_size < 16:
+                    current_batch_size = train_data.shape[0]
 
         # --- Get Training Batches ---
         batch1, batch2 = get_training_batches(train_data, perm, current_batch_size, use_cupy)
@@ -816,7 +831,6 @@ def find_perm_impl(
                 apply_rotate_right(perm, cycle)
             
             # Gain calculation (on training batch)
-            # Use current_batch_size to ensure percentage is accurate even if we clamped batch size
             current_pct_gain = (accepted_gain_raw / current_batch_size / n_blocks) * 100
 
             count_accepted = len(accepted_swaps)
@@ -841,7 +855,7 @@ def find_perm_impl(
                 print(f"Switching to stage {stage_id}")
 
 
-                # --- Periodic Validation ---
+        # --- Periodic Validation (Indentation fixed: Runs every step check) ---
         if validation_steps > 0 and (i + 1) % validation_steps == 0:
             val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
             elapsed = time.time() - start_time_global
@@ -852,7 +866,6 @@ def find_perm_impl(
     print(f"Final Validation Quality: {final_score:.4f}%")
     
     return perm
-
 
 # -------------------------------------------------------------
 
@@ -1073,7 +1086,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
     print(f"Target count: {count}")
     if filter_samples:
         print("Sample filtering is enabled")
-        num_filterered = 0
+        num_filtered = 0
     while done < count:
         # 1. Fill the buffer until we have enough for a GPU batch
         #    (or until the dataset runs out)
@@ -1084,7 +1097,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
                 valid_fens = raw_fens
                 if filter_samples:
                     valid_fens = filter_samples_impl(raw_fens)
-                    num_filterered += len(raw_fens) - len(valid_fens)
+                    num_filtered += len(raw_fens) - len(valid_fens)
                 fen_buffer.extend(valid_fens)
             except StopIteration:
                 dataset_exhausted = True
@@ -1125,7 +1138,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
         done += len(batch_fens)
         print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
         if filter_samples:
-            print("   Filtered Samples: {num_filterered}")
+            print(f"   Filtered Samples: {num_filtered}")
 
         if dataset_exhausted and not fen_buffer:
             print(f"Warning: Dataset exhausted before reaching target. Stopped at {done}.")

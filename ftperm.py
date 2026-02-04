@@ -644,10 +644,8 @@ def measure_validation_score(
     # but we strictly sample from val_data, never train_data.
     check_size = min(max_samples, n_val)
     
-    # Deterministic slicing for validation stability (optional) 
-    # or random sampling from the validation set:
-    indices = np.random.choice(n_val, check_size, replace=False)
-    sample_cpu = val_data[indices, :][:, perm]
+    # Deterministic slicing for validation stability
+    sample_cpu = val_data[:check_size, :][:, perm]
 
     if use_cupy:
         import cupy as cp
@@ -760,9 +758,9 @@ def find_perm_impl(
         print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
 
     # Initial Validation Score
-    init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons, max_samples=2 ** 20)
+    init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)
     print(f"Validation Quality Before Initialization: {init_quality_0:.4f}%")
-    init_quality_1 = measure_validation_score(val_data, perm, use_cupy, n_neurons, max_samples=2 ** 20)
+    init_quality_1 = measure_validation_score(val_data, perm, use_cupy, n_neurons)
     print(f"Validation Quality After Initialization: {init_quality_1:.4f}%")
 
     best_perm = perm.copy()
@@ -861,7 +859,7 @@ def find_perm_impl(
 
         # --- Periodic Validation (Indentation fixed: Runs every step check) ---
         if validation_steps > 0 and (i + 1) % validation_steps == 0 or i > 0.998 * max_iters:
-            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons, max_samples=2 ** 20)
+            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
             elapsed = time.time() - start_time_global
             print(f"--- [Val] Iter {i + 1}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
             if val_score > best_val_score:
@@ -871,7 +869,7 @@ def find_perm_impl(
 
     # Final Validation
     best_perm = best_perm if validation_steps > 0 else perm
-    final_score = measure_validation_score(val_data, best_perm, use_cupy, n_neurons, max_samples=2 ** 20)
+    final_score = measure_validation_score(val_data, best_perm, use_cupy, n_neurons)
     print(f"Final Validation Quality: {final_score:.4f}%")
     
     return best_perm

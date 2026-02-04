@@ -509,7 +509,6 @@ def solve_dense_matching(score_matrix: npt.NDArray, size: int) -> list[tuple[int
 def hierarchical_initialization(
     actmat: npt.NDArray[np.bool_], use_cupy: bool = True,
 ) -> npt.NDArray[np.int_]:
-    print("Running hierarchical initialization...")
     t0 = time.time()
     
     n_samples, n_neurons = actmat.shape
@@ -602,10 +601,6 @@ def hierarchical_initialization(
 import time
 import numpy as np
 import numpy.typing as npt
-
-# Assumed imports (uncomment if running standalone)
-# import cupy as cp 
-# from your_module import hierarchical_initialization, get_swapped_zero_positive_count, ...
 
 def prepare_data_split(
     actmat: npt.NDArray, 
@@ -718,6 +713,7 @@ def find_perm_impl(
     actmat: npt.NDArray[np.bool_], 
     use_cupy: bool, 
     L1: int,
+    skip_init: bool = False,
     max_iters: int = 2000,
     log_steps: int = 50,
     validation_steps: int = 200,
@@ -745,21 +741,22 @@ def find_perm_impl(
 
     # 3. Initialization (On Training Data Only)
     # -----------------------------
-    print("Running hierarchical initialization on training data...")
-    
-    # --- Reintroduced INIT_BATCH_SIZE logic ---
-    INIT_BATCH_SIZE = 2 ** 16
-    if train_data.shape[0] > INIT_BATCH_SIZE:
-        # Randomly sample a subset for the heavy initialization step
-        init_indices = np.random.choice(train_data.shape[0], INIT_BATCH_SIZE, replace=False)
-        init_data = train_data[init_indices]
-    else:
-        init_data = train_data
+    if not skip_init:
+        print("Running hierarchical initialization on training data...")
         
-    perm = hierarchical_initialization(init_data, use_cupy=use_cupy)
+        # --- Reintroduced INIT_BATCH_SIZE logic ---
+        INIT_BATCH_SIZE = 2 ** 16
+        if train_data.shape[0] > INIT_BATCH_SIZE:
+            # Randomly sample a subset for the heavy initialization step
+            init_indices = np.random.choice(train_data.shape[0], INIT_BATCH_SIZE, replace=False)
+            init_data = train_data[init_indices]
+        else:
+            init_data = train_data
+            
+        perm = hierarchical_initialization(init_data, use_cupy=use_cupy)
     # ------------------------------------------
     
-    if len(perm) != n_neurons:
+    if skip_init or len(perm) != n_neurons:
         print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
         perm = np.arange(n_neurons)
 
@@ -1226,7 +1223,7 @@ def command_find_perm(args: argparse.Namespace) -> None:
     with open(args.data, "rb") as file:
         actmat = np.load(file)
 
-    perm = find_perm_impl(actmat, args.use_cupy, args.l1, args.max_iters)
+    perm = find_perm_impl(actmat, args.use_cupy, args.l1, args.skip_init, args.max_iters)
 
     # perm = np.random.permutation([i for i in range(L1)])
     with open(args.out, "wb") as file:
@@ -1240,6 +1237,8 @@ def ft_optimize(
     actmat_save_path: str | None = None,
     perm_save_path: str | None = None,
     filter_samples: bool = True,
+    skip_init: bool = False,
+    max_iters: int = 6000,
     use_cupy: bool = True,
 ) -> None:
     print("Gathering activation data...")
@@ -1249,7 +1248,7 @@ def ft_optimize(
             np.save(file, actmat)
 
     print("Finding permutation...")
-    perm = find_perm_impl(actmat, use_cupy, model.L1)
+    perm = find_perm_impl(actmat, use_cupy, model.L1, skip_init, max_iters)
     if perm_save_path is not None:
         with open(perm_save_path, "wb") as file:
             np.save(file, perm)
@@ -1311,6 +1310,9 @@ def main() -> None:
     )
     parser_find_perm.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     parser_find_perm.add_argument("--max_iters", type=int, default=2000)
+    parser_gather.add_argument(
+        "--filter_samples", type=bool, default=False, help="Skip init with hierachical matching."
+    )
     parser_find_perm.set_defaults(func=command_find_perm)
 
     parser_eval_perm = subparsers.add_parser("eval_perm", help="a help")

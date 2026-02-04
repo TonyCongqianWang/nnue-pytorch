@@ -879,8 +879,8 @@ def find_perm_impl(
     
     start_time_global = time.time()
 
-    for i in range(3000):
-        if i % 1000 == 0 and i > 0:
+    for i in range(2000):
+        if i in [1000, 1500, 1800]:
             W1 /= 2
             BATCH_SIZE *= 2
         if n_samples >= BATCH_SIZE * 2:

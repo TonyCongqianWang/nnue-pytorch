@@ -719,8 +719,8 @@ def find_perm_impl(
     use_cupy: bool, 
     L1: int,
     max_iters: int = 2000,
-    log_steps: int = 10,
-    validation_steps: int = 50,
+    log_steps: int = 50,
+    validation_steps: int = 200,
     validation_set_size: float = 0.25
 ) -> npt.NDArray[np.int_]:
     
@@ -849,7 +849,10 @@ def find_perm_impl(
             stage_id = 0 
         else:
             num_fails += 1
-            if num_fails > stages_max_fails[stage_id]:
+            max_fails = stages_max_fails[stage_id]
+            if log_steps > 0 and (i + 1) % log_steps == 0:
+                print(f"Iter {i+1} / {max_iters} (Stage {stage_id}): Fail {log_steps} / {max_fails}.")
+            if num_fails > max_fails:
                 print(f"Iter {i+1}: Stage {stage_id} max fails reached.")
                 num_fails = 0
                 stage_id += 1
@@ -1080,7 +1083,8 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
     # Configuration
     GPU_BATCH_SIZE = 1024   # Optimal size for your GPU
     DISK_READ_SIZE = 16384  # Read large chunks to minimize I/O overhead
-
+    log_steps = int(count / 100)
+    
     quantized_model = copy.deepcopy(model)
     quantize_ft(quantized_model)
     quantized_model.cuda()
@@ -1090,7 +1094,8 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
 
     actmats = []
     fen_buffer = []  # The holding area
-    
+
+    old_done = 0
     done = 0
     print(f"Target count: {count}")
     if filter_samples:
@@ -1145,9 +1150,11 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
         data_loader.destroy_sparse_batch(b)
 
         done += len(batch_fens)
-        print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
-        if filter_samples:
-            print(f"   Filtered Samples: {num_filtered}")
+        if done > old_done + log_steps:
+            old_done = done
+            print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
+            if filter_samples:
+                print(f"   Filtered Samples: {num_filtered}")
 
         if dataset_exhausted and not fen_buffer:
             print(f"Warning: Dataset exhausted before reaching target. Stopped at {done}.")

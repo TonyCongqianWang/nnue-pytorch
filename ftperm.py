@@ -870,7 +870,7 @@ def find_perm_impl(
         make_swaps_2_3,
     ]
     
-    stages_max_fails = [5, 5]
+    stages_max_fails = [5, 15]
     stage_id = 0
     num_fails = 0
     

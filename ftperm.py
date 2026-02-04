@@ -633,7 +633,7 @@ def measure_validation_score(
     perm: npt.NDArray, 
     use_cupy: bool, 
     n_neurons: int, 
-    max_samples: int = 20000
+    max_samples: int = 2 ** 18
 ) -> float:
     """
     Measures quality on the Held-Out Validation Set.
@@ -762,9 +762,9 @@ def find_perm_impl(
         print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
 
     # Initial Validation Score
-    init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)
+    init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons, max_samples=2 ** 20)
     print(f"Validation Quality Before Initialization: {init_quality_0:.4f}%")
-    init_quality_1 = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+    init_quality_1 = measure_validation_score(val_data, perm, use_cupy, n_neurons, max_samples=2 ** 20)
     print(f"Validation Quality After Initialization: {init_quality_1:.4f}%")
 
     best_perm = perm.copy()
@@ -873,7 +873,7 @@ def find_perm_impl(
 
     # Final Validation
     best_perm = best_perm if validation_steps > 0 else perm
-    final_score = measure_validation_score(val_data, best_perm, use_cupy, n_neurons)
+    final_score = measure_validation_score(val_data, best_perm, use_cupy, n_neurons, max_samples=2 ** 20)
     print(f"Final Validation Quality: {final_score:.4f}%")
     
     return best_perm

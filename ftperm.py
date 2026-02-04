@@ -1010,13 +1010,13 @@ def find_perm_impl(
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 2 ** 14
-    W1 = 0.25 # Weights for validation (0.5 means equal weight to finding and validating batch)
+    BATCH_SIZE = 2 ** 12
+    W1 = 0.4 # Weights for validation (0.5 means equal weight to finding and validating batch)
     
     start_time_global = time.time()
 
     for i in range(4000):
-        if i in [2500, 3500, 3800]:
+        if i in [2500, 3600, 3800, 3900]:
             W1 /= 2
             BATCH_SIZE *= 2
         if n_samples >= BATCH_SIZE * 2:

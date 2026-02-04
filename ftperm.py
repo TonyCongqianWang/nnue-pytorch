@@ -764,8 +764,10 @@ def find_perm_impl(
         perm = np.arange(n_neurons)
 
     # Initial Validation Score
+    init_quality = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)
+    print(f"Validation Quality Before Initialization: {init_quality:.4f}%")
     init_quality = measure_validation_score(val_data, perm, use_cupy, n_neurons)
-    print(f"Initial Validation Quality: {init_quality:.4f}%")
+    print(f"Validation Quality After Initialization: {init_quality:.4f}%")
 
     # 4. Setup Loop
     # -----------------------------

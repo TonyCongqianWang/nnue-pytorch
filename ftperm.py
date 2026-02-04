@@ -34,8 +34,13 @@ python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm --
 import argparse
 import copy
 from dataclasses import dataclass
+import itertools
 import time
 from typing import Callable, Generator, TypeAlias
+
+import networkx as nx
+from scipy.optimize import milp, LinearConstraint, Bounds
+from scipy.sparse import coo_matrix
 
 import chess
 import cupy as cp
@@ -211,96 +216,6 @@ class SwapResult:
 
 SwapFunction: TypeAlias = Callable[[npt.NDArray[np.bool_], bool], SwapResult]
 
-
-import networkx as nx
-from scipy.optimize import milp, LinearConstraint, Bounds
-from scipy.sparse import coo_matrix
-
-def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
-    """
-    Returns a series of independent 2-swap operations using Maximum Weight Matching
-    to find the mathematically optimal set of block pairs.
-    """
-    start_time = time.time()
-    print("Starting make_swaps_2 (Exact Matching)")
-
-    n_neurons = actmat.shape[1]
-    n_samples = actmat.shape[0]
-    n_blocks = n_neurons // ZERO_BLOCK_SIZE
-
-    # 1. Compute Score Change Matrix
-    # shape: (n_neurons, n_neurons)
-    score_change = get_score_change(actmat, use_cupy=use_cupy)
-    
-    # Sum score_change[i, j] + score_change[j, i] for symmetric swap gain
-    # Move to CPU/numpy for graph operations if currently on GPU
-    if use_cupy:
-        score_change = cp.asnumpy(score_change)
-    
-    score_change = score_change + score_change.T
-
-    # 2. Aggregate scores to Block-level
-    # We view the matrix as (Block, 4, Block, 4) to find best swap per block-pair
-    # Shape transformation: (Nb, 4, Nb, 4)
-    block_view = score_change.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
-    
-    # Find the max possible gain between any two blocks u and v
-    # max_gains[u, v] = max gain achievable by swapping a neuron from block u with one from block v
-    max_gains = np.max(block_view, axis=(1, 3))
-    
-    # We also need to know *which* neurons generated that max gain
-    # argmax linearizes the inner dimensions (4*4=16), so we unravel later
-    max_indices = np.argmax(block_view.reshape(n_blocks, n_blocks, -1), axis=2)
-
-    # 3. Construct Graph for Matching
-    G = nx.Graph()
-    G.add_nodes_from(range(n_blocks))
-    
-    # Add edges only for positive gains. 
-    # Since the matrix is symmetric, we only look at upper triangle to avoid duplicates
-    for i in range(n_blocks):
-        for j in range(i + 1, n_blocks):
-            weight = max_gains[i, j]
-            if weight > 0:
-                G.add_edge(i, j, weight=weight)
-
-    # 4. Solve Maximum Weight Matching
-    # This finds the set of disjoint edges that maximizes sum(weights)
-    matching = nx.max_weight_matching(G, maxcardinality=False)
-
-    # 5. Reconstruct Neuron Swaps
-    swaps = []
-    total_score_change = 0.0
-
-    for u, v in matching:
-        # Retrieve the gain
-        gain = max_gains[u, v]
-        total_score_change += gain
-        
-        # Recover specific neuron indices (0-15 flat index relative to the u,v block pair)
-        flat_idx = max_indices[u, v]
-        u_local = flat_idx // ZERO_BLOCK_SIZE
-        v_local = flat_idx % ZERO_BLOCK_SIZE
-        
-        # Map back to global neuron indices
-        neuron_i = u * ZERO_BLOCK_SIZE + u_local
-        neuron_j = v * ZERO_BLOCK_SIZE + v_local
-        
-        swaps.append((neuron_i, neuron_j))
-        
-        if VERBOSE:
-             print(f"Swapping {neuron_i} and {neuron_j} (Blocks {u},{v}) for {gain}")
-
-    total_improvement = (
-        total_score_change / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
-    )
-
-    print(f"Time elapsed: {time.time() - start_time:0.3f}")
-    print(f"Improvement this iteration: {total_improvement:0.3f}")
-
-    return SwapResult(swaps, total_improvement)
-
-
 def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
     """
     Returns a series of independent 2-swap operations using Maximum Weight Matching
@@ -379,125 +294,279 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
 
     return SwapResult(swaps, total_improvement)
 
-
-def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
+def get_best_cycles_n(
+    actmat: npt.NDArray[np.bool_], n: int, use_cupy: bool = True
+) -> SwapResult:
     """
-    Returns a series of independent left-rotates using a MIP solver 
-    to find the optimal 3-Set Packing.
+    General solver for n-cycles (n >= 2).
+    Uses iterative path extension to efficiently compute the gain of all block-cycles
+    without exploding memory, then solves the packing problem using MIP.
     """
-    print("Starting make_swaps_3 (MIP Optimization)")
+    print(f"Starting get_best_cycles_n (n={n})")
     start_time = time.time()
 
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
 
-    score_changes = get_score_change(actmat, use_cupy=use_cupy)
-
-    score_changes = (
-        score_changes[:, :, None]
-        + score_changes[None, :, :]
-        + (score_changes.T)[:, None, :]
-    )
-
+    # 1. Compute Base Score Matrix (Neurons x Neurons)
+    score_change = get_score_change(actmat, use_cupy=use_cupy)
+    
+    # Move to numpy for complex indexing/looping
     if use_cupy:
-        score_changes = cp.asnumpy(score_changes)
+        score_change = cp.asnumpy(score_change)
 
-    # 2. Aggregate to Block-level
-    block_view = score_changes.reshape(
-        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
+    # 2. Create Block Interaction View
+    # Shape: (Nb, 4, Nb, 4)
+    # block_view[i, u, j, v] = gain of moving neuron u (block i) to pos v (block j)
+    block_view = score_change.reshape(
+        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
     )
     
-    # --- FIX START ---
-    # Transpose to group block indices (0, 2, 4) and neuron indices (1, 3, 5)
-    # New shape: (Nb, Nb, Nb, 4, 4, 4)
-    block_view_t = block_view.transpose(0, 2, 4, 1, 3, 5)
+    # 3. Iteratively compute max path gains
+    # We want to compute:
+    # Path[b1, ..., bk, u_start, u_end] = max gain of path b1->...->bk
+    # connecting neuron u_start (in b1) to u_end (in bk)
     
-    # Flatten last 3 dimensions: (Nb, Nb, Nb, 64)
-    flat_local = block_view_t.reshape(n_blocks, n_blocks, n_blocks, -1)
+    # Start with length 1 paths (edges)
+    # Shape: (Nb, Nb, 4, 4)
+    # Transpose to: (Nb, Nb, 4, 4) -> (Nb, Nb, 4, 4) (already correct structure)
+    current_paths = block_view.transpose(0, 2, 1, 3) 
     
-    max_gains = np.max(flat_local, axis=3)
-    max_indices_flat = np.argmax(flat_local, axis=3)
-    # --- FIX END ---
-
-    candidates = [] 
+    # To reconstruct the best cycle later, we need to store which neurons were used.
+    # Because n is small, we can just re-evaluate the specific cycle candidates 
+    # at the end, rather than storing a massive pointer tensor.
     
-    # We iterate carefully to find unique cycles
-    it = np.nditer(max_gains, flags=['multi_index'])
-    for gain in it:
-        if gain <= 1e-9:
-            continue
-            
-        i, j, k = it.multi_index
+    # Iterate to extend paths up to length n-1
+    # We stop at n-1 because the last step is closing the cycle (k -> start)
+    for step in range(n - 2):
+        print(f"  Extending paths to length {step + 2}...")
         
-        # Distinct blocks only
-        if i == j or j == k or i == k:
-            continue
-            
-        # Canonical order to avoid duplicates (i, j, k) vs (j, k, i)
-        if i > j or i > k:
-            continue
-            
-        candidates.append((gain, i, j, k, max_indices_flat[i, j, k]))
+        # Current: (Nb_1, ..., Nb_k, u_start, u_curr)
+        # Next Edge: (Nb_k, Nb_{k+1}, u_curr, u_next)
+        # Target: (Nb_1, ..., Nb_{k+1}, u_start, u_next)
+        
+        # We perform a "Max-Plus" matrix multiplication over the `u_curr` dimension
+        # and broadcasting over the block dimensions.
+        
+        # 1. Expand dims for broadcasting
+        # Current: (..., Nb_k, 1,      u_start, u_curr, 1)
+        # Next:    (..., 1,    Nb_k+1, 1,       u_curr, u_next)
+        
+        s_curr = current_paths.shape
+        nb_dims = s_curr[:-2] # (Nb, ..., Nb)
+        
+        # Reshape for broadcast
+        # A: (Nb..., Nb_last, 1, 4, 4, 1)
+        A = current_paths.reshape(*nb_dims, 1, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE, 1)
+        
+        # B: (1..., Nb_last, Nb_next, 1, 4, 4)
+        # We use block_view: (Nb_last, 4, Nb_next, 4) -> (Nb_last, Nb_next, 4, 4)
+        B_raw = block_view.transpose(0, 2, 1, 3)
+        # Add singleton dims for the history blocks
+        B = B_raw.reshape(*(1,) * (len(nb_dims) - 1), n_blocks, n_blocks, 1, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE)
+        
+        # Sum: A + B
+        # Shape: (Nb..., Nb_last, Nb_next, 4, 4, 4)
+        # The axes are (..., u_start, u_curr, u_next)
+        summed = A + B
+        
+        # Maximize over the connecting neuron `u_curr` (axis -2)
+        # Result: (Nb..., Nb_last, Nb_next, u_start, u_next)
+        current_paths = np.max(summed, axis=-2)
+        
+        # Check memory usage safety
+        if current_paths.size > 200_000_000:
+             print("Warning: Intermediate tensor large. Optimization might be slow or OOM.")
 
-    print(f"Found {len(candidates)} candidate cycles with positive gain.")
+    # 4. Close the loop
+    print("  Closing cycles...")
+    # Current paths: (b1, ..., b_{n-1}, u_start, u_{n-1})
+    # Closing edge: (b_{n-1}, b1, u_{n-1}, u_start)
+    
+    # A: (b1, ..., b_{n-1}, u_start, u_{n-1})
+    # B: (b_{n-1}, b1, u_{n-1}, u_start)
+    
+    # We need to align b1 and b_{n-1}
+    # A is (Nb, ..., Nb, 4, 4)
+    # B is derived from block_view.transpose(0, 2, 1, 3) -> (Nb, Nb, 4, 4)
+    
+    # Let's use fancy indexing or a loop for the closing step to avoid constructing
+    # the full NxN tensor if possible.
+    # But for n=4, the tensor is (Nb, Nb, Nb, Nb). 268M elements. It fits.
+    
+    # Prepare A: (b1, ..., bn-1, u1, un)
+    # We want final shape (b1, ..., bn-1) containing max cycle score
+    
+    # We can iterate over b1 to save memory if n is large
+    candidates = []
+    
+    # Pre-transpose block view for fast access: (u_prev, u_start, b_prev, b_start)
+    # Original block_view: (Nb_prev, u_prev, Nb_start, u_start)
+    closing_edges = block_view.transpose(1, 3, 0, 2)
+    
+    # current_paths: (b1, b2, ..., bn-1, u1, un-1)
+    # We iterate b1 to reduce memory pressure
+    for b1 in range(n_blocks):
+        # Slice paths starting at b1
+        # shape: (b2, ..., bn-1, u1, un-1)
+        paths_slice = current_paths[b1] 
+        
+        # Get closing edges for b1: connect bn-1 -> b1
+        # shape: (u_prev, u_start, bn-1)
+        # We select b_start = b1
+        closer = closing_edges[:, :, :, b1] 
+        
+        # paths_slice axes: (b2..., bn-1, u1, un-1)
+        # closer axes: (un-1, u1, bn-1)
+        
+        # We need to match un-1 (last neuron) and u1 (first neuron)
+        # Let's move axes of closer to match paths_slice
+        # closer: (bn-1, u1, un-1) -> transpose(2, 1, 0)
+        closer_aligned = closer.transpose(2, 1, 0)
+        
+        # Broadcast closer to match intermediate blocks (b2...bn-2)
+        # paths_slice has n-2 block dimensions.
+        # closer_aligned needs to broadcast over the first n-3 dimensions.
+        
+        target_shape = paths_slice.shape # (Nb, ..., Nb, 4, 4)
+        
+        # Reshape closer to (1, ..., 1, Nb, 4, 4)
+        # Number of intermediate dims = (n-1) - 1 - 1 = n-3
+        # (Minus b1, minus bn-1)
+        reshape_dims = (1,) * (n - 2 - 1) + (n_blocks, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE)
+        closer_view = closer_aligned.reshape(reshape_dims)
+        
+        # Total Cycle Score = Path + Closing Edge
+        # Shape: (Nb..., Nb, 4, 4)
+        total_scores = paths_slice + closer_view
+        
+        # Max over specific neurons (u1, un-1)
+        # Shape: (Nb..., Nb)
+        max_scores = np.max(total_scores, axis=(-2, -1))
+        
+        # Indices of best neurons (u1, un-1) flat index 0..15
+        max_neuron_indices = np.argmax(total_scores.reshape(*max_scores.shape, -1), axis=-1)
+        
+        # Find candidates > 0
+        # This gives us indices (b2, ..., bn-1)
+        locs = np.argwhere(max_scores > 1e-9)
+        
+        for loc in locs:
+            gain = max_scores[tuple(loc)]
+            # loc is (b2, ..., bn-1)
+            # Full cycle: (b1, *loc)
+            cycle_blocks = (b1,) + tuple(loc)
+            
+            # Constraints: Distinct blocks
+            if len(set(cycle_blocks)) != n:
+                continue
+            
+            # Constraints: Canonical order (start with smallest index)
+            # This handles cycle uniqueness (1,2,3) == (2,3,1)
+            if b1 != min(cycle_blocks):
+                continue
+
+            # Retrieve neuron info to reconstruct exact cycle later
+            # (We stored just the start/end interaction max, but we need intermediates?)
+            # Actually, for MIP we just need the gain and the blocks.
+            # We can re-calculate exact neurons only for the winning cycles.
+            candidates.append((gain, cycle_blocks))
+
+    print(f"  Found {len(candidates)} candidate {n}-cycles.")
     
     if not candidates:
         return SwapResult([], 0.0)
 
-    # 4. Formulate MIP
+    # 5. Solve MIP
+    # Maximize sum(gain * x) s.t. each block used at most once
     num_vars = len(candidates)
-    c_obj = -np.array([cand[0] for cand in candidates]) # Negative because scipy minimizes
+    c_obj = -np.array([c[0] for c in candidates])
     
     row_ind = []
     col_ind = []
     data = []
     
-    for c_idx, (_, b1, b2, b3, _) in enumerate(candidates):
-        for b in [b1, b2, b3]:
+    for c_idx, (_, blocks) in enumerate(candidates):
+        for b in blocks:
             row_ind.append(b)
             col_ind.append(c_idx)
             data.append(1)
             
     A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
-    constraints = LinearConstraint(A_eq, -np.inf, 1) # sum <= 1
+    constraints = LinearConstraint(A_eq, -np.inf, 1)
     bounds = Bounds(0, 1)
-    integrality = np.ones(num_vars) 
+    integrality = np.ones(num_vars)
     
+    print("  Solving MIP...")
     res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
     
     if not res.success:
-        print("MIP Solver failed or found no solution.")
+        print("MIP Solver failed.")
         return SwapResult([], 0.0)
         
-    # 5. Reconstruct
+    # 6. Reconstruct Results
     selected_indices = np.where(res.x > 0.5)[0]
+    final_cycles = []
+    total_gain = 0.0
     
-    cycles = []
-    total_score_change = 0.0
-    
+    # To find exact neurons for the selected blocks, we do a mini-search
+    # This is cheap (only done for selected cycles)
     for idx in selected_indices:
-        gain, b_i, b_j, b_k, local_flat = candidates[idx]
-        total_score_change += gain
+        gain, blocks = candidates[idx]
+        total_gain += gain
         
-        # Unravel local neuron indices (base 4)
-        u_local = local_flat // 16
-        rem = local_flat % 16
-        v_local = rem // 4
-        w_local = rem % 4
+        # Re-resolve the specific neurons for this block tuple
+        # We assume blocks is (b1, b2, ..., bn)
+        # We want u1, u2, ..., un such that u_k in b_k
+        # maximizing sum S[b_k, b_{k+1}, u_k, u_{k+1}]
         
-        neuron_i = b_i * ZERO_BLOCK_SIZE + u_local
-        neuron_j = b_j * ZERO_BLOCK_SIZE + v_local
-        neuron_k = b_k * ZERO_BLOCK_SIZE + w_local
+        # Dynamic programming for specific cycle
+        # dp[k, u_current] = max score to reach neuron u_current in block k
+        # parent[k, u_current] = neuron in previous block
         
-        cycles.append((neuron_i, neuron_j, neuron_k))
+        # Initialization (Block 0)
+        # We can't pick u0 independently of un.
+        # So we just run the full exhaustive search for the specific tuple
+        # Size: 4^n. For n=4, 256 checks. Trivial.
+        
+        best_cycle_neurons = None
+        best_cycle_score = -1.0
+        
+        local_indices = [range(ZERO_BLOCK_SIZE) for _ in range(n)]
+        for us in itertools.product(*local_indices):
+            # us is (u1_local, u2_local, ...)
+            current_score = 0
+            for k in range(n):
+                b_curr = blocks[k]
+                b_next = blocks[(k + 1) % n]
+                u_curr = us[k]
+                u_next = us[(k + 1) % n]
+                
+                # Retrieve score from block_view
+                # block_view shape: (Nb, u, Nb, v)
+                s = block_view[b_curr, u_curr, b_next, u_next]
+                current_score += s
+            
+            if current_score > best_cycle_score:
+                best_cycle_score = current_score
+                best_cycle_neurons = us
+                
+        # Convert local to global
+        global_cycle = []
+        for k in range(n):
+            global_idx = blocks[k] * ZERO_BLOCK_SIZE + best_cycle_neurons[k]
+            global_cycle.append(global_idx)
+            
+        final_cycles.append(tuple(global_cycle))
+        if VERBOSE:
+            print(f"Cycle {global_cycle} Gain: {gain}")
 
-    total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
+    total_improvement = total_gain / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
     print(f"Time elapsed: {time.time() - start_time:0.3f}")
     print(f"Improvement this iteration: {total_improvement:0.3f}")
-    
-    return SwapResult(cycles, total_improvement)
 
+    return SwapResult(final_cycles, total_improvement)
 
 def find_perm_impl(
     actmat: npt.NDArray[np.bool_], use_cupy: bool, L1: int
@@ -510,7 +579,10 @@ def find_perm_impl(
     total_score_change = 0
     perm = np.arange(L1 // 2)
 
-    stages: list[SwapFunction] = [make_swaps_2, make_swaps_3]
+    stages: list[SwapFunction] = [
+        make_swaps_2, lambda m,
+        c: get_best_cycles_n(m, 3, c),
+    ]
     # The optimization routines are deterministic, so no need to retry.
     stages_max_fails = [0, 0]
     stage_id = 0

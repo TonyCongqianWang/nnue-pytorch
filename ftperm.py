@@ -712,7 +712,7 @@ def find_perm_impl(
     skip_init: bool = False,
     max_iters: int = 2000,
     log_steps: int = 50,
-    validation_steps: int = 200,
+    validation_steps: int = 100,
     validation_set_size: float = 0.25
 ) -> npt.NDArray[np.int_]:
     
@@ -845,7 +845,7 @@ def find_perm_impl(
             num_fails += 1
             max_fails = stages_max_fails[stage_id]
             if log_steps > 0 and (i + 1) % log_steps == 0:
-                print(f"Iter {i+1} / {max_iters} (Stage {stage_id}): Fail {log_steps} / {max_fails}.")
+                print(f"Iter {i+1} / {max_iters} (Stage {stage_id}): Fail {num_fails} / {max_fails}.")
             if num_fails > max_fails:
                 print(f"Iter {i+1}: Stage {stage_id} max fails reached.")
                 num_fails = 0
@@ -1054,7 +1054,7 @@ def filter_samples_impl(fens: list[str]) -> list[str]:
     Logic: use_smallnet returns true if abs(simple_eval) > 962.
     We want the inverse: keep if abs(simple_eval) <= 962.
     """
-    THRESHOLD = 962
+    THRESHOLD = 600
     filtered = []
     
     for fen in fens:

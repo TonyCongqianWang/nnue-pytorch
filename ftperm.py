@@ -764,10 +764,13 @@ def find_perm_impl(
         perm = np.arange(n_neurons)
 
     # Initial Validation Score
-    init_quality = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)
-    print(f"Validation Quality Before Initialization: {init_quality:.4f}%")
-    init_quality = measure_validation_score(val_data, perm, use_cupy, n_neurons)
-    print(f"Validation Quality After Initialization: {init_quality:.4f}%")
+    init_quality_0 = measure_validation_score(val_data, np.arange(n_neurons), use_cupy, n_neurons)
+    print(f"Validation Quality Before Initialization: {init_quality_0:.4f}%")
+    init_quality_1 = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+    print(f"Validation Quality After Initialization: {init_quality_1:.4f}%")
+
+    best_perm = perm.copy()
+    best_val_score = max(init_quality_0, init_quality_1)
 
     # 4. Setup Loop
     # -----------------------------
@@ -862,12 +865,16 @@ def find_perm_impl(
             val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
             elapsed = time.time() - start_time_global
             print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
+            if val_score > best_val_score:
+                print(f"--- [Val]     New best score: {val_score:.4f} from {best_val_score:.4f} ---")
+                best_perm = perm.copy()
+                best_val_score = val_score
 
     # Final Validation
     final_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
     print(f"Final Validation Quality: {final_score:.4f}%")
     
-    return perm
+    return best_perm if validation_steps > 0 else perm
 
 # -------------------------------------------------------------
 

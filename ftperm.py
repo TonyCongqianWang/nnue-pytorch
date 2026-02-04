@@ -939,8 +939,9 @@ def find_perm_impl(
             current_pct_gain = (accepted_gain_raw / BATCH_SIZE / n_blocks) * 100
             total_pct_improvement += current_pct_gain
 
+            count_candidates = len(res1.swaps)
             count_accepted = len(accepted_swaps)
-            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted}/{len(res1)} swaps.")
+            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted}/{count_candidates} swaps.")
             print(f"  Iter improvement: {current_pct_gain:0.5f}%")
             print(f"  Total improvement: {total_pct_improvement:0.5f}%")
             print(f"  Time elapsed: {time.time() - start_time_global:0.3f}s")

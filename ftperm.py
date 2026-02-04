@@ -844,7 +844,122 @@ def get_best_cycles_n(
     total_improvement = total_gain / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
     return SwapResult(final_cycles, total_improvement)
 
+def solve_dense_matching(score_matrix: npt.NDArray, size: int) -> list[tuple[int, int]]:
+    """
+    Solves Maximum Weight Matching for a dense symmetric matrix.
+    Returns a list of pairs (i, j).
+    """
+    # Create graph from adjacency matrix
+    # We only take the upper triangle to avoid duplicates and self-loops
+    score_matrix = np.triu(score_matrix, k=1)
+    
+    # Get indices where score > 0
+    rows, cols = np.nonzero(score_matrix)
+    weights = score_matrix[rows, cols]
+    
+    G = nx.Graph()
+    G.add_nodes_from(range(size))
+    
+    # Bulk add edges (much faster than iterating)
+    edges = zip(rows, cols, weights)
+    G.add_weighted_edges_from(edges)
+    
+    # Calculate matching
+    matching = nx.max_weight_matching(G, maxcardinality=True)
+    return list(matching)
 
+def hierarchical_initialization(
+    actmat: npt.NDArray[np.bool_], use_cupy: bool = True
+) -> npt.NDArray[np.int_]:
+    print("Running hierarchical initialization...")
+    t0 = time.time()
+    
+    n_samples, n_neurons = actmat.shape
+    
+    # Ensure data is on the correct device for heavy matrix multiplication
+    if use_cupy:
+        actmat_gpu = cp.asarray(actmat, dtype=cp.float32)
+    else:
+        actmat_gpu = actmat.astype(np.float32)
+
+    # --- Phase 1: Match Individual Neurons (1 -> 2) ---
+    # Compute co-occurrence matrix: C[i, j] = count of samples where both i and j are zero (True)
+    # Since inputs are boolean/1.0, dot product gives the count of shared 1s.
+    scores_1 = actmat_gpu.T @ actmat_gpu
+    
+    if use_cupy:
+        scores_1 = cp.asnumpy(scores_1)
+        
+    pairs = solve_dense_matching(scores_1, n_neurons)
+    
+    # Sort pairs internally for consistency and create a mapping
+    pairs = [tuple(sorted(p)) for p in pairs]
+    # Handle any unmatched neurons (shouldn't happen with even L1, but good for safety)
+    matched_indices = set(itertools.chain(*pairs))
+    unmatched = [i for i in range(n_neurons) if i not in matched_indices]
+    # Naively pair up remaining
+    for i in range(0, len(unmatched), 2):
+        if i + 1 < len(unmatched):
+            pairs.append((unmatched[i], unmatched[i+1]))
+        else:
+            # Odd number of neurons, leave last one hanging or handle gracefully
+            # For NNUE L1 is usually even, so we ignore the odd case here.
+            pass
+
+    # --- Phase 2: Match Pairs (2 -> 4) ---
+    n_pairs = len(pairs)
+    
+    # Create a "Pair Activation Matrix"
+    # A pair is "active" (zero) only if BOTH constituents are zero.
+    # We use logical AND.
+    
+    # We need to construct this matrix.
+    # Indexing approach: actmat[:, [p[0] for p in pairs]] * actmat[:, [p[1] for p in pairs]]
+    idx_left = [p[0] for p in pairs]
+    idx_right = [p[1] for p in pairs]
+    
+    if use_cupy:
+        idx_left_gpu = cp.array(idx_left)
+        idx_right_gpu = cp.array(idx_right)
+        pair_actmat = actmat_gpu[:, idx_left_gpu] * actmat_gpu[:, idx_right_gpu]
+    else:
+        pair_actmat = actmat_gpu[:, idx_left] * actmat_gpu[:, idx_right]
+
+    # Compute co-occurrence for pairs
+    scores_2 = pair_actmat.T @ pair_actmat
+    
+    if use_cupy:
+        scores_2 = cp.asnumpy(scores_2)
+        
+    quad_matches = solve_dense_matching(scores_2, n_pairs)
+    
+    # --- Phase 3: Construct Permutation ---
+    final_perm = []
+    
+    # Add matched quads
+    matched_pair_indices = set()
+    for p_idx_1, p_idx_2 in quad_matches:
+        matched_pair_indices.add(p_idx_1)
+        matched_pair_indices.add(p_idx_2)
+        
+        # Unpack the original neurons
+        n1, n2 = pairs[p_idx_1]
+        n3, n4 = pairs[p_idx_2]
+        final_perm.extend([n1, n2, n3, n4])
+        
+    # Add unmatched pairs (if any)
+    for i in range(n_pairs):
+        if i not in matched_pair_indices:
+            n1, n2 = pairs[i]
+            final_perm.extend([n1, n2])
+            
+    # Add any remaining individual neurons (from odd sizing)
+    final_perm.extend(unmatched)
+    
+    print(f"Hierarchical initialization done in {time.time() - t0:.2f}s")
+    
+    # Cast to standard numpy int array
+    return np.array(final_perm, dtype=int)
 
 def find_perm_impl(
     actmat: npt.NDArray[np.bool_], use_cupy: bool, L1: int
@@ -860,6 +975,27 @@ def find_perm_impl(
     n_samples = actmat_orig.shape[0]
     n_neurons = actmat_orig.shape[1]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
+
+    # Run hierarchical initialization to find a strong starting permutation
+    perm = hierarchical_initialization(actmat_orig, use_cupy=use_cupy)
+    
+    # Verify permutation length
+    if len(perm) != n_neurons:
+        print(f"Warning: Initialization produced perm of length {len(perm)}, expected {n_neurons}. Filling with default.")
+        perm = np.arange(n_neurons)
+
+    # Calculate initial score for display
+    # We apply the permutation temporarily to measure it
+    if use_cupy:
+        # Just grab a chunk to estimate initial quality
+        check_size = min(20000, n_samples)
+        sample = cp.asarray(actmat_orig[:check_size][:, perm], dtype=cp.int8)
+        init_score = get_swapped_zero_positive_count(sample, use_cupy=True)
+        # trace / (N * blocks) approximation
+        init_quality = cp.trace(init_score) / check_size / (n_neurons // ZERO_BLOCK_SIZE) * 100
+        print(f"Initialized permutation quality: {init_quality:.4f}%")
+        del sample, init_score
+        cp.get_default_memory_pool().free_all_blocks()
     
     # Metric tracking
     total_pct_improvement = 0.0

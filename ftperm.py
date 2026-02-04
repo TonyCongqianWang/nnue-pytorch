@@ -1311,8 +1311,8 @@ def main() -> None:
     )
     parser_find_perm.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     parser_find_perm.add_argument("--max_iters", type=int, default=2000)
-    parser_gather.add_argument(
-        "--filter_samples", type=bool, default=False, help="Skip init with hierachical matching."
+    parser_find_perm.add_argument(
+        "--skip_init", type=bool, default=False, help="Skip init with hierachical matching."
     )
     parser_find_perm.set_defaults(func=command_find_perm)
 

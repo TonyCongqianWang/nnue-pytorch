@@ -320,89 +320,6 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
     
     return SwapResult(swaps, scores, total_improvement)
 
-
-def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
-    n_neurons = actmat.shape[1]
-    n_samples = actmat.shape[0]
-    n_blocks = n_neurons // ZERO_BLOCK_SIZE
-
-    score_changes = get_score_change(actmat, use_cupy=use_cupy)
-    score_changes = (
-        score_changes[:, :, None]
-        + score_changes[None, :, :]
-        + (score_changes.T)[:, None, :]
-    )
-    if use_cupy:
-        score_changes = cp.asnumpy(score_changes)
-
-    # Reshape and Transpose to (Nb, Nb, Nb, 4, 4, 4)
-    block_view = score_changes.reshape(
-        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
-    )
-    block_view_t = block_view.transpose(0, 2, 4, 1, 3, 5)
-    flat_local = block_view_t.reshape(n_blocks, n_blocks, n_blocks, -1)
-    
-    max_gains = np.max(flat_local, axis=3)
-    max_indices_flat = np.argmax(flat_local, axis=3)
-
-    candidates = []
-    it = np.nditer(max_gains, flags=['multi_index'])
-    for gain in it:
-        if gain <= 1e-9: continue
-        i, j, k = it.multi_index
-        if i == j or j == k or i == k: continue
-        if i > j or i > k: continue
-        candidates.append((gain, i, j, k, max_indices_flat[i, j, k]))
-
-    if not candidates:
-        return SwapResult([], [], 0.0)
-
-    # MIP Solver
-    num_vars = len(candidates)
-    c_obj = -np.array([cand[0] for cand in candidates])
-    row_ind, col_ind, data = [], [], []
-    
-    for c_idx, (_, b1, b2, b3, _) in enumerate(candidates):
-        for b in [b1, b2, b3]:
-            row_ind.append(b)
-            col_ind.append(c_idx)
-            data.append(1)
-            
-    A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
-    constraints = LinearConstraint(A_eq, -np.inf, 1)
-    bounds = Bounds(0, 1)
-    integrality = np.ones(num_vars)
-    
-    # Hide scipy output
-    res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
-    
-    if not res.success:
-        return SwapResult([], [], 0.0)
-        
-    selected_indices = np.where(res.x > 0.5)[0]
-    cycles = []
-    scores = []
-    total_score_change = 0.0
-    
-    for idx in selected_indices:
-        gain, b_i, b_j, b_k, local_flat = candidates[idx]
-        total_score_change += gain
-        
-        u_local = local_flat // 16
-        rem = local_flat % 16
-        v_local = rem // 4
-        w_local = rem % 4
-        
-        neuron_i = b_i * ZERO_BLOCK_SIZE + u_local
-        neuron_j = b_j * ZERO_BLOCK_SIZE + v_local
-        neuron_k = b_k * ZERO_BLOCK_SIZE + w_local
-        
-        cycles.append((neuron_i, neuron_j, neuron_k))
-        scores.append(gain)
-
-    total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
-    return SwapResult(cycles, scores, total_improvement)
-
 def make_swaps_2_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
     """
     Jointly optimizes for both 2-swaps and 3-cycles using a single MIP formulation.
@@ -469,15 +386,7 @@ def make_swaps_2_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> Swap
     )
 
     # 3-cycle gain for blocks i,j,k = Max(i->j) + Max(j->k) + Max(k->i)
-    # Note: This is an UPPER BOUND approximation. The specific neurons maximizing i->j 
-    # might not be the same starting neurons for k->i. 
-    # HOWEVER, since we optimize disjoint blocks, and we are permuting *within* blocks,
-    # we can pick the specific neuron permutation for the block to satisfy the cycle 
-    # IF the cycle is disjoint.
-    # Actually, for the "Find Permutation" task, we are moving specific neurons.
-    # So we strictly need (u, v, w) such that u->v->w->u.
-    # The previous exact solver did this correctly by tensor expansion.
-    # Let's stick to the correct tensor expansion (it fits in memory for 3-cycles).
+    # Note: This is an UPPER BOUND approximation.
     
     score_changes_3 = (
         score_change_np[:, :, None]
@@ -575,275 +484,6 @@ def make_swaps_2_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> Swap
     
     return SwapResult(final_swaps, final_scores, total_improvement)
 
-def get_best_cycles_n(
-    actmat: npt.NDArray[np.bool_], n: int, use_cupy: bool = True
-) -> SwapResult:
-    """
-    General solver for n-cycles (n >= 2).
-    Uses iterative path extension to efficiently compute the gain of all block-cycles
-    without exploding memory, then solves the packing problem using MIP.
-    """
-    print(f"Starting get_best_cycles_n (n={n})")
-    n_neurons = actmat.shape[1]
-    n_samples = actmat.shape[0]
-    n_blocks = n_neurons // ZERO_BLOCK_SIZE
-
-    # 1. Compute Base Score Matrix (Neurons x Neurons)
-    score_change = get_score_change(actmat, use_cupy=use_cupy)
-    
-    # Move to numpy for complex indexing/looping
-    if use_cupy:
-        score_change = cp.asnumpy(score_change)
-
-    # 2. Create Block Interaction View
-    # Shape: (Nb, 4, Nb, 4)
-    # block_view[i, u, j, v] = gain of moving neuron u (block i) to pos v (block j)
-    block_view = score_change.reshape(
-        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
-    )
-    
-    # 3. Iteratively compute max path gains
-    # We want to compute:
-    # Path[b1, ..., bk, u_start, u_end] = max gain of path b1->...->bk
-    # connecting neuron u_start (in b1) to u_end (in bk)
-    
-    # Start with length 1 paths (edges)
-    # Shape: (Nb, Nb, 4, 4)
-    # Transpose to: (Nb, Nb, 4, 4) -> (Nb, Nb, 4, 4) (already correct structure)
-    current_paths = block_view.transpose(0, 2, 1, 3) 
-    
-    # To reconstruct the best cycle later, we need to store which neurons were used.
-    # Because n is small, we can just re-evaluate the specific cycle candidates 
-    # at the end, rather than storing a massive pointer tensor.
-    
-    # Iterate to extend paths up to length n-1
-    # We stop at n-1 because the last step is closing the cycle (k -> start)
-    for step in range(n - 2):
-        print(f"  Extending paths to length {step + 2}...")
-        
-        # Current: (Nb_1, ..., Nb_k, u_start, u_curr)
-        # Next Edge: (Nb_k, Nb_{k+1}, u_curr, u_next)
-        # Target: (Nb_1, ..., Nb_{k+1}, u_start, u_next)
-        
-        # We perform a "Max-Plus" matrix multiplication over the `u_curr` dimension
-        # and broadcasting over the block dimensions.
-        
-        # 1. Expand dims for broadcasting
-        # Current: (..., Nb_k, 1,      u_start, u_curr, 1)
-        # Next:    (..., 1,    Nb_k+1, 1,       u_curr, u_next)
-        
-        s_curr = current_paths.shape
-        nb_dims = s_curr[:-2] # (Nb, ..., Nb)
-        
-        # Reshape for broadcast
-        # A: (Nb..., Nb_last, 1, 4, 4, 1)
-        A = current_paths.reshape(*nb_dims, 1, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE, 1)
-        
-        # B: (1..., Nb_last, Nb_next, 1, 4, 4)
-        # We use block_view: (Nb_last, 4, Nb_next, 4) -> (Nb_last, Nb_next, 4, 4)
-        B_raw = block_view.transpose(0, 2, 1, 3)
-        # Add singleton dims for the history blocks
-        B = B_raw.reshape(*(1,) * (len(nb_dims) - 1), n_blocks, n_blocks, 1, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE)
-        
-        # Sum: A + B
-        # Shape: (Nb..., Nb_last, Nb_next, 4, 4, 4)
-        # The axes are (..., u_start, u_curr, u_next)
-        summed = A + B
-        
-        # Maximize over the connecting neuron `u_curr` (axis -2)
-        # Result: (Nb..., Nb_last, Nb_next, u_start, u_next)
-        current_paths = np.max(summed, axis=-2)
-        
-        # Check memory usage safety
-        if current_paths.size > 200_000_000:
-             print("Warning: Intermediate tensor large. Optimization might be slow or OOM.")
-
-    # 4. Close the loop
-    print("  Closing cycles...")
-    # Current paths: (b1, ..., b_{n-1}, u_start, u_{n-1})
-    # Closing edge: (b_{n-1}, b1, u_{n-1}, u_start)
-    
-    # A: (b1, ..., b_{n-1}, u_start, u_{n-1})
-    # B: (b_{n-1}, b1, u_{n-1}, u_start)
-    
-    # We need to align b1 and b_{n-1}
-    # A is (Nb, ..., Nb, 4, 4)
-    # B is derived from block_view.transpose(0, 2, 1, 3) -> (Nb, Nb, 4, 4)
-    
-    # Let's use fancy indexing or a loop for the closing step to avoid constructing
-    # the full NxN tensor if possible.
-    # But for n=4, the tensor is (Nb, Nb, Nb, Nb). 268M elements. It fits.
-    
-    # Prepare A: (b1, ..., bn-1, u1, un)
-    # We want final shape (b1, ..., bn-1) containing max cycle score
-    
-    # We can iterate over b1 to save memory if n is large
-    candidates = []
-    
-    # Pre-transpose block view for fast access: (u_prev, u_start, b_prev, b_start)
-    # Original block_view: (Nb_prev, u_prev, Nb_start, u_start)
-    closing_edges = block_view.transpose(1, 3, 0, 2)
-    
-    # current_paths: (b1, b2, ..., bn-1, u1, un-1)
-    # We iterate b1 to reduce memory pressure
-    for b1 in range(n_blocks):
-        # Slice paths starting at b1
-        # shape: (b2, ..., bn-1, u1, un-1)
-        paths_slice = current_paths[b1] 
-        
-        # Get closing edges for b1: connect bn-1 -> b1
-        # shape: (u_prev, u_start, bn-1)
-        # We select b_start = b1
-        closer = closing_edges[:, :, :, b1] 
-        
-        # paths_slice axes: (b2..., bn-1, u1, un-1)
-        # closer axes: (un-1, u1, bn-1)
-        
-        # We need to match un-1 (last neuron) and u1 (first neuron)
-        # Let's move axes of closer to match paths_slice
-        # closer: (bn-1, u1, un-1) -> transpose(2, 1, 0)
-        closer_aligned = closer.transpose(2, 1, 0)
-        
-        # Broadcast closer to match intermediate blocks (b2...bn-2)
-        # paths_slice has n-2 block dimensions.
-        # closer_aligned needs to broadcast over the first n-3 dimensions.
-        
-        target_shape = paths_slice.shape # (Nb, ..., Nb, 4, 4)
-        
-        # Reshape closer to (1, ..., 1, Nb, 4, 4)
-        # Number of intermediate dims = (n-1) - 1 - 1 = n-3
-        # (Minus b1, minus bn-1)
-        reshape_dims = (1,) * (n - 2 - 1) + (n_blocks, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE)
-        closer_view = closer_aligned.reshape(reshape_dims)
-        
-        # Total Cycle Score = Path + Closing Edge
-        # Shape: (Nb..., Nb, 4, 4)
-        total_scores = paths_slice + closer_view
-        
-        # Max over specific neurons (u1, un-1)
-        # Shape: (Nb..., Nb)
-        max_scores = np.max(total_scores, axis=(-2, -1))
-        
-        # Indices of best neurons (u1, un-1) flat index 0..15
-        max_neuron_indices = np.argmax(total_scores.reshape(*max_scores.shape, -1), axis=-1)
-        
-        # Find candidates > 0
-        # This gives us indices (b2, ..., bn-1)
-        locs = np.argwhere(max_scores > 1e-9)
-        
-        for loc in locs:
-            gain = max_scores[tuple(loc)]
-            # loc is (b2, ..., bn-1)
-            # Full cycle: (b1, *loc)
-            cycle_blocks = (b1,) + tuple(loc)
-            
-            # Constraints: Distinct blocks
-            if len(set(cycle_blocks)) != n:
-                continue
-            
-            # Constraints: Canonical order (start with smallest index)
-            # This handles cycle uniqueness (1,2,3) == (2,3,1)
-            if b1 != min(cycle_blocks):
-                continue
-
-            # Retrieve neuron info to reconstruct exact cycle later
-            # (We stored just the start/end interaction max, but we need intermediates?)
-            # Actually, for MIP we just need the gain and the blocks.
-            # We can re-calculate exact neurons only for the winning cycles.
-            candidates.append((gain, cycle_blocks))
-
-    print(f"  Found {len(candidates)} candidate {n}-cycles.")
-    
-    if not candidates:
-        return SwapResult([], 0.0)
-
-    # 5. Solve MIP
-    # Maximize sum(gain * x) s.t. each block used at most once
-    num_vars = len(candidates)
-    c_obj = -np.array([c[0] for c in candidates])
-    
-    row_ind = []
-    col_ind = []
-    data = []
-    
-    for c_idx, (_, blocks) in enumerate(candidates):
-        for b in blocks:
-            row_ind.append(b)
-            col_ind.append(c_idx)
-            data.append(1)
-            
-    A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
-    constraints = LinearConstraint(A_eq, -np.inf, 1)
-    bounds = Bounds(0, 1)
-    integrality = np.ones(num_vars)
-    
-    print("  Solving MIP...")
-    res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
-    
-    if not res.success:
-        print("MIP Solver failed.")
-        return SwapResult([], 0.0)
-        
-    # 6. Reconstruct Results
-    selected_indices = np.where(res.x > 0.5)[0]
-    final_cycles = []
-    total_gain = 0.0
-    
-    # To find exact neurons for the selected blocks, we do a mini-search
-    # This is cheap (only done for selected cycles)
-    for idx in selected_indices:
-        gain, blocks = candidates[idx]
-        total_gain += gain
-        
-        # Re-resolve the specific neurons for this block tuple
-        # We assume blocks is (b1, b2, ..., bn)
-        # We want u1, u2, ..., un such that u_k in b_k
-        # maximizing sum S[b_k, b_{k+1}, u_k, u_{k+1}]
-        
-        # Dynamic programming for specific cycle
-        # dp[k, u_current] = max score to reach neuron u_current in block k
-        # parent[k, u_current] = neuron in previous block
-        
-        # Initialization (Block 0)
-        # We can't pick u0 independently of un.
-        # So we just run the full exhaustive search for the specific tuple
-        # Size: 4^n. For n=4, 256 checks. Trivial.
-        
-        best_cycle_neurons = None
-        best_cycle_score = -1.0
-        
-        local_indices = [range(ZERO_BLOCK_SIZE) for _ in range(n)]
-        for us in itertools.product(*local_indices):
-            # us is (u1_local, u2_local, ...)
-            current_score = 0
-            for k in range(n):
-                b_curr = blocks[k]
-                b_next = blocks[(k + 1) % n]
-                u_curr = us[k]
-                u_next = us[(k + 1) % n]
-                
-                # Retrieve score from block_view
-                # block_view shape: (Nb, u, Nb, v)
-                s = block_view[b_curr, u_curr, b_next, u_next]
-                current_score += s
-            
-            if current_score > best_cycle_score:
-                best_cycle_score = current_score
-                best_cycle_neurons = us
-                
-        # Convert local to global
-        global_cycle = []
-        for k in range(n):
-            global_idx = blocks[k] * ZERO_BLOCK_SIZE + best_cycle_neurons[k]
-            global_cycle.append(global_idx)
-            
-        final_cycles.append(tuple(global_cycle))
-        if VERBOSE:
-            print(f"Cycle {global_cycle} Gain: {gain}")
-
-    total_improvement = total_gain / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
-    return SwapResult(final_cycles, total_improvement)
-
 def solve_dense_matching(score_matrix: npt.NDArray, size: int) -> list[tuple[int, int]]:
     """
     Solves Maximum Weight Matching for a dense symmetric matrix.
@@ -869,7 +509,7 @@ def solve_dense_matching(score_matrix: npt.NDArray, size: int) -> list[tuple[int
     return list(matching)
 
 def hierarchical_initialization(
-    actmat: npt.NDArray[np.bool_], use_cupy: bool = True
+    actmat: npt.NDArray[np.bool_], use_cupy: bool = True,
 ) -> npt.NDArray[np.int_]:
     print("Running hierarchical initialization...")
     t0 = time.time()
@@ -961,146 +601,255 @@ def hierarchical_initialization(
     # Cast to standard numpy int array
     return np.array(final_perm, dtype=int)
 
+import time
+import numpy as np
+import numpy.typing as npt
+
+# Assumed imports (uncomment if running standalone)
+# import cupy as cp 
+# from your_module import hierarchical_initialization, get_swapped_zero_positive_count, ...
+
+def prepare_data_split(
+    actmat: npt.NDArray, 
+    val_size: float
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """
+    Shuffles and splits the dataset into training and validation sets.
+    Performs the split on CPU to conserve GPU memory.
+    """
+    n_samples = actmat.shape[0]
+    
+    # Generate shuffled indices
+    indices = np.arange(n_samples)
+    np.random.shuffle(indices)
+    
+    split_idx = int(n_samples * (1 - val_size))
+    
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
+    
+    # Create views (or copies depending on memory layout)
+    train_data = actmat[train_indices]
+    val_data = actmat[val_indices]
+    
+    print(f"Data Split: {len(train_data)} training, {len(val_data)} validation samples.")
+    return train_data, val_data
+
+def measure_validation_score(
+    val_data: npt.NDArray, 
+    perm: npt.NDArray, 
+    use_cupy: bool, 
+    n_neurons: int, 
+    max_samples: int = 20000
+) -> float:
+    """
+    Measures quality on the Held-Out Validation Set.
+    """
+    n_val = val_data.shape[0]
+    if n_val == 0:
+        return 0.0
+
+    # If validation set is huge, we still subsample it for speed, 
+    # but we strictly sample from val_data, never train_data.
+    check_size = min(max_samples, n_val)
+    
+    # Deterministic slicing for validation stability (optional) 
+    # or random sampling from the validation set:
+    indices = np.random.choice(n_val, check_size, replace=False)
+    sample_cpu = val_data[indices, :][:, perm]
+
+    if use_cupy:
+        import cupy as cp
+        sample = cp.asarray(sample_cpu, dtype=cp.int8)
+        score_mat = get_swapped_zero_positive_count(sample, use_cupy=True)
+        # Metric: Trace / (N * D)
+        quality = cp.trace(score_mat) / check_size / n_neurons * 100
+        
+        del sample, score_mat
+        cp.get_default_memory_pool().free_all_blocks()
+    else:
+        score_mat = get_swapped_zero_positive_count(sample_cpu, use_cupy=False)
+        quality = np.trace(score_mat) / check_size / n_neurons * 100
+        
+    return float(quality)
+
+def get_training_batches(
+    train_data: npt.NDArray, 
+    perm: npt.NDArray, 
+    batch_size: int, 
+    use_cupy: bool
+):
+    """
+    Samples strictly from the Training Data.
+    """
+    n_train = train_data.shape[0]
+    
+    # Check if we have enough data for 2 unique batches
+    # If not, we allow overlap (replace=False will fail if we ask for more than n_train)
+    needed = batch_size * 2
+    
+    if n_train >= needed:
+        indices = np.random.choice(n_train, needed, replace=False)
+        idx1 = indices[:batch_size]
+        idx2 = indices[batch_size:]
+    else:
+        # Fallback: if training set is tiny, reuse data but warn once (handled in main loop)
+        # We wrap around
+        indices = np.arange(n_train)
+        np.random.shuffle(indices)
+        idx1 = indices[:min(n_train, batch_size)]
+        idx2 = indices[min(n_train, batch_size):] 
+        # Note: Logic here implies idx2 might be empty or overlap if n_train is very small
+        # For safety in very small datasets:
+        if len(idx2) == 0: idx2 = idx1
+
+    batch1_cpu = train_data[idx1, :][:, perm]
+    batch2_cpu = train_data[idx2, :][:, perm]
+
+    if use_cupy:
+        import cupy as cp
+        batch1 = cp.asarray(batch1_cpu, dtype=cp.int8)
+        batch2 = cp.asarray(batch2_cpu, dtype=cp.int8)
+    else:
+        batch1 = batch1_cpu
+        batch2 = batch2_cpu
+        
+    return batch1, batch2
+
 def find_perm_impl(
-    actmat: npt.NDArray[np.bool_], use_cupy: bool, L1: int
+    actmat: npt.NDArray[np.bool_], 
+    use_cupy: bool, 
+    L1: int,
+    validation_steps: int = 50,
+    validation_set_size: float = 0.25
 ) -> npt.NDArray[np.int_]:
-    # Flatten actmat
+    
+    # 1. Pre-processing
+    # -----------------------------
+    # Flatten/Reshape as per domain logic
+    # Note: We reshape BEFORE splitting to ensure samples are consistent
     actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
     
-    # Ensure master copy is on CPU to save VRAM
     if hasattr(actmat, "get"):
         actmat = actmat.get()
     
-    actmat_orig = actmat 
-    n_samples = actmat_orig.shape[0]
-    n_neurons = actmat_orig.shape[1]
+    n_neurons = actmat.shape[1]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
-
-    # Run hierarchical initialization to find a strong starting permutation
-    perm = hierarchical_initialization(actmat_orig, use_cupy=use_cupy)
     
-    # Verify permutation length
+    # 2. Train/Validation Split
+    # -----------------------------
+    train_data, val_data = prepare_data_split(actmat, validation_set_size)
+    
+    if train_data.shape[0] == 0:
+        raise ValueError("Validation split resulted in 0 training samples. Decrease validation_set_size.")
+
+    # 3. Initialization (On Training Data Only)
+    # -----------------------------
+    print("Running hierarchical initialization on training data...")
+    # NOTE: hierarchical_initialization must accept actmat (the training portion)
+    perm = hierarchical_initialization(train_data, use_cupy=use_cupy)
+    
     if len(perm) != n_neurons:
-        print(f"Warning: Initialization produced perm of length {len(perm)}, expected {n_neurons}. Filling with default.")
+        print(f"Warning: Init produced len {len(perm)}, expected {n_neurons}. Resetting.")
         perm = np.arange(n_neurons)
 
-    # Calculate initial score for display
-    # We apply the permutation temporarily to measure it
-    if use_cupy:
-        # Just grab a chunk to estimate initial quality
-        check_size = min(20000, n_samples)
-        sample = cp.asarray(actmat_orig[:check_size][:, perm], dtype=cp.int8)
-        init_score = get_swapped_zero_positive_count(sample, use_cupy=True)
-        # trace / (N * blocks) approximation
-        init_quality = cp.trace(init_score) / check_size / n_neurons * 100
-        print(f"Initialized permutation quality: {init_quality:.4f}%")
-        del sample, init_score
-        cp.get_default_memory_pool().free_all_blocks()
-    
-    # Metric tracking
-    total_pct_improvement = 0.0
-    perm = np.arange(L1 // 2)
+    # Initial Validation Score
+    init_quality = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+    print(f"Initial Validation Quality: {init_quality:.4f}%")
 
+    # 4. Setup Loop
+    # -----------------------------
     stages: list[SwapFunction] = [
         make_swaps_2,
         make_swaps_2_3,
     ]
-    
     stages_max_fails = [5, 15]
     stage_id = 0
     num_fails = 0
     
     BATCH_SIZE = 2 ** 12
-    W1 = 0.4 # Weights for validation (0.5 means equal weight to finding and validating batch)
+    W1 = 0.4 
     
     start_time_global = time.time()
-
+    
+    # 5. Optimization Loop
+    # -----------------------------
     for i in range(4000):
+        
+        # --- Periodic Validation ---
+        if validation_steps > 0 and i > 0 and i % validation_steps == 0:
+            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+            elapsed = time.time() - start_time_global
+            print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
+        
+        # --- Schedule & Batch Sizing ---
         if i in [2500, 3600, 3800, 3900]:
             W1 /= 2
             BATCH_SIZE *= 2
-        if n_samples >= BATCH_SIZE * 2:
-            current_indices = np.random.choice(n_samples, BATCH_SIZE * 2, replace=False)
-            idx1 = current_indices[:BATCH_SIZE]
-            idx2 = current_indices[BATCH_SIZE:]
-        else:
-            # Fallback for small datasets
-            print("Warning: Dataset smaller than 2xBatch Size. Reusing data.")
-            idx1 = np.arange(n_samples // 2)
-            idx2 = np.arange(n_samples // 2, n_samples)
+        
+        # Check if Training Data supports this Batch Size
+        current_batch_size = BATCH_SIZE
+        if train_data.shape[0] < current_batch_size * 2:
+            current_batch_size = train_data.shape[0] // 2
+            if current_batch_size < 16: # Safety floor
+                current_batch_size = train_data.shape[0]
 
-        # Slice on CPU, then transfer to GPU if needed
-        batch1_cpu = actmat_orig[idx1, :][:, perm]
-        batch2_cpu = actmat_orig[idx2, :][:, perm]
+        # --- Get Training Batches ---
+        batch1, batch2 = get_training_batches(train_data, perm, current_batch_size, use_cupy)
 
-        if use_cupy:
-            batch1 = cp.asarray(batch1_cpu, dtype=cp.int8)
-            batch2 = cp.asarray(batch2_cpu, dtype=cp.int8)
-        else:
-            batch1 = batch1_cpu
-            batch2 = batch2_cpu
-
-        # 2. Find Candidates on Batch 1
+        # --- Search & Evaluate ---
+        # 1. Find candidates on Batch 1
         swap_fn = stages[stage_id]
         res1 = swap_fn(batch1, use_cupy)
         
-        if not res1.swaps:
-            # No candidates found
-            accepted_swaps = []
-            accepted_gain_raw = 0.0
-        else:
-            # 3. Evaluate Candidates on Batch 2
+        accepted_swaps = []
+        accepted_gain_raw = 0.0
+
+        if res1.swaps:
+            # 2. Verify candidates on Batch 2
             scores2 = evaluate_swaps_on_batch(batch2, res1.swaps, use_cupy)
             
-            accepted_swaps = []
-            accepted_gain_raw = 0.0
-            
-            # 4. Filter based on Weighted Average
+            # 3. Weighted Filter
             for swap, s1, s2 in zip(res1.swaps, res1.scores, scores2):
-                # Calculate weighted raw score
                 weighted_raw = (W1 * s1) + ((1 - W1) * s2)
                 
                 if weighted_raw > 0:
                     accepted_swaps.append(swap)
                     accepted_gain_raw += weighted_raw
 
-        # 5. Apply Accepted Swaps
+        # --- Apply & Update ---
         if accepted_swaps:
             for cycle in accepted_swaps:
                 apply_rotate_right(perm, cycle)
             
-            # NORMALIZE the gain to percentages
-            # accepted_gain_raw is the weighted sum of zeros gained in a batch of size BATCH_SIZE
-            # We normalize by (Batch Size * Blocks) to get the fraction of "perfect blocks" gained
-            current_pct_gain = (accepted_gain_raw / BATCH_SIZE / n_blocks) * 100
-            total_pct_improvement += current_pct_gain
+            # Gain calculation (on training batch)
+            # Use current_batch_size to ensure percentage is accurate even if we clamped batch size
+            current_pct_gain = (accepted_gain_raw / current_batch_size / n_blocks) * 100
 
-            count_candidates = len(res1.swaps)
             count_accepted = len(accepted_swaps)
-            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted}/{count_candidates} swaps.")
-            print(f"  Iter improvement: {current_pct_gain:0.5f}%")
-            print(f"  Total improvement: {total_pct_improvement:0.5f}%")
-            print(f"  Time elapsed: {time.time() - start_time_global:0.3f}s")
+            count_candidates = len(res1.swaps)
+            
+            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted}/{count_candidates}.")
+            print(f"  Train improvement: {current_pct_gain:0.5f}%")
 
-            # Success! Reset fails and restart from Stage 0 (2-swaps)
-            # This allows us to catch simple swaps created by the new configuration
             num_fails = 0
             stage_id = 0 
         else:
             num_fails += 1
-            # Only print every fail if verbose, otherwise just status update
-            print(f"Iter {i+1} (Stage {stage_id}): No improvement. Fails: {num_fails}/{stages_max_fails[stage_id]}")
-            
             if num_fails > stages_max_fails[stage_id]:
+                print(f"Iter {i+1}: Stage {stage_id} max fails reached.")
                 num_fails = 0
                 stage_id += 1
                 
                 if stage_id >= len(stages):
                     print("No more improvement possible.")
                     break
-                    
                 print(f"Switching to stage {stage_id}")
 
+    # Final Validation
+    final_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+    print(f"Final Validation Quality: {final_score:.4f}%")
+    
     return perm
 
 

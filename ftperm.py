@@ -870,8 +870,7 @@ def find_perm_impl(
         make_swaps_2_3,
     ]
     
-    # Allow more fails for stochastic mini-batches
-    stages_max_fails = [15]
+    stages_max_fails = [5, 5]
     stage_id = 0
     num_fails = 0
     

@@ -718,6 +718,7 @@ def find_perm_impl(
     actmat: npt.NDArray[np.bool_], 
     use_cupy: bool, 
     L1: int,
+    log_steps: int = 10,
     validation_steps: int = 50,
     validation_set_size: float = 0.25
 ) -> npt.NDArray[np.int_]:
@@ -765,23 +766,17 @@ def find_perm_impl(
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 2 ** 12
-    W1 = 0.4 
+    BATCH_SIZE = 2 ** 10
+    W1 = 0.6
     
     start_time_global = time.time()
     
     # 5. Optimization Loop
     # -----------------------------
-    for i in range(6000):
-        
-        # --- Periodic Validation ---
-        if validation_steps > 0 and i > 0 and i % validation_steps == 0:
-            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
-            elapsed = time.time() - start_time_global
-            print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
-        
+    max_iters = 2000
+    for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
-        if i in [4000, 5000, 5500, 5900]:
+        if i in [800, 1400, 1800, 1900, 1970]:
             W1 /= 2
             BATCH_SIZE *= 2
         
@@ -826,9 +821,10 @@ def find_perm_impl(
 
             count_accepted = len(accepted_swaps)
             count_candidates = len(res1.swaps)
-            
-            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted}/{count_candidates}.")
-            print(f"  Train improvement: {current_pct_gain:0.5f}%")
+
+            if log_steps > 0 and (i + 1) % log_steps == 0:
+                print(f"Iter {i+1} / {max_iters} (Stage {stage_id}): Accepted {count_accepted}/{count_candidates}.")
+                print(f"    Train improvement: {current_pct_gain:0.5f}%")
 
             num_fails = 0
             stage_id = 0 
@@ -843,6 +839,13 @@ def find_perm_impl(
                     print("No more improvement possible.")
                     break
                 print(f"Switching to stage {stage_id}")
+
+
+                # --- Periodic Validation ---
+        if validation_steps > 0 and (i + 1) % validation_steps == 0:
+            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+            elapsed = time.time() - start_time_global
+            print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
 
     # Final Validation
     final_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)

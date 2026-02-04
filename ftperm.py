@@ -871,10 +871,11 @@ def find_perm_impl(
                 best_val_score = val_score
 
     # Final Validation
-    final_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+    best_perm = best_perm if validation_steps > 0 else perm
+    final_score = measure_validation_score(val_data, best_perm, use_cupy, n_neurons)
     print(f"Final Validation Quality: {final_score:.4f}%")
     
-    return best_perm if validation_steps > 0 else perm
+    return best_perm
 
 # -------------------------------------------------------------
 

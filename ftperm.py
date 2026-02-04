@@ -399,6 +399,178 @@ def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
     total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
     return SwapResult(cycles, scores, total_improvement)
 
+def make_swaps_2_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
+    """
+    Jointly optimizes for both 2-swaps and 3-cycles using a single MIP formulation.
+    This allows the solver to trade off between a 2-swap and a 3-cycle that might share a block.
+    """
+    start_time = time.time()
+    n_neurons = actmat.shape[1]
+    n_samples = actmat.shape[0]
+    n_blocks = n_neurons // ZERO_BLOCK_SIZE
+
+    # 1. Compute Base Score Matrix
+    score_change = get_score_change(actmat, use_cupy=use_cupy)
+    
+    # --- Part A: Gather 2-Swap Candidates ---
+    # Symmeterize for 2-swaps: gain(i,j) = S[i,j] + S[j,i]
+    score_change_sym = score_change + score_change.T
+    
+    if use_cupy:
+        score_change_np = cp.asnumpy(score_change)
+        score_change_sym_np = cp.asnumpy(score_change_sym)
+    else:
+        score_change_np = score_change
+        score_change_sym_np = score_change_sym
+
+    # Reshape for blocks: (Nb, 4, Nb, 4) -> (Nb, Nb, 4, 4)
+    # Note: We must transpose to align block dims
+    block_view_2 = score_change_sym_np.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
+    block_view_2_t = block_view_2.transpose(0, 2, 1, 3) # (Nb, Nb, 4, 4)
+    flat_local_2 = block_view_2_t.reshape(n_blocks, n_blocks, -1)
+    
+    max_gains_2 = np.max(flat_local_2, axis=2)
+    max_indices_2 = np.argmax(flat_local_2, axis=2)
+
+    candidates = [] # List of (gain, [blocks...], local_flat_index, type)
+
+    # Collect 2-swap candidates (Upper triangle)
+    # Using a slightly lower threshold for joint optimization to allow competition
+    rows, cols = np.where(np.triu(max_gains_2, k=1) > 1e-9)
+    for b_i, b_j in zip(rows, cols):
+        gain = max_gains_2[b_i, b_j]
+        candidates.append((gain, [b_i, b_j], max_indices_2[b_i, b_j], 2))
+
+    # --- Part B: Gather 3-Cycle Candidates ---
+    # Score for cycles: S[i,j] + S[j,k] + S[k,i]
+    # We construct the tensor on the CPU (numpy) because it's 3D block view
+    # Broadcast sum: (Nb, Nb, Nb)
+    # We do this calculation on the block-maxed values to save memory/compute
+    
+    # First, max over local neurons for directed edges: Max(S[i,j]) for blocks B_i, B_j
+    # shape: (Nb, Nb)
+    block_directed_max = np.max(
+        score_change_np.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
+        .transpose(0, 2, 1, 3)
+        .reshape(n_blocks, n_blocks, -1),
+        axis=2
+    )
+    
+    # Also keep the indices: (Nb, Nb) -> value 0..15
+    block_directed_argmax = np.argmax(
+        score_change_np.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
+        .transpose(0, 2, 1, 3)
+        .reshape(n_blocks, n_blocks, -1),
+        axis=2
+    )
+
+    # 3-cycle gain for blocks i,j,k = Max(i->j) + Max(j->k) + Max(k->i)
+    # Note: This is an UPPER BOUND approximation. The specific neurons maximizing i->j 
+    # might not be the same starting neurons for k->i. 
+    # HOWEVER, since we optimize disjoint blocks, and we are permuting *within* blocks,
+    # we can pick the specific neuron permutation for the block to satisfy the cycle 
+    # IF the cycle is disjoint.
+    # Actually, for the "Find Permutation" task, we are moving specific neurons.
+    # So we strictly need (u, v, w) such that u->v->w->u.
+    # The previous exact solver did this correctly by tensor expansion.
+    # Let's stick to the correct tensor expansion (it fits in memory for 3-cycles).
+    
+    score_changes_3 = (
+        score_change_np[:, :, None]
+        + score_change_np[None, :, :]
+        + (score_change_np.T)[:, None, :]
+    )
+    
+    block_view_3 = score_changes_3.reshape(
+        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
+    )
+    block_view_3_t = block_view_3.transpose(0, 2, 4, 1, 3, 5) # (Nb, Nb, Nb, 4, 4, 4)
+    flat_local_3 = block_view_3_t.reshape(n_blocks, n_blocks, n_blocks, -1)
+    
+    max_gains_3 = np.max(flat_local_3, axis=3)
+    max_indices_3 = np.argmax(flat_local_3, axis=3)
+
+    # Iterate 3-cycle candidates
+    # We use iterator for efficiency
+    it = np.nditer(max_gains_3, flags=['multi_index'])
+    for gain in it:
+        if gain <= 1e-9: continue
+        i, j, k = it.multi_index
+        
+        # Constraints
+        if i == j or j == k or i == k: continue # Distinct
+        if i > j or i > k: continue # Canonical order
+        
+        candidates.append((gain, [i, j, k], max_indices_3[i, j, k], 3))
+
+    if not candidates:
+        return SwapResult([], [], 0.0)
+
+    # --- Part C: Joint MIP Optimization ---
+    
+    num_vars = len(candidates)
+    c_obj = -np.array([cand[0] for cand in candidates]) # Minimize negative gain
+    
+    row_ind, col_ind, data = [], [], []
+    
+    for c_idx, (_, blocks, _, _) in enumerate(candidates):
+        for b in blocks:
+            row_ind.append(b)
+            col_ind.append(c_idx)
+            data.append(1)
+            
+    A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
+    constraints = LinearConstraint(A_eq, -np.inf, 1) # Each block used at most once
+    bounds = Bounds(0, 1)
+    integrality = np.ones(num_vars)
+    
+    # Solve
+    res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
+    
+    if not res.success:
+        return SwapResult([], [], 0.0)
+        
+    # --- Part D: Reconstruct ---
+    selected_indices = np.where(res.x > 0.5)[0]
+    
+    final_swaps = []
+    final_scores = []
+    total_gain = 0.0
+    
+    for idx in selected_indices:
+        gain, blocks, local_flat, c_type = candidates[idx]
+        total_gain += gain
+        final_scores.append(gain)
+        
+        if c_type == 2:
+            # Reconstruct 2-swap
+            b_i, b_j = blocks
+            # local_flat is index in 4x4=16
+            u_local = local_flat // ZERO_BLOCK_SIZE
+            v_local = local_flat % ZERO_BLOCK_SIZE
+            
+            n_i = b_i * ZERO_BLOCK_SIZE + u_local
+            n_j = b_j * ZERO_BLOCK_SIZE + v_local
+            final_swaps.append((n_i, n_j))
+            
+        elif c_type == 3:
+            # Reconstruct 3-cycle
+            b_i, b_j, b_k = blocks
+            # local_flat is index in 4x4x4=64
+            u_local = local_flat // 16
+            rem = local_flat % 16
+            v_local = rem // 4
+            w_local = rem % 4
+            
+            n_i = b_i * ZERO_BLOCK_SIZE + u_local
+            n_j = b_j * ZERO_BLOCK_SIZE + v_local
+            n_k = b_k * ZERO_BLOCK_SIZE + w_local
+            final_swaps.append((n_i, n_j, n_k))
+
+    total_improvement = total_gain / n_samples / (n_neurons // 4) * 100
+    
+    return SwapResult(final_swaps, final_scores, total_improvement)
+
 def get_best_cycles_n(
     actmat: npt.NDArray[np.bool_], n: int, use_cupy: bool = True
 ) -> SwapResult:
@@ -690,16 +862,15 @@ def find_perm_impl(
     perm = np.arange(L1 // 2)
 
     stages: list[SwapFunction] = [
-        make_swaps_2,
-        make_swaps_3,
+        make_swaps_2_3,
     ]
     
     # Allow more fails for stochastic mini-batches
-    stages_max_fails = [10, 10]
+    stages_max_fails = [15]
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 2 ** 14
+    BATCH_SIZE = 2 ** 16
     
     # Weights for validation (0.5 means equal weight to finding and validating batch)
     W1 = 0.2
@@ -707,7 +878,7 @@ def find_perm_impl(
 
     start_time_global = time.time()
 
-    for i in range(5000):
+    for i in range(1000):
         # 1. Efficient Sampling
         # Pick 2 * BATCH_SIZE indices at once (indices for batch 1 and batch 2)
         # replace=False prevents overlap between batch1 and batch2

@@ -862,8 +862,8 @@ def find_perm_impl(
 
 
         # --- Periodic Validation (Indentation fixed: Runs every step check) ---
-        if validation_steps > 0 and (i + 1) % validation_steps == 0 or i > 0.99 * max_iters:
-            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
+        if validation_steps > 0 and (i + 1) % validation_steps == 0 or i > 0.998 * max_iters:
+            val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons, max_samples=2 ** 20)
             elapsed = time.time() - start_time_global
             print(f"--- [Val] Iter {i + 1}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
             if val_score > best_val_score:

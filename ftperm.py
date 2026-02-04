@@ -776,7 +776,7 @@ def find_perm_impl(
     # -----------------------------
     for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
-        if i in [800, 1400, 1800, 1900, 1970]:
+        if i in [int(frac * max_iters) for frac in [0.5, 0.8, 0.9, 0.97]]:
             W1 /= 2
             BATCH_SIZE *= 2
         

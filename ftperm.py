@@ -781,7 +781,7 @@ def find_perm_impl(
     
     BASE_BATCH_SIZE = 2 ** 10
     current_batch_size = BASE_BATCH_SIZE # Fixed: Was undefined 'BATCH_SIZE'
-    W1 = 0.6
+    W1 = 0.45
 
     if train_data.shape[0] < current_batch_size * 2:
         current_batch_size = train_data.shape[0] // 2

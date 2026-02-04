@@ -866,6 +866,7 @@ def find_perm_impl(
     perm = np.arange(L1 // 2)
 
     stages: list[SwapFunction] = [
+        make_swaps_2,
         make_swaps_2_3,
     ]
     

@@ -207,69 +207,93 @@ def get_score_change(
     score_change = score_change * same_block_killer
     return score_change
 
-
 @dataclass
 class SwapResult:
     swaps: list[tuple[int, ...]]
+    scores: list[float]
     score_change: float
-
 
 SwapFunction: TypeAlias = Callable[[npt.NDArray[np.bool_], bool], SwapResult]
 
-def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
+def evaluate_swaps_on_batch(
+    actmat: npt.NDArray[np.bool_], 
+    swaps: list[tuple[int, ...]], 
+    use_cupy: bool = True
+) -> list[float]:
     """
-    Returns a series of independent 2-swap operations using Maximum Weight Matching
-    to find the mathematically optimal set of block pairs.
+    Calculates the score change for a specific list of swaps/cycles on a given batch.
     """
-    start_time = time.time()
-    print("Starting make_swaps_2 (Exact Matching)")
+    if not swaps:
+        return []
 
+    score_changes = get_score_change(actmat, use_cupy=use_cupy)
+    
+    if use_cupy:
+        score_changes = cp.asnumpy(score_changes)
+
+    cycle_len = len(swaps[0])
+    scores = []
+
+    if cycle_len == 2:
+        for idx in swaps:
+            i, j = idx
+            # gain(i, j) = score_change[i, j] + score_change[j, i]
+            gain = score_changes[i, j] + score_changes[j, i]
+            scores.append(gain)
+            
+    elif cycle_len == 3:
+        for idx in swaps:
+            i, j, k = idx
+            gain = score_changes[i, j] + score_changes[j, k] + score_changes[k, i]
+            scores.append(gain)
+            
+    else:
+        # Fallback for generic n-cycles
+        for cycle in swaps:
+            gain = 0
+            for k in range(len(cycle)):
+                u = cycle[k]
+                v = cycle[(k + 1) % len(cycle)]
+                gain += score_changes[u, v]
+            scores.append(gain)
+
+    return scores
+
+
+def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
 
-    # 1. Compute Score Change Matrix
     score_change = get_score_change(actmat, use_cupy=use_cupy)
-    
     if use_cupy:
         score_change = cp.asnumpy(score_change)
     
-    # Sum score_change[i, j] + score_change[j, i] for symmetric swap gain
     score_change = score_change + score_change.T
 
-    # 2. Aggregate scores to Block-level
-    # Shape transformation: (Nb, 4, Nb, 4)
+    # Reshape and Transpose to (Nb, Nb, 4, 4)
+    # 1. Reshape to (Nb, 4, Nb, 4)
     block_view = score_change.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
-    
-    # --- FIX START ---
-    # We must TRANSPOSE to bring the block axes (0 and 2) together 
-    # and the neuron axes (1 and 3) together.
-    # New shape: (Nb, Nb, 4, 4)
+    # 2. Transpose to (Nb, Nb, 4, 4)
     block_view_t = block_view.transpose(0, 2, 1, 3)
-    
-    # Now we can safely flatten the last two dimensions to 16
-    # max_gains[u, v] = max gain achievable swapping between block u and v
+    # 3. Flatten inner dims to 16
     flat_local = block_view_t.reshape(n_blocks, n_blocks, -1)
+    
     max_gains = np.max(flat_local, axis=2)
     max_indices = np.argmax(flat_local, axis=2)
-    # --- FIX END ---
 
-    # 3. Construct Graph for Matching
     G = nx.Graph()
     G.add_nodes_from(range(n_blocks))
-    
-    # Add edges for positive gains (upper triangle only)
     for i in range(n_blocks):
         for j in range(i + 1, n_blocks):
             weight = max_gains[i, j]
-            if weight > 1e-9: # Float tolerance
+            if weight > 1e-9:
                 G.add_edge(i, j, weight=weight)
 
-    # 4. Solve Maximum Weight Matching
     matching = nx.max_weight_matching(G, maxcardinality=False)
 
-    # 5. Reconstruct Neuron Swaps
     swaps = []
+    scores = []
     total_score_change = 0.0
 
     for u, v in matching:
@@ -284,89 +308,55 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
         neuron_j = v * ZERO_BLOCK_SIZE + v_local
         
         swaps.append((neuron_i, neuron_j))
+        scores.append(gain)
 
     total_improvement = (
         total_score_change / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
     )
+    
+    return SwapResult(swaps, scores, total_improvement)
 
-    print(f"Time elapsed: {time.time() - start_time:0.3f}")
-    print(f"Swaps added this iteration: {len(swaps)}")
-    print(f"Improvement this iteration: {total_improvement:0.3f}")
-
-    return SwapResult(swaps, total_improvement)
 
 def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
-    """
-    Returns a series of independent left-rotates using a MIP solver 
-    to find the optimal 3-Set Packing.
-    """
-    print("Starting make_swaps_3 (MIP Optimization)")
-    start_time = time.time()
-
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
 
     score_changes = get_score_change(actmat, use_cupy=use_cupy)
-
     score_changes = (
         score_changes[:, :, None]
         + score_changes[None, :, :]
         + (score_changes.T)[:, None, :]
     )
-
     if use_cupy:
         score_changes = cp.asnumpy(score_changes)
 
-    # 2. Aggregate to Block-level
+    # Reshape and Transpose to (Nb, Nb, Nb, 4, 4, 4)
     block_view = score_changes.reshape(
         n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
     )
-    
-    # --- FIX START ---
-    # Transpose to group block indices (0, 2, 4) and neuron indices (1, 3, 5)
-    # New shape: (Nb, Nb, Nb, 4, 4, 4)
     block_view_t = block_view.transpose(0, 2, 4, 1, 3, 5)
-    
-    # Flatten last 3 dimensions: (Nb, Nb, Nb, 64)
     flat_local = block_view_t.reshape(n_blocks, n_blocks, n_blocks, -1)
     
     max_gains = np.max(flat_local, axis=3)
     max_indices_flat = np.argmax(flat_local, axis=3)
-    # --- FIX END ---
 
-    candidates = [] 
-    
-    # We iterate carefully to find unique cycles
+    candidates = []
     it = np.nditer(max_gains, flags=['multi_index'])
     for gain in it:
-        if gain <= 1e-9:
-            continue
-            
+        if gain <= 1e-9: continue
         i, j, k = it.multi_index
-        
-        # Distinct blocks only
-        if i == j or j == k or i == k:
-            continue
-            
-        # Canonical order to avoid duplicates (i, j, k) vs (j, k, i)
-        if i > j or i > k:
-            continue
-            
+        if i == j or j == k or i == k: continue
+        if i > j or i > k: continue
         candidates.append((gain, i, j, k, max_indices_flat[i, j, k]))
 
-    print(f"Found {len(candidates)} candidate cycles with positive gain.")
-    
     if not candidates:
-        return SwapResult([], 0.0)
+        return SwapResult([], [], 0.0)
 
-    # 4. Formulate MIP
+    # MIP Solver
     num_vars = len(candidates)
-    c_obj = -np.array([cand[0] for cand in candidates]) # Negative because scipy minimizes
-    
-    row_ind = []
-    col_ind = []
-    data = []
+    c_obj = -np.array([cand[0] for cand in candidates])
+    row_ind, col_ind, data = [], [], []
     
     for c_idx, (_, b1, b2, b3, _) in enumerate(candidates):
         for b in [b1, b2, b3]:
@@ -375,27 +365,25 @@ def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
             data.append(1)
             
     A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
-    constraints = LinearConstraint(A_eq, -np.inf, 1) # sum <= 1
+    constraints = LinearConstraint(A_eq, -np.inf, 1)
     bounds = Bounds(0, 1)
-    integrality = np.ones(num_vars) 
+    integrality = np.ones(num_vars)
     
+    # Hide scipy output
     res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
     
     if not res.success:
-        print("MIP Solver failed or found no solution.")
-        return SwapResult([], 0.0)
+        return SwapResult([], [], 0.0)
         
-    # 5. Reconstruct
     selected_indices = np.where(res.x > 0.5)[0]
-    
     cycles = []
+    scores = []
     total_score_change = 0.0
     
     for idx in selected_indices:
         gain, b_i, b_j, b_k, local_flat = candidates[idx]
         total_score_change += gain
         
-        # Unravel local neuron indices (base 4)
         u_local = local_flat // 16
         rem = local_flat % 16
         v_local = rem // 4
@@ -406,13 +394,10 @@ def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
         neuron_k = b_k * ZERO_BLOCK_SIZE + w_local
         
         cycles.append((neuron_i, neuron_j, neuron_k))
+        scores.append(gain)
 
     total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
-    print(f"Time elapsed: {time.time() - start_time:0.3f}")
-    print(f"Cycles added this iteration: {len(cycles)}")
-    print(f"Improvement this iteration: {total_improvement:0.3f}")
-    
-    return SwapResult(cycles, total_improvement)
+    return SwapResult(cycles, scores, total_improvement)
 
 def get_best_cycles_n(
     actmat: npt.NDArray[np.bool_], n: int, use_cupy: bool = True
@@ -423,8 +408,6 @@ def get_best_cycles_n(
     without exploding memory, then solves the packing problem using MIP.
     """
     print(f"Starting get_best_cycles_n (n={n})")
-    start_time = time.time()
-
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
@@ -683,70 +666,127 @@ def get_best_cycles_n(
             print(f"Cycle {global_cycle} Gain: {gain}")
 
     total_improvement = total_gain / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
-    print(f"Time elapsed: {time.time() - start_time:0.3f}")
-    print(f"Improvement this iteration: {total_improvement:0.3f}")
-
     return SwapResult(final_cycles, total_improvement)
+
+
 
 def find_perm_impl(
     actmat: npt.NDArray[np.bool_], use_cupy: bool, L1: int
 ) -> npt.NDArray[np.int_]:
+    # Flatten actmat
     actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
-    if use_cupy:
-        actmat = cp.asarray(actmat, dtype=cp.int8)
-    actmat_orig = actmat.copy()
-
-    total_score_change = 0
+    
+    # Ensure master copy is on CPU (numpy) to save VRAM and allow easy slicing
+    if hasattr(actmat, "get"): # is cupy
+        actmat = actmat.get()
+    
+    actmat_orig = actmat 
+    n_samples = actmat_orig.shape[0]
+    
+    total_score_change = 0.0
     perm = np.arange(L1 // 2)
 
     stages: list[SwapFunction] = [
         make_swaps_2,
         make_swaps_3,
-        #lambda m, c: get_best_cycles_n(m, 3, c),
-        #lambda m, c: get_best_cycles_n(m, 4, c),
     ]
-    # The optimization routines are deterministic, so no need to retry.
-    stages_max_fails = [0, 0, 0]
+    
+    stages_max_fails = [10, 10]
     stage_id = 0
-    stop_after_stage = None
     num_fails = 0
+    
+    BATCH_SIZE = 4096
+    
+    # Validation Weights
+    W1 = 0.5
+    W2 = 0.5
+
+    indices = np.arange(n_samples)
+    np.random.shuffle(indices)
 
     for i in range(500):
-        print("Iteration", i + 1)
+        print(f"Iteration {i + 1} (Stage {stage_id})")
+        start_time = time.time()
+        
+        # 1. Shuffle and Prepare Mini-Batches
+        np.random.shuffle(indices)
+        
+        if n_samples < BATCH_SIZE * 2:
+            print("Warning: Dataset too small for separate validation batch.")
+            idx1 = indices[: n_samples // 2]
+            idx2 = indices[n_samples // 2 :]
+        else:
+            idx1 = indices[:BATCH_SIZE]
+            idx2 = indices[BATCH_SIZE : BATCH_SIZE * 2]
 
-        # Choose the current stage optimization function
+        batch1_cpu = actmat_orig[idx1, :][:, perm]
+        batch2_cpu = actmat_orig[idx2, :][:, perm]
+
+        if use_cupy:
+            batch1 = cp.asarray(batch1_cpu, dtype=cp.int8)
+            batch2 = cp.asarray(batch2_cpu, dtype=cp.int8)
+        else:
+            batch1 = batch1_cpu
+            batch2 = batch2_cpu
+
+        # 2. Find Candidates on Batch 1
         swap_fn = stages[stage_id]
+        
+        # res1 contains swaps and their scores on batch1
+        res1 = swap_fn(batch1, use_cupy)
+        
+        if not res1.swaps:
+            print("  No swaps found on Batch 1.")
+            accepted_swaps = []
+            accepted_gain = 0.0
+        else:
+            # 3. Evaluate Candidates on Batch 2
+            scores2 = evaluate_swaps_on_batch(batch2, res1.swaps, use_cupy)
+            
+            accepted_swaps = []
+            accepted_gain = 0.0
+            
+            # 4. Filter based on Weighted Average
+            count_proposed = len(res1.swaps)
+            
+            for swap, s1, s2 in zip(res1.swaps, res1.scores, scores2):
+                weighted_score = (W1 * s1) + (W2 * s2)
+                
+                if weighted_score > 0:
+                    accepted_swaps.append(swap)
+                    accepted_gain += weighted_score
+            
+            count_accepted = len(accepted_swaps)
+            print(f"  Validation: Accepted {count_accepted}/{count_proposed} swaps.")
 
-        # Apply the current permutation to get the current best neuron order.
-        actmat = actmat_orig[:, perm]
+        # 5. Apply Accepted Swaps
+        if accepted_swaps:
+            for cycle in accepted_swaps:
+                apply_rotate_right(perm, cycle)
 
-        # Calculate a set of independent right rotates (so swaps for 2 element case)
-        # that when applied improve the objective function
-        swap_result = swap_fn(actmat, use_cupy)
-        for cycle in swap_result.swaps:
-            # Update the current best permutation with the newly found adjustments.
-            apply_rotate_right(perm, cycle)
+            total_score_change += accepted_gain
 
-        total_score_change += swap_result.score_change
-        print(f"Total improvement: {total_score_change}\n")
-
-        if swap_result.score_change == 0:
+            print(f"Time elapsed: {time.time() - start_time:0.3f}")
+            print(f"Iteration improvement: {accepted_gain:0.5f}")
+            print(f"Total improvement: {total_score_change:0.7f}")
+            
+            num_fails = 0
+            if stage_id > 0:
+                stage_id = 0
+                print(f"Switching to stage {stage_id}")
+        else:
             num_fails += 1
+            print(f"  No improvement. Fails: {num_fails}/{stages_max_fails[stage_id]}")
+            
             if num_fails > stages_max_fails[stage_id]:
                 num_fails = 0
                 stage_id += 1
-
-                if stage_id >= len(stages) or (
-                    stop_after_stage is not None and stage_id > stop_after_stage
-                ):
+                
+                if stage_id >= len(stages):
                     print("No more improvement possible.")
                     break
-
+                    
                 print(f"Switching to stage {stage_id}")
-        else:
-            num_fails = 0
-            stage_id = max(0, stage_id - 1)
-            print(f"Switching to stage {stage_id}")
 
     return perm
 

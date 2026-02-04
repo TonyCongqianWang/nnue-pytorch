@@ -582,9 +582,10 @@ def find_perm_impl(
     stages: list[SwapFunction] = [
         make_swaps_2, lambda m,
         c: get_best_cycles_n(m, 3, c),
+        c: get_best_cycles_n(m, 4, c),
     ]
     # The optimization routines are deterministic, so no need to retry.
-    stages_max_fails = [0, 0]
+    stages_max_fails = [0, 0, 0]
     stage_id = 0
     stop_after_stage = None
     num_fails = 0
@@ -621,6 +622,10 @@ def find_perm_impl(
                     break
 
                 print(f"Switching to stage {stage_id}")
+        else:
+            num_fails = 0
+            stage_id = max(0, stage_id - 1)
+            print(f"Switching to stage {stage_id}")
 
     return perm
 

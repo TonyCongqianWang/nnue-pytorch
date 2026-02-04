@@ -6,7 +6,7 @@ Example use:
 
 1. Generate the activation matrix for some sample dataset.
 
-python ftperm.py gather -data="/kaggle/input/fishtest-data/fishpack32.binpack" --net=networks/nn-c288c895ea92.nnue --count=1000000 --features=Full_Threats --l1=1024 --out ftact1m.npy
+python ftperm.py gather -data="data/fishpack32.binpack" --net=networks/nn-c288c895ea92.nnue --count=1000000 --features=Full_Threats --l1=1024 --out ftact1m.npy
 
 2. Find a permutation
 
@@ -17,15 +17,13 @@ python ftperm.py find_perm --data=ftact1m.npy --out=ftact.perm --l1=1024
 python ftperm.py eval_perm --data=ftact1m.npy --perm=ftact.perm
 
 4. Apply permutation and save
-python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=Full_Threats --ft_perm=ftact.perm
+python serialize.py networks/nn-c288c895ea92.nnue permuted.nnue --features=Full_Threats --ft_perm=ftact.perm
 
 ----------------------------------------------------------------
 
 OR do the whole process in one step
 
-python serialize.py networks\nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm --ft_optimize --ft_optimize_data=data\fishpack32.binpack --ft_optimize_count=1000000
-
-python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm --ft_optimize --ft_optimize_data=noob_master_leaf_static_d12_85M_0.binpack --ft_optimize_count=10000
+python serialize.py networks/nn-c288c895ea92.nnue permuted.nnue --features=Full_Threats --ft_optimize --ft_optimize_data=data/fishpack32.binpack --ft_optimize_count=1000000
 
 """
 

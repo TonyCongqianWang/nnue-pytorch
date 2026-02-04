@@ -992,7 +992,7 @@ def find_perm_impl(
         sample = cp.asarray(actmat_orig[:check_size][:, perm], dtype=cp.int8)
         init_score = get_swapped_zero_positive_count(sample, use_cupy=True)
         # trace / (N * blocks) approximation
-        init_quality = cp.trace(init_score) / check_size / (n_neurons // ZERO_BLOCK_SIZE) * 100
+        init_quality = cp.trace(init_score) / check_size / n_neurons * 100
         print(f"Initialized permutation quality: {init_quality:.4f}%")
         del sample, init_score
         cp.get_default_memory_pool().free_all_blocks()
@@ -1011,12 +1011,12 @@ def find_perm_impl(
     num_fails = 0
     
     BATCH_SIZE = 2 ** 14
-    W1 = 0.4 # Weights for validation (0.5 means equal weight to finding and validating batch)
+    W1 = 0.25 # Weights for validation (0.5 means equal weight to finding and validating batch)
     
     start_time_global = time.time()
 
-    for i in range(2000):
-        if i in [1000, 1500, 1800]:
+    for i in range(4000):
+        if i in [2500, 3500, 3800]:
             W1 /= 2
             BATCH_SIZE *= 2
         if n_samples >= BATCH_SIZE * 2:

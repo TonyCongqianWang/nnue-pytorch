@@ -1049,59 +1049,77 @@ def filter_samples_impl(fens: list[str]) -> list[str]:
     return filtered
 
 
-def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool = True) -> npt.NDArray[np.bool_]:
-    ZERO_POINT = 0.0  # Vary this to check hypothetical forced larger truncation to zero
-    BATCH_SIZE = 1024
+def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool) -> npt.NDArray[np.bool_]:
+    ZERO_POINT = 0.0
+    
+    # Configuration
+    GPU_BATCH_SIZE = 1024   # Optimal size for your GPU
+    DISK_READ_SIZE = 16384  # Read large chunks to minimize I/O overhead
 
     quantized_model = copy.deepcopy(model)
     quantize_ft(quantized_model)
     quantized_model.cuda()
 
-    fen_batch_provider = make_fen_batch_provider(dataset, BATCH_SIZE)
+    # The provider reads raw lines from the file
+    fen_batch_provider = make_fen_batch_provider(dataset, DISK_READ_SIZE)
 
     actmats = []
-
+    fen_buffer = []  # The holding area
+    
     done = 0
     print(f"Target count: {count}")
-    
-    try:
-        while done < count:
-            # Fetch raw FENs
-            raw_fens = next(fen_batch_provider)
-            
-            # Apply combined filtering (Valid Position + BigNet Only)
-            fens = filter_samples_impl(raw_fens)
-            
-            # If batch is empty after filtering, skip to next
-            if not fens:
-                continue
 
-            # Limit to remaining count if we have too many
-            needed = count - done
-            if len(fens) > needed:
-                fens = fens[:needed]
+    while done < count:
+        # 1. Fill the buffer until we have enough for a GPU batch
+        #    (or until the dataset runs out)
+        dataset_exhausted = False
+        while len(fen_buffer) < GPU_BATCH_SIZE:
+            try:
+                raw_fens = next(fen_batch_provider)
+                valid_fens = filter_samples_impl(raw_fens) if filter_samples else raw_fens
+                fen_buffer.extend(valid_fens)
+            except StopIteration:
+                dataset_exhausted = True
+                break
+        
+        # 2. If buffer is empty after trying to fill, we are truly done
+        if not fen_buffer:
+            break
 
-            b = data_loader.get_sparse_batch_from_fens(
-                quantized_model.feature_set.name,
-                fens,
-                [0] * len(fens),
-                [1] * len(fens),
-                [0] * len(fens),
-            )
-            
-            with torch.no_grad():
-                actmat = eval_ft(quantized_model, b).cpu()
-            
-            actmat = actmat <= ZERO_POINT
-            actmats.append(actmat.numpy())
-            
-            data_loader.destroy_sparse_batch(b)
+        # 3. Slice off exactly one batch (or the remainder if we are finishing)
+        #    Don't exceed 'count' (global target)
+        remaining_needed = count - done
+        # We take the smaller of: GPU capacity, what's in buffer, or what's needed to finish
+        current_batch_size = min(GPU_BATCH_SIZE, len(fen_buffer), remaining_needed)
+        
+        batch_fens = fen_buffer[:current_batch_size]
+        
+        # Remove used fens from buffer (keep the rest for next time)
+        fen_buffer = fen_buffer[current_batch_size:]
 
-            done += len(fens)
-            print(f"Processed {done}/{count} positions.")
-            
-    except StopIteration:
-        print(f"Warning: Dataset exhausted. Gathered {done} samples.")
+        # 4. Process on GPU
+        b = data_loader.get_sparse_batch_from_fens(
+            quantized_model.feature_set.name,
+            batch_fens,
+            [0] * len(batch_fens),
+            [1] * len(batch_fens),
+            [0] * len(batch_fens),
+        )
+        
+        with torch.no_grad():
+            actmat = eval_ft(quantized_model, b).cpu()
+        
+        actmat = actmat <= ZERO_POINT
+        actmats.append(actmat.numpy())
+        
+        data_loader.destroy_sparse_batch(b)
+
+        done += len(batch_fens)
+        print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
+
+        if dataset_exhausted and not fen_buffer:
+            print(f"Warning: Dataset exhausted before reaching target. Stopped at {done}.")
+            break
 
     if not actmats:
         raise ValueError("No samples passed the filter criteria.")
@@ -1182,10 +1200,11 @@ def ft_optimize(
     count: int,
     actmat_save_path: str | None = None,
     perm_save_path: str | None = None,
+    filter_samples: bool = True
     use_cupy: bool = True,
 ) -> None:
     print("Gathering activation data...")
-    actmat = gather_impl(model, dataset_path, count)
+    actmat = gather_impl(model, dataset_path, count, filter_samples)
     if actmat_save_path is not None:
         with open(actmat_save_path, "wb") as file:
             np.save(file, actmat)

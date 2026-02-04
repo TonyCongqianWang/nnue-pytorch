@@ -409,6 +409,7 @@ def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
 
     total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
     print(f"Time elapsed: {time.time() - start_time:0.3f}")
+    print(f"Cycles added this iteration: {len(cycles)}")
     print(f"Improvement this iteration: {total_improvement:0.3f}")
     
     return SwapResult(cycles, total_improvement)

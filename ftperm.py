@@ -1048,31 +1048,27 @@ def simple_eval(board: chess.Board) -> int:
     return pawn_score + us_non_pawn - them_non_pawn
 
 
-def filter_samples_impl(fens: list[str]) -> list[str]:
+def filter_samples_impl(fens: list[str], threshold: int) -> list[str]:
     """
     Filters FENs to keep only those that are NOT evaluated by the small net.
     Logic: use_smallnet returns true if abs(simple_eval) > 962.
     We want the inverse: keep if abs(simple_eval) <= 962.
     """
-    THRESHOLD = 600
+    if threshold <= 0:
+        return fens
+    
     filtered = []
     
     for fen in fens:
         board = chess.Board(fen)
-        
-        # Original filter: Check for check (engine limitation)
-        if board.is_check():
-            continue
-            
-        # New filter: Big Net logic
         score = simple_eval(board)
-        if abs(score) <= THRESHOLD:
+        if abs(score) <= threshold:
             filtered.append(fen)
             
     return filtered
 
 
-def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool) -> npt.NDArray[np.bool_]:
+def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: int) -> npt.NDArray[np.bool_]:
     ZERO_POINT = 0.0
     
     # Configuration
@@ -1093,7 +1089,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
     old_done = 0
     done = 0
     print(f"Target count: {count}")
-    if filter_samples:
+    if filter_samples > 0:
         print("Sample filtering is enabled")
         num_filtered = 0
     while done < count:
@@ -1104,8 +1100,8 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
             try:
                 raw_fens = next(fen_batch_provider)
                 valid_fens = raw_fens
-                if filter_samples:
-                    valid_fens = filter_samples_impl(raw_fens)
+                if filter_samples > 0:
+                    valid_fens = filter_samples_impl(raw_fens, filter_samples)
                     num_filtered += len(raw_fens) - len(valid_fens)
                 fen_buffer.extend(valid_fens)
             except StopIteration:
@@ -1148,7 +1144,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
         if done > old_done + log_steps:
             old_done = done
             print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
-            if filter_samples:
+            if filter_samples > 0:
                 print(f"   Filtered Samples: {num_filtered}")
 
         if dataset_exhausted and not fen_buffer:
@@ -1234,7 +1230,7 @@ def ft_optimize(
     count: int,
     actmat_save_path: str | None = None,
     perm_save_path: str | None = None,
-    filter_samples: bool = True,
+    filter_samples: int = 600,
     skip_init: bool = False,
     max_iters: int = 6000,
     use_cupy: bool = True,
@@ -1290,7 +1286,7 @@ def main() -> None:
         "--count", type=int, default=1000, help="number of datapoints to process"
     )
     parser_gather.add_argument(
-        "--filter_samples", type=bool, default=True, help="Filter samples or not according to small_net deferral logic."
+        "--filter_samples", type=int, default=0, help="Filter samples based on threshold for simple eval."
     )
     parser_gather.add_argument(
         "--out", type=str, help="Filename under which to save the resulting ft matrix"

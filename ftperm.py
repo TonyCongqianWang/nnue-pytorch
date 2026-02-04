@@ -676,14 +676,17 @@ def find_perm_impl(
     # Flatten actmat
     actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
     
-    # Ensure master copy is on CPU (numpy) to save VRAM and allow easy slicing
-    if hasattr(actmat, "get"): # is cupy
+    # Ensure master copy is on CPU to save VRAM
+    if hasattr(actmat, "get"):
         actmat = actmat.get()
     
     actmat_orig = actmat 
     n_samples = actmat_orig.shape[0]
+    n_neurons = actmat_orig.shape[1]
+    n_blocks = n_neurons // ZERO_BLOCK_SIZE
     
-    total_score_change = 0.0
+    # Metric tracking
+    total_pct_improvement = 0.0
     perm = np.arange(L1 // 2)
 
     stages: list[SwapFunction] = [
@@ -691,34 +694,34 @@ def find_perm_impl(
         make_swaps_3,
     ]
     
+    # Allow more fails for stochastic mini-batches
     stages_max_fails = [10, 10]
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 4096
+    BATCH_SIZE = 2 ** 14
     
-    # Validation Weights
-    W1 = 0.5
-    W2 = 0.5
+    # Weights for validation (0.5 means equal weight to finding and validating batch)
+    W1 = 0.2
+    W2 = 0.8
 
-    indices = np.arange(n_samples)
-    np.random.shuffle(indices)
+    start_time_global = time.time()
 
-    for i in range(500):
-        print(f"Iteration {i + 1} (Stage {stage_id})")
-        start_time = time.time()
-        
-        # 1. Shuffle and Prepare Mini-Batches
-        np.random.shuffle(indices)
-        
-        if n_samples < BATCH_SIZE * 2:
-            print("Warning: Dataset too small for separate validation batch.")
-            idx1 = indices[: n_samples // 2]
-            idx2 = indices[n_samples // 2 :]
+    for i in range(5000):
+        # 1. Efficient Sampling
+        # Pick 2 * BATCH_SIZE indices at once (indices for batch 1 and batch 2)
+        # replace=False prevents overlap between batch1 and batch2
+        if n_samples >= BATCH_SIZE * 2:
+            current_indices = np.random.choice(n_samples, BATCH_SIZE * 2, replace=False)
+            idx1 = current_indices[:BATCH_SIZE]
+            idx2 = current_indices[BATCH_SIZE:]
         else:
-            idx1 = indices[:BATCH_SIZE]
-            idx2 = indices[BATCH_SIZE : BATCH_SIZE * 2]
+            # Fallback for small datasets
+            print("Warning: Dataset smaller than 2xBatch Size. Reusing data.")
+            idx1 = np.arange(n_samples // 2)
+            idx2 = np.arange(n_samples // 2, n_samples)
 
+        # Slice on CPU, then transfer to GPU if needed
         batch1_cpu = actmat_orig[idx1, :][:, perm]
         batch2_cpu = actmat_orig[idx2, :][:, perm]
 
@@ -731,52 +734,53 @@ def find_perm_impl(
 
         # 2. Find Candidates on Batch 1
         swap_fn = stages[stage_id]
-        
-        # res1 contains swaps and their scores on batch1
         res1 = swap_fn(batch1, use_cupy)
         
         if not res1.swaps:
-            print("  No swaps found on Batch 1.")
+            # No candidates found
             accepted_swaps = []
-            accepted_gain = 0.0
+            accepted_gain_raw = 0.0
         else:
             # 3. Evaluate Candidates on Batch 2
             scores2 = evaluate_swaps_on_batch(batch2, res1.swaps, use_cupy)
             
             accepted_swaps = []
-            accepted_gain = 0.0
+            accepted_gain_raw = 0.0
             
             # 4. Filter based on Weighted Average
-            count_proposed = len(res1.swaps)
-            
             for swap, s1, s2 in zip(res1.swaps, res1.scores, scores2):
-                weighted_score = (W1 * s1) + (W2 * s2)
+                # Calculate weighted raw score
+                weighted_raw = (W1 * s1) + (W2 * s2)
                 
-                if weighted_score > 0:
+                if weighted_raw > 0:
                     accepted_swaps.append(swap)
-                    accepted_gain += weighted_score
-            
-            count_accepted = len(accepted_swaps)
-            print(f"  Validation: Accepted {count_accepted}/{count_proposed} swaps.")
+                    accepted_gain_raw += weighted_raw
 
         # 5. Apply Accepted Swaps
         if accepted_swaps:
             for cycle in accepted_swaps:
                 apply_rotate_right(perm, cycle)
-
-            total_score_change += accepted_gain
-
-            print(f"Time elapsed: {time.time() - start_time:0.3f}")
-            print(f"Iteration improvement: {accepted_gain:0.5f}")
-            print(f"Total improvement: {total_score_change:0.7f}")
             
+            # NORMALIZE the gain to percentages
+            # accepted_gain_raw is the weighted sum of zeros gained in a batch of size BATCH_SIZE
+            # We normalize by (Batch Size * Blocks) to get the fraction of "perfect blocks" gained
+            current_pct_gain = (accepted_gain_raw / BATCH_SIZE / n_blocks) * 100
+            total_pct_improvement += current_pct_gain
+
+            count_accepted = len(accepted_swaps)
+            print(f"Iter {i+1} (Stage {stage_id}): Accepted {count_accepted} swaps.")
+            print(f"  Iter improvement: {current_pct_gain:0.5f}%")
+            print(f"  Total improvement: {total_pct_improvement:0.5f}%")
+            print(f"  Time elapsed: {time.time() - start_time_global:0.3f}s")
+
+            # Success! Reset fails and restart from Stage 0 (2-swaps)
+            # This allows us to catch simple swaps created by the new configuration
             num_fails = 0
-            if stage_id > 0:
-                stage_id = 0
-                print(f"Switching to stage {stage_id}")
+            stage_id = 0 
         else:
             num_fails += 1
-            print(f"  No improvement. Fails: {num_fails}/{stages_max_fails[stage_id]}")
+            # Only print every fail if verbose, otherwise just status update
+            print(f"Iter {i+1} (Stage {stage_id}): No improvement. Fails: {num_fails}/{stages_max_fails[stage_id]}")
             
             if num_fails > stages_max_fails[stage_id]:
                 num_fails = 0

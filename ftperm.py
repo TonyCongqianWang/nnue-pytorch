@@ -864,7 +864,7 @@ def find_perm_impl(
         if validation_steps > 0 and (i + 1) % validation_steps == 0 or i > 0.99 * max_iters:
             val_score = measure_validation_score(val_data, perm, use_cupy, n_neurons)
             elapsed = time.time() - start_time_global
-            print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
+            print(f"--- [Val] Iter {i + 1}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
             if val_score > best_val_score:
                 print(f"--- [Val]     New best score: {val_score:.4f} from {best_val_score:.4f} ---")
                 best_perm = perm.copy()

@@ -1071,7 +1071,9 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
     
     done = 0
     print(f"Target count: {count}")
-
+    if filter_samples:
+        print("Sample filtering is enabled")
+        num_filterered = 0
     while done < count:
         # 1. Fill the buffer until we have enough for a GPU batch
         #    (or until the dataset runs out)
@@ -1079,7 +1081,10 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
         while len(fen_buffer) < GPU_BATCH_SIZE:
             try:
                 raw_fens = next(fen_batch_provider)
-                valid_fens = filter_samples_impl(raw_fens) if filter_samples else raw_fens
+                valid_fens = raw_fens
+                if filter_samples:
+                    valid_fens = filter_samples_impl(raw_fens)
+                    num_filterered += len(raw_fens) - len(valid_fens)
                 fen_buffer.extend(valid_fens)
             except StopIteration:
                 dataset_exhausted = True
@@ -1119,6 +1124,8 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
 
         done += len(batch_fens)
         print(f"Processed {done}/{count} positions. (Buffer: {len(fen_buffer)})")
+        if filter_samples:
+            print("   Filtered Samples: {num_filterered}")
 
         if dataset_exhausted and not fen_buffer:
             print(f"Warning: Dataset exhausted before reaching target. Stopped at {done}.")

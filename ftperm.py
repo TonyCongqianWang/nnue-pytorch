@@ -1083,7 +1083,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int, filter_samples: bool
     # Configuration
     GPU_BATCH_SIZE = 1024   # Optimal size for your GPU
     DISK_READ_SIZE = 16384  # Read large chunks to minimize I/O overhead
-    log_steps = int(count / 100)
+    log_steps = int(count / 20)
     
     quantized_model = copy.deepcopy(model)
     quantize_ft(quantized_model)

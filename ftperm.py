@@ -714,23 +714,24 @@ def main() -> None:
     M.add_feature_args(parser_gather)
     parser_gather.set_defaults(func=command_gather)
 
-    parser_gather = subparsers.add_parser("find_perm", help="a help")
-    parser_gather.add_argument(
+    parser_find_perm = subparsers.add_parser("find_perm", help="a help")
+    parser_find_perm.add_argument(
         "--data", type=str, help="path to the previously gathered ft activation data"
     )
-    parser_gather.add_argument(
+    parser_find_perm.add_argument(
         "--out", type=str, help="path to where to save the permutation"
     )
-    parser_gather.set_defaults(func=command_find_perm)
+    parser_find_perm.add_argument("--l1", type=int, default=M.ModelConfig().L1)
+    parser_find_perm.set_defaults(func=command_find_perm)
 
-    parser_gather = subparsers.add_parser("eval_perm", help="a help")
-    parser_gather.add_argument(
+    parser_eval_perm = subparsers.add_parser("eval_perm", help="a help")
+    parser_eval_perm.add_argument(
         "--data", type=str, help="path to the previously gathered ft activation data"
     )
-    parser_gather.add_argument(
+    parser_eval_perm.add_argument(
         "--perm", type=str, help="path to the previously generated perm file"
     )
-    parser_gather.set_defaults(func=command_eval_perm)
+    parser_eval_perm.set_defaults(func=command_eval_perm)
 
     args = parser.parse_args()
 

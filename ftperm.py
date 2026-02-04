@@ -870,18 +870,15 @@ def find_perm_impl(
     stage_id = 0
     num_fails = 0
     
-    BATCH_SIZE = 2 ** 16
+    BATCH_SIZE = 2 ** 14
+    W1 = 0.4 # Weights for validation (0.5 means equal weight to finding and validating batch)
     
-    # Weights for validation (0.5 means equal weight to finding and validating batch)
-    W1 = 0.2
-    W2 = 0.8
-
     start_time_global = time.time()
 
-    for i in range(1000):
-        # 1. Efficient Sampling
-        # Pick 2 * BATCH_SIZE indices at once (indices for batch 1 and batch 2)
-        # replace=False prevents overlap between batch1 and batch2
+    for i in range(3000):
+        if i % 1000 == 0 and i > 0:
+            W1 /= 2
+            BATCH_SIZE *= 2
         if n_samples >= BATCH_SIZE * 2:
             current_indices = np.random.choice(n_samples, BATCH_SIZE * 2, replace=False)
             idx1 = current_indices[:BATCH_SIZE]
@@ -921,7 +918,7 @@ def find_perm_impl(
             # 4. Filter based on Weighted Average
             for swap, s1, s2 in zip(res1.swaps, res1.scores, scores2):
                 # Calculate weighted raw score
-                weighted_raw = (W1 * s1) + (W2 * s2)
+                weighted_raw = (W1 * s1) + ((1 - W1) * s2)
                 
                 if weighted_raw > 0:
                     accepted_swaps.append(swap)

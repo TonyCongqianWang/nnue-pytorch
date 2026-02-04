@@ -222,38 +222,42 @@ def evaluate_swaps_on_batch(
 ) -> list[float]:
     """
     Calculates the score change for a specific list of swaps/cycles on a given batch.
+    Handles mixed cycle lengths (2-swaps and 3-cycles) in the same list.
     """
     if not swaps:
         return []
 
+    # Precompute the score change matrix once
     score_changes = get_score_change(actmat, use_cupy=use_cupy)
     
     if use_cupy:
         score_changes = cp.asnumpy(score_changes)
 
-    cycle_len = len(swaps[0])
     scores = []
 
-    if cycle_len == 2:
-        for idx in swaps:
+    for idx in swaps:
+        cycle_len = len(idx)
+        
+        if cycle_len == 2:
+            # 2-swap: (i, j)
             i, j = idx
-            # gain(i, j) = score_change[i, j] + score_change[j, i]
+            # Gain is symmetric sum
             gain = score_changes[i, j] + score_changes[j, i]
             scores.append(gain)
             
-    elif cycle_len == 3:
-        for idx in swaps:
+        elif cycle_len == 3:
+            # 3-cycle: (i, j, k)
             i, j, k = idx
+            # Gain is sum of edges in the cycle i->j->k->i
             gain = score_changes[i, j] + score_changes[j, k] + score_changes[k, i]
             scores.append(gain)
             
-    else:
-        # Fallback for generic n-cycles
-        for cycle in swaps:
+        else:
+            # Generic n-cycle fallback
             gain = 0
-            for k in range(len(cycle)):
-                u = cycle[k]
-                v = cycle[(k + 1) % len(cycle)]
+            for k in range(cycle_len):
+                u = idx[k]
+                v = idx[(k + 1) % cycle_len]
                 gain += score_changes[u, v]
             scores.append(gain)
 

@@ -791,8 +791,8 @@ def find_perm_impl(
     # -----------------------------
     for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
-        if i in [int(frac * max_iters) for frac in [0.4, 0.8, 0.9, 0.97, 0.99]]:
-            W1 /= 1.5
+        if i in [int(frac * max_iters) for frac in [0.3, 0.6, 0.8, 0.9, 0.97, 0.99, 0.999]]:
+            W1 /= 1.4
             current_batch_size *= 2
             
             # Check if Training Data supports this Batch Size

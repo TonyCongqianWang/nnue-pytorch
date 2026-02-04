@@ -1257,7 +1257,7 @@ def main() -> None:
         "--count", type=int, default=1000, help="number of datapoints to process"
     )
     parser_gather.add_argument(
-        "--filter_samples", type=bool, default=True. help="Filter samples or not according to small_net deferral logic."
+        "--filter_samples", type=bool, default=True, help="Filter samples or not according to small_net deferral logic."
     )
     parser_gather.add_argument(
         "--out", type=str, help="Filename under which to save the resulting ft matrix"

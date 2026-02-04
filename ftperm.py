@@ -212,53 +212,84 @@ class SwapResult:
 SwapFunction: TypeAlias = Callable[[npt.NDArray[np.bool_], bool], SwapResult]
 
 
+import networkx as nx
+from scipy.optimize import milp, LinearConstraint, Bounds
+from scipy.sparse import coo_matrix
+
 def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
     """
-    Returns a series of independent 2-swap operations that collectively improve the objective function.
+    Returns a series of independent 2-swap operations using Maximum Weight Matching
+    to find the mathematically optimal set of block pairs.
     """
-
-    # For each pair of nodes, we want to calculate the difference between the number of 4-zero runs when swapping them
     start_time = time.time()
-    print("Starting make_swaps_2")
+    print("Starting make_swaps_2 (Exact Matching)")
 
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
+    n_blocks = n_neurons // ZERO_BLOCK_SIZE
 
-    # Compute the score change of swapping i-th and j-th neurons
+    # 1. Compute Score Change Matrix
+    # shape: (n_neurons, n_neurons)
     score_change = get_score_change(actmat, use_cupy=use_cupy)
-    # Sum score_change[i, j] + score_change[j, i] to get the cumulative impact of the swap.
+    
+    # Sum score_change[i, j] + score_change[j, i] for symmetric swap gain
+    # Move to CPU/numpy for graph operations if currently on GPU
+    if use_cupy:
+        score_change = cp.asnumpy(score_change)
+    
     score_change = score_change + score_change.T
 
-    def all_indices_in_same_block(i: np.int_) -> list[int]:
-        """Returns a list of indices of all neurons in the same block as the i-th neuron."""
-        # Floor to the start of the block.
-        base = i // ZERO_BLOCK_SIZE * ZERO_BLOCK_SIZE
-        return list(range(base, base + ZERO_BLOCK_SIZE))
+    # 2. Aggregate scores to Block-level
+    # We view the matrix as (Block, 4, Block, 4) to find best swap per block-pair
+    # Shape transformation: (Nb, 4, Nb, 4)
+    block_view = score_change.reshape(n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE)
+    
+    # Find the max possible gain between any two blocks u and v
+    # max_gains[u, v] = max gain achievable by swapping a neuron from block u with one from block v
+    max_gains = np.max(block_view, axis=(1, 3))
+    
+    # We also need to know *which* neurons generated that max gain
+    # argmax linearizes the inner dimensions (4*4=16), so we unravel later
+    max_indices = np.argmax(block_view.reshape(n_blocks, n_blocks, -1), axis=2)
 
+    # 3. Construct Graph for Matching
+    G = nx.Graph()
+    G.add_nodes_from(range(n_blocks))
+    
+    # Add edges only for positive gains. 
+    # Since the matrix is symmetric, we only look at upper triangle to avoid duplicates
+    for i in range(n_blocks):
+        for j in range(i + 1, n_blocks):
+            weight = max_gains[i, j]
+            if weight > 0:
+                G.add_edge(i, j, weight=weight)
+
+    # 4. Solve Maximum Weight Matching
+    # This finds the set of disjoint edges that maximizes sum(weights)
+    matching = nx.max_weight_matching(G, maxcardinality=False)
+
+    # 5. Reconstruct Neuron Swaps
     swaps = []
-    total_score_change = 0
-    while True:
-        swap = np.argmax(score_change)
-        # argmax returns a flat index, so we need to recompute the position.
-        i, j = swap // n_neurons, swap % n_neurons
+    total_score_change = 0.0
 
-        improvement = score_change[i, j]
-        if improvement == 0:
-            break
-
+    for u, v in matching:
+        # Retrieve the gain
+        gain = max_gains[u, v]
+        total_score_change += gain
+        
+        # Recover specific neuron indices (0-15 flat index relative to the u,v block pair)
+        flat_idx = max_indices[u, v]
+        u_local = flat_idx // ZERO_BLOCK_SIZE
+        v_local = flat_idx % ZERO_BLOCK_SIZE
+        
+        # Map back to global neuron indices
+        neuron_i = u * ZERO_BLOCK_SIZE + u_local
+        neuron_j = v * ZERO_BLOCK_SIZE + v_local
+        
+        swaps.append((neuron_i, neuron_j))
+        
         if VERBOSE:
-            print(f"Swapping {i} and {j} for improvement {improvement}")
-
-        # The swap is an improvement, add it to the list.
-        total_score_change += improvement
-        swaps.append((i, j))
-
-        indices_to_kill = all_indices_in_same_block(i) + all_indices_in_same_block(j)
-        for index in indices_to_kill:
-            # Zero out the improvement for the swaps to and from blocks which had neurons swapped.
-            # This ensures they won't be picked later, and therefore all swaps will be independent.
-            score_change[:, index] = 0
-            score_change[index, :] = 0
+             print(f"Swapping {neuron_i} and {neuron_j} (Blocks {u},{v}) for {gain}")
 
     total_improvement = (
         total_score_change / n_samples / (n_neurons // ZERO_BLOCK_SIZE) * 100
@@ -272,93 +303,150 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
 
 def make_swaps_3(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapResult:
     """
-    Returns a series of independent left-rotates operations that collectively improve the objective function.
+    Returns a series of independent left-rotates using a MIP solver 
+    to find the optimal 3-Set Packing.
     """
-
-    # For each triplet of nodes, we want to calculate the change in score when moving them in a cycle
-    print("Starting make_swaps_3")
+    print("Starting make_swaps_3 (MIP Optimization)")
     start_time = time.time()
 
     n_neurons = actmat.shape[1]
     n_samples = actmat.shape[0]
     n_blocks = n_neurons // ZERO_BLOCK_SIZE
 
+    # 1. Compute Score Tensor
     score_changes = get_score_change(actmat, use_cupy=use_cupy)
 
-    # For each neuron i, j, k we sum score_change[i, j] + score_change[j, k] + score_change[k, i]
-    # This is the cumulative impact of the right-rotation.
+    # Cumulative impact of rotation i->j->k->i
     score_changes = (
         score_changes[:, :, None]
         + score_changes[None, :, :]
         + (score_changes.T)[:, None, :]
     )
 
-    compressed_shape = (n_blocks, ZERO_BLOCK_SIZE) * 3
-    cycles = []
-    total_score_change = 0
-
     if use_cupy:
-        # We don't want to have to go through an enormous array so compress it to represent blocks rather than neurons
-        # Cupy doesn't support a list of axes so we go one by one.
-        max_values = cp.amax(
-            cp.reshape(score_changes, compressed_shape), axis=5, keepdims=False
-        )
-        max_values = cp.amax(max_values, axis=3, keepdims=False)
-        max_values = cp.amax(max_values, axis=1, keepdims=False)
-    else:
-        max_values = np.amax(
-            np.reshape(score_changes, compressed_shape), axis=(5, 3, 1), keepdims=False
-        )
+        score_changes = cp.asnumpy(score_changes)
 
-    # Kill rotates that would only affect less than 3 different blocks.
-    # We must do this, because the rest of the algorithm relies on it for correctness.
-    # It would also be pointless as such cases degenerate to the ones handled by make_swaps_2.
-    for block in range(n_blocks):
-        max_values[block, block, :] = 0
-        max_values[block, :, block] = 0
-        max_values[:, block, block] = 0
+    # 2. Aggregate to Block-level to find candidates
+    # Shape: (Nb, 4, Nb, 4, Nb, 4)
+    block_view = score_changes.reshape(
+        n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE, n_blocks, ZERO_BLOCK_SIZE
+    )
 
-    while True:
-        best_blocks = max_values.argmax()
-        improvement_blocks = max_values.flatten()[best_blocks]
-        if improvement_blocks == 0:
-            break
+    # Find max gain for every triplet of blocks
+    # max_gains shape: (Nb, Nb, Nb)
+    max_gains = np.max(block_view, axis=(1, 3, 5))
+    
+    # Keep track of which local neurons produced the max gain
+    # Shape: (Nb, Nb, Nb) containing values 0..63
+    max_indices_flat = np.argmax(
+        block_view.reshape(n_blocks, n_blocks, n_blocks, -1), axis=3
+    )
 
-        total_score_change += improvement_blocks
+    # 3. Identify Candidates (Pruning)
+    # We only care about triplets (i, j, k) where i != j != k and gain > 0
+    # and to strictly order them (i < j < k) isn't sufficient because direction matters in rotation,
+    # but (i, j, k) is distinct from (i, k, j). 
+    # However, (i, j, k) is the same cycle as (j, k, i).
+    # To avoid duplicate cycles, we enforce i < j and i < k (canonical form of cycle).
+    
+    candidates = [] # Stores (gain, b_i, b_j, b_k, local_idx)
+    
+    # Iterate through blocks. This loop is O(Nb^3), but Nb is small (~128 for 512 neurons).
+    # For larger networks, we might need a sparse representation earlier.
+    it = np.nditer(max_gains, flags=['multi_index'])
+    for gain in it:
+        if gain <= 0:
+            continue
+            
+        i, j, k = it.multi_index
+        
+        # Enforce distinct blocks
+        if i == j or j == k or i == k:
+            continue
+            
+        # Canonical representation to avoid duplicate cycles: Smallest index first
+        if i > j or i > k:
+            continue
+            
+        candidates.append((gain, i, j, k, max_indices_flat[i, j, k]))
 
-        # We first find the blocks that have neurons that can be rotated with a gain.
-        b1, b2, b3 = np.unravel_index(best_blocks, (n_blocks, n_blocks, n_blocks))
-        i, j, k = b1 * ZERO_BLOCK_SIZE, b2 * ZERO_BLOCK_SIZE, b3 * ZERO_BLOCK_SIZE
+    print(f"Found {len(candidates)} candidate cycles with positive gain.")
+    
+    if not candidates:
+        return SwapResult([], 0.0)
 
-        # Now we need to find the best set of neurons for this rotation in the found blocks
-        # (we already know there is a gain available)
-        local_score_changes = score_changes[
-            i : i + ZERO_BLOCK_SIZE, j : j + ZERO_BLOCK_SIZE, k : k + ZERO_BLOCK_SIZE
-        ]
-        best_neurons = local_score_changes.argmax()
-        improvement_neurons = local_score_changes.flatten()[best_neurons]
-        assert improvement_blocks == improvement_neurons
-        i1, j1, k1 = np.unravel_index(
-            best_neurons, (ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE, ZERO_BLOCK_SIZE)
-        )
-        i, j, k = i + i1, j + j1, k + k1
-
+    # 4. Formulate MIP (Mixed Integer Programming)
+    # Maximize sum(x_c * gain_c)
+    # Subject to: sum(x_c for c containing block b) <= 1  (Each block used once)
+    
+    num_vars = len(candidates)
+    
+    # Objective: minimize (-gain * x), since scipy minimizes
+    c_obj = -np.array([cand[0] for cand in candidates])
+    
+    # Constraints matrix (Sparse)
+    # Rows: Blocks (0 to n_blocks-1)
+    # Cols: Candidates (0 to num_vars-1)
+    row_ind = []
+    col_ind = []
+    data = []
+    
+    for c_idx, (_, b1, b2, b3, _) in enumerate(candidates):
+        # This candidate uses blocks b1, b2, b3
+        for b in [b1, b2, b3]:
+            row_ind.append(b)
+            col_ind.append(c_idx)
+            data.append(1)
+            
+    A_eq = coo_matrix((data, (row_ind, col_ind)), shape=(n_blocks, num_vars))
+    
+    # Constraints: A_eq @ x <= 1
+    # We use -inf as lower bound and 1 as upper bound for the inequality
+    constraints = LinearConstraint(A_eq, -np.inf, 1)
+    
+    # Binary variables (0 or 1)
+    bounds = Bounds(0, 1)
+    integrality = np.ones(num_vars) # 1 = Integer
+    
+    # Solve
+    print("Solving MIP...")
+    res = milp(c=c_obj, constraints=constraints, bounds=bounds, integrality=integrality)
+    
+    if not res.success:
+        print("MIP Solver failed or found no solution.")
+        return SwapResult([], 0.0)
+        
+    # 5. Reconstruct Cycles
+    selected_indices = np.where(res.x > 0.5)[0] # Threshold for binary variable
+    
+    cycles = []
+    total_score_change = 0.0
+    
+    for idx in selected_indices:
+        gain, b_i, b_j, b_k, local_flat = candidates[idx]
+        total_score_change += gain
+        
+        # Unravel local neuron indices (base 4)
+        # 4 * 4 * 4 = 64
+        u_local = local_flat // 16
+        rem = local_flat % 16
+        v_local = rem // 4
+        w_local = rem % 4
+        
+        # Map to global neuron indices
+        neuron_i = b_i * ZERO_BLOCK_SIZE + u_local
+        neuron_j = b_j * ZERO_BLOCK_SIZE + v_local
+        neuron_k = b_k * ZERO_BLOCK_SIZE + w_local
+        
+        cycles.append((neuron_i, neuron_j, neuron_k))
+        
         if VERBOSE:
-            print(f"Right-rotating {i}, {j}, {k} for improvement {improvement_neurons}")
-
-        # Add the right-rotate indices. We add them in reverse order as we previously computed for a right-rotate.
-        cycles.append((i, j, k))
-
-        # Now silence these blocks since the scores are no longer accurate
-        # We only need to affect the smaller array since gains of zeros and under are ignored
-        for b in (b1, b2, b3):
-            max_values[b, :, :] = 0
-            max_values[:, b, :] = 0
-            max_values[:, :, b] = 0
+             print(f"Rotating {neuron_i}, {neuron_j}, {neuron_k} (Blocks {b_i},{b_j},{b_k}) for {gain}")
 
     total_improvement = total_score_change / n_samples / (n_neurons // 4) * 100
     print(f"Time elapsed: {time.time() - start_time:0.3f}")
     print(f"Improvement this iteration: {total_improvement:0.3f}")
+    
     return SwapResult(cycles, total_improvement)
 
 

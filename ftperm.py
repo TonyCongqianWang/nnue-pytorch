@@ -774,7 +774,7 @@ def find_perm_impl(
     
     # 5. Optimization Loop
     # -----------------------------
-    for i in range(4000):
+    for i in range(6000):
         
         # --- Periodic Validation ---
         if validation_steps > 0 and i > 0 and i % validation_steps == 0:
@@ -783,7 +783,7 @@ def find_perm_impl(
             print(f"--- [Val] Iter {i}: {val_score:.4f}% (Elapsed: {elapsed:.1f}s) ---")
         
         # --- Schedule & Batch Sizing ---
-        if i in [2500, 3600, 3800, 3900]:
+        if i in [4000, 5000, 5500, 5900]:
             W1 /= 2
             BATCH_SIZE *= 2
         

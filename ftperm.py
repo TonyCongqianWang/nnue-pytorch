@@ -580,9 +580,9 @@ def find_perm_impl(
     perm = np.arange(L1 // 2)
 
     stages: list[SwapFunction] = [
-        make_swaps_2, lambda m,
-        c: get_best_cycles_n(m, 3, c),
-        c: get_best_cycles_n(m, 4, c),
+        make_swaps_2,
+        lambda m, c: get_best_cycles_n(m, 3, c),
+        lambda m, c: get_best_cycles_n(m, 4, c),
     ]
     # The optimization routines are deterministic, so no need to retry.
     stages_max_fails = [0, 0, 0]

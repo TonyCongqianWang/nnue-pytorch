@@ -781,7 +781,7 @@ def find_perm_impl(
     
     BASE_BATCH_SIZE = 2 ** 10
     current_batch_size = BASE_BATCH_SIZE # Fixed: Was undefined 'BATCH_SIZE'
-    W1 = 0.45
+    W1 = 0.3
 
     if train_data.shape[0] < current_batch_size * 2:
         current_batch_size = train_data.shape[0] // 2
@@ -795,7 +795,7 @@ def find_perm_impl(
     for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
         if i in [int(frac * max_iters) for frac in [0.4, 0.8, 0.9, 0.97, 0.99]]:
-            W1 /= 2
+            W1 /= 1.5
             current_batch_size *= 2
             
             # Check if Training Data supports this Batch Size

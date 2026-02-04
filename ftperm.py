@@ -290,6 +290,7 @@ def make_swaps_2(actmat: npt.NDArray[np.bool_], use_cupy: bool = True) -> SwapRe
     )
 
     print(f"Time elapsed: {time.time() - start_time:0.3f}")
+    print(f"Swaps added this iteration: {len(swaps)}")
     print(f"Improvement this iteration: {total_improvement:0.3f}")
 
     return SwapResult(swaps, total_improvement)

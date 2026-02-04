@@ -718,6 +718,7 @@ def find_perm_impl(
     actmat: npt.NDArray[np.bool_], 
     use_cupy: bool, 
     L1: int,
+    max_iters: int = 2000,
     log_steps: int = 10,
     validation_steps: int = 50,
     validation_set_size: float = 0.25
@@ -773,7 +774,6 @@ def find_perm_impl(
     
     # 5. Optimization Loop
     # -----------------------------
-    max_iters = 2000
     for i in range(max_iters):
         # --- Schedule & Batch Sizing ---
         if i in [800, 1400, 1800, 1900, 1970]:
@@ -1190,7 +1190,7 @@ def command_find_perm(args: argparse.Namespace) -> None:
     with open(args.data, "rb") as file:
         actmat = np.load(file)
 
-    perm = find_perm_impl(actmat, args.use_cupy, args.l1)
+    perm = find_perm_impl(actmat, args.use_cupy, args.l1, args.max_iters)
 
     # perm = np.random.permutation([i for i in range(L1)])
     with open(args.out, "wb") as file:
@@ -1203,7 +1203,7 @@ def ft_optimize(
     count: int,
     actmat_save_path: str | None = None,
     perm_save_path: str | None = None,
-    filter_samples: bool = True
+    filter_samples: bool = True,
     use_cupy: bool = True,
 ) -> None:
     print("Gathering activation data...")
@@ -1274,6 +1274,7 @@ def main() -> None:
         "--out", type=str, help="path to where to save the permutation"
     )
     parser_find_perm.add_argument("--l1", type=int, default=M.ModelConfig().L1)
+    parser_find_perm.add_argument("--max_iters", type=int, default=2000)
     parser_find_perm.set_defaults(func=command_find_perm)
 
     parser_eval_perm = subparsers.add_parser("eval_perm", help="a help")

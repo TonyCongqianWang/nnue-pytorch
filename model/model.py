@@ -3,7 +3,7 @@ from torch import nn
 
 from .config import ModelConfig
 from .features import FeatureSet
-from .modules import DoubleFeatureTransformer, LayerStacks
+from .modules import DoubleFeatureTransformer, LayerStacks, FactorizedStackedLinear
 from .quantize import QuantizationConfig, QuantizationManager
 
 
@@ -19,6 +19,7 @@ class NNUEModel(nn.Module):
         super().__init__()
 
         self.threat_features = config.threat_features
+        self.L_PSQ = config.L_PSQ
         self.L1 = config.L1
         self.L2 = config.L2
         self.L3 = config.L3
@@ -27,9 +28,14 @@ class NNUEModel(nn.Module):
         self.num_ls_buckets = num_ls_buckets
 
         self.input = DoubleFeatureTransformer(
-            feature_set.num_features, self.L1 + self.num_psqt_buckets
+            feature_set.num_features, self.L1 + self.L_PSQ
         )
         self.feature_set = feature_set
+        self.psq_proj = FactorizedStackedLinear(
+            in_features=self.L_PSQ, 
+            out_features=1, 
+            count=self.num_psqt_buckets
+        )
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config)
 
         self.quantization = QuantizationManager(quantize_config)
@@ -45,12 +51,13 @@ class NNUEModel(nn.Module):
         """
         We zero all virtual feature weights because there's not need for them
         to be initialized; they only aid the training of correlated features.
+        
+        Assumes weight shape is [in_features, out_features].
         """
-        weights = self.input.weight
         with torch.no_grad():
             for a, b in self.feature_set.get_virtual_feature_ranges():
-                weights[a:b, :] = 0.0
-        self.input.weight = nn.Parameter(weights)
+                # Slicing the first dimension (in_features) and zeroing all outputs in-place
+                self.input.weight[a:b, :].zero_()
 
     def _init_psqt(self):
         input_weights = self.input.weight
@@ -71,7 +78,7 @@ class NNUEModel(nn.Module):
                 * scale
             )
 
-            for i in range(self.num_psqt_buckets):
+            for i in range(self.L_PSQ // 2):
                 input_weights[:, self.L1 + i] = new_weights
                 # Bias doesn't matter because it cancels out during
                 # inference during perspective averaging. We set it to 0
@@ -187,23 +194,31 @@ class NNUEModel(nn.Module):
         layer_stack_indices: torch.Tensor,
     ):
         wp, bp = self.input(white_indices, white_values, black_indices, black_values)
-        w, wpsqt = torch.split(wp, self.L1, dim=1)
-        b, bpsqt = torch.split(bp, self.L1, dim=1)
+        w, wpsqt = torch.split(wp, [self.L1, self.L_PSQ], dim=1)
+        b, bpsqt = torch.split(bp, [self.L1, self.L_PSQ], dim=1)
+        
         l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
         l0_ = torch.clamp(l0_, 0.0, 1.0)
 
-        l0_s = torch.split(l0_, self.L1 // 2, dim=1)
-        l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
+        psqt_ = (us * torch.cat([wpsqt, bpsqt], dim=1)) + (them * torch.cat([bpsqt, wpsqt], dim=1))
+
+        l0_s = torch.chunk(l0_, 4, dim=1)
+        l0_s1 = torch.cat([
+            l0_s[0] * l0_s[1],
+            l0_s[2] * l0_s[3]
+        ], dim=1)
+
+        psqt_s = torch.chunk(psqt_, 4, dim=1)
+        psqt_s1 = torch.cat([
+            psqt_s[0] * torch.clamp(psqt_s[1], 0.0, 1.0), 
+            psqt_s[2] * torch.clamp(psqt_s[3], 0.0, 1.0)
+        ], dim=1)
+        
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
-        l0_ = torch.cat(l0_s1, dim=1) * (127 / 128)
+        l0_ = l0_s1 * (127 / 128)
+        psqt_ = psqt_s1
 
-        psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
-        wpsqt = wpsqt.gather(1, psqt_indices_unsq)
-        bpsqt = bpsqt.gather(1, psqt_indices_unsq)
-        # The PSQT values are averaged over perspectives. "Their" perspective
-        # has a negative influence (us-0.5 is 0.5 for white and -0.5 for black,
-        # which does both the averaging and sign flip for black to move)
-        x = self.layer_stacks(l0_, layer_stack_indices) + (wpsqt - bpsqt) * (us - 0.5)
+        x = self.layer_stacks(l0_, layer_stack_indices) + self.psq_proj(psqt_, psqt_indices)
 
         return x

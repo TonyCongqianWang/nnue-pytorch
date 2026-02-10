@@ -1,18 +1,15 @@
 from dataclasses import dataclass
-from typing import Callable, NotRequired, TypedDict, TYPE_CHECKING
-
+from typing import Callable, Optional, TypedDict, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
     from .model import NNUEModel
 
-
 class WeightClippingConfig(TypedDict):
     params: list[torch.Tensor]
-    min_weight: float
-    max_weight: float
-    virtual_params: NotRequired[torch.Tensor]
-
+    min_weight: Optional[float]
+    max_weight: Optional[float]
+    virtual_params: Optional[torch.Tensor]
 
 @dataclass
 class QuantizationConfig:
@@ -21,7 +18,7 @@ class QuantizationConfig:
     weight_scale_out: float = 16.0
     ft_quantized_one: float = 255.0
     hidden_quantized_one: float = 127.0
-
+    threat_scale: float = 512.0
 
 class QuantizationManager:
     def __init__(self, config: QuantizationConfig):
@@ -32,7 +29,9 @@ class QuantizationManager:
         self.ft_quantized_one = config.ft_quantized_one
 
         self.max_hidden_weight = config.hidden_quantized_one / self.weight_scale_hidden
-        self.max_threat_weight = config.ft_quantized_one / 512
+        self.max_threat_weight = config.ft_quantized_one / config.threat_scale
+        
+        # Max weight for the final output layer
         self.max_out_weight = (
             config.hidden_quantized_one * self.hidden_quantized_one
         ) / (self.nnue2score * self.weight_scale_out)
@@ -40,7 +39,8 @@ class QuantizationManager:
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        return [
+        clipping_configs: list[WeightClippingConfig] = [
+            # Int8 Quantized Hidden Weights
             {
                 "params": [model.layer_stacks.l1.linear.weight],
                 "min_weight": -self.max_hidden_weight,
@@ -52,12 +52,31 @@ class QuantizationManager:
                 "min_weight": -self.max_hidden_weight,
                 "max_weight": self.max_hidden_weight,
             },
+            # Int32 Quantized Output and PSQ
             {
                 "params": [model.layer_stacks.output.linear.weight],
                 "min_weight": -self.max_out_weight,
                 "max_weight": self.max_out_weight,
+                "virtual_params": None,
             },
+            {
+                "params": [model.psq_proj.linear.weight],
+                "min_weight": -self.max_out_weight,
+                "max_weight": self.max_out_weight,
+                "virtual_params": model.psq_proj.factorized_linear.weight,
+            }
         ]
+        
+        # Handle intermediate layers (L2, L3)
+        if hasattr(model.layer_stacks, 'l2'):
+             clipping_configs.append({
+                "params": [model.layer_stacks.l2.linear.weight],
+                "min_weight": -self.max_hidden_weight,
+                "max_weight": self.max_hidden_weight,
+                "virtual_params": None,
+            })
+            
+        return clipping_configs
 
     def quantize_feature_transformer(
         self,

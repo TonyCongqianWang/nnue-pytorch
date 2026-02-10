@@ -22,7 +22,6 @@ class QuantizationConfig:
     ft_quantized_one: float = 255.0
     hidden_quantized_one: float = 127.0
     # New scale for PSQT branch: one_value = 600 * 2 = 1200
-    # Since nnue2score is 600, we need a multiplier of 2.0
     psqt_scale: float = 2.0
 
 
@@ -41,10 +40,18 @@ class QuantizationManager:
             config.hidden_quantized_one * self.hidden_quantized_one
         ) / (self.nnue2score * self.weight_scale_out)
 
+        # Calculate max weight for PSQ layer
+        # Target Output Scale: nnue2score * weight_scale_out (9600)
+        # Input Scale (PSQT): nnue2score * psqt_scale (1200)
+        # Required Weight Scale: Target / Input = 9600 / 1200 = 8.0
+        # Max Weight: 127 / 8.0 = 15.875
+        self.psq_weight_scale = self.weight_scale_out / self.psqt_scale
+        self.max_psq_weight = self.hidden_quantized_one / self.psq_weight_scale
+
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        configs: list[WeightClippingConfig] = [
+        return [
             {
                 "params": [model.layer_stacks.l1.linear.weight],
                 "min_weight": -self.max_hidden_weight,
@@ -61,15 +68,14 @@ class QuantizationManager:
                 "min_weight": -self.max_out_weight,
                 "max_weight": self.max_out_weight,
             },
-            # Added PSQ Projection clipping
+            # Added PSQ Projection clipping with correct bounds
             {
                 "params": [model.psq_proj.linear.weight],
-                "min_weight": -self.max_out_weight,
-                "max_weight": self.max_out_weight,
+                "min_weight": -self.max_psq_weight,
+                "max_weight": self.max_psq_weight,
                 "virtual_params": model.psq_proj.factorized_linear.weight,
             }
         ]
-        return configs
 
     def quantize_feature_transformer(
         self,
@@ -81,7 +87,7 @@ class QuantizationManager:
         bias = bias.mul(self.ft_quantized_one).round().to(torch.int16)
         weight = weight.mul(self.ft_quantized_one).round().to(torch.int16)
         
-        # Updated PSQT quantization to int16 with scale 1200 (nnue2score * 2.0)
+        # PSQT quantized to int16 with scale 1200 (nnue2score * 2.0)
         psqt_weight = (
             psqt_weight.mul(self.nnue2score * self.psqt_scale)
             .round()
@@ -100,7 +106,6 @@ class QuantizationManager:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bias = bias.divide(self.ft_quantized_one)
         weight = weight.divide(self.ft_quantized_one)
-        # Updated PSQT dequantization
         psqt_weight = psqt_weight.divide(self.nnue2score * self.psqt_scale)
 
         return bias, weight, psqt_weight
@@ -110,16 +115,26 @@ class QuantizationManager:
         bias: torch.Tensor,
         weight: torch.Tensor,
         output_layer: bool = False,
+        is_psq_layer: bool = False,
         callback: Callable = lambda *args, **kwargs: None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        kWeightScaleHidden = self.weight_scale_hidden
-        kWeightScaleOut = (
-            self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
-        )
-        kWeightScale = kWeightScaleOut if output_layer else kWeightScaleHidden
-        kBiasScaleOut = self.weight_scale_out * self.nnue2score
-        kBiasScaleHidden = self.weight_scale_hidden * self.hidden_quantized_one
-        kBiasScale = kBiasScaleOut if output_layer else kBiasScaleHidden
+        
+        if is_psq_layer:
+            # PSQ Layer logic (Scale ~8.0)
+            kWeightScale = self.psq_weight_scale
+            # Bias scale matches the output accumulator (9600)
+            kBiasScale = self.weight_scale_out * self.nnue2score
+        elif output_layer:
+            # Standard Output Layer logic (Scale ~75.6)
+            kWeightScale = (
+                self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
+            )
+            kBiasScale = self.weight_scale_out * self.nnue2score
+        else:
+            # Hidden Layer logic
+            kWeightScale = self.weight_scale_hidden
+            kBiasScale = self.weight_scale_hidden * self.hidden_quantized_one
+
         kMaxWeight = self.hidden_quantized_one / kWeightScale
 
         bias = bias.mul(kBiasScale).round().to(torch.int32)
@@ -146,15 +161,20 @@ class QuantizationManager:
         bias: torch.Tensor,
         weight: torch.Tensor,
         output_layer: bool = False,
+        is_psq_layer: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        kWeightScaleHidden = self.weight_scale_hidden
-        kWeightScaleOut = (
-            self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
-        )
-        kWeightScale = kWeightScaleOut if output_layer else kWeightScaleHidden
-        kBiasScaleOut = self.weight_scale_out * self.nnue2score
-        kBiasScaleHidden = self.weight_scale_hidden * self.hidden_quantized_one
-        kBiasScale = kBiasScaleOut if output_layer else kBiasScaleHidden
+        
+        if is_psq_layer:
+            kWeightScale = self.psq_weight_scale
+            kBiasScale = self.weight_scale_out * self.nnue2score
+        elif output_layer:
+            kWeightScale = (
+                self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
+            )
+            kBiasScale = self.weight_scale_out * self.nnue2score
+        else:
+            kWeightScale = self.weight_scale_hidden
+            kBiasScale = self.weight_scale_hidden * self.hidden_quantized_one
 
         bias = bias.divide(kBiasScale)
         weight = weight.divide(kWeightScale)

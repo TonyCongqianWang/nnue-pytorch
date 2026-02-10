@@ -89,11 +89,17 @@ class NNUEWriter:
         self.write_header(model, fc_hash, description)
         self.int32(model.feature_set.hash ^ (model.L1 * 2))  # Feature transformer hash
         self.write_feature_transformer(model, ft_compression)
+        
+        # Write LayerStacks
         for l1, l2, output in model.layer_stacks.get_coalesced_layer_stacks():
             self.int32(fc_hash)  # FC layers hash
             self.write_fc_layer(model, l1)
             self.write_fc_layer(model, l2)
             self.write_fc_layer(model, output, is_output=True)
+            
+        # Write PSQ Projection Layer (using same hash for now)
+        self.int32(fc_hash)
+        self.write_fc_layer(model, model.psq_proj.linear, is_output=True)
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -106,13 +112,20 @@ class NNUEWriter:
             model.layer_stacks.l1.linear,
             model.layer_stacks.l2.linear,
             model.layer_stacks.output.linear,
+            # Added PSQ Projection to hash
+            model.psq_proj.linear,
         ]
         for layer in layers:
             layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features // model.num_ls_buckets
+            # PSQ buckets might differ from LS buckets, handling normalization
+            buckets = model.num_ls_buckets
+            if layer == model.psq_proj.linear:
+                buckets = model.num_psqt_buckets
+                
+            layer_hash += layer.out_features // buckets
             layer_hash ^= prev_hash >> 1
             layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
-            if layer.out_features // model.num_ls_buckets != 1:
+            if layer.out_features // buckets != 1:
                 # Clipped ReLU hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
@@ -171,6 +184,8 @@ class NNUEWriter:
             self.write_tensor(psq_weight.flatten().numpy(), ft_compression)
         else:
             self.write_tensor(weight.flatten().numpy(), ft_compression)
+        
+        # Write PSQT weights as int16
         self.write_tensor(psqt_weight.flatten().numpy(), ft_compression)
 
     def write_fc_layer(
@@ -235,6 +250,8 @@ class NNUEReader:
             feature_set.hash ^ (self.config.L1 * 2)
         )  # Feature transformer hash
         self.read_feature_transformer(self.model.input, self.model.num_psqt_buckets)
+        
+        # Read LayerStacks
         for i in range(self.model.num_ls_buckets):
             l1 = nn.Linear(2 * self.config.L1 // 2, self.config.L2 + 1)
             l2 = nn.Linear(self.config.L2 * 2, self.config.L3)
@@ -261,6 +278,13 @@ class NNUEReader:
                 output.weight
             )
             self.model.layer_stacks.output.linear.bias.data[i : (i + 1)] = output.bias
+
+        # Read PSQ Projection Layer
+        self.read_int32(fc_hash)
+        # Assuming buckets are stacked in the linear weight similar to layer_stacks logic,
+        # but psq_proj in FactorizedStackedLinear is already one big linear layer [buckets*out, in]
+        # read_fc_layer will read it as such.
+        self.read_fc_layer(self.model.psq_proj.linear, is_output=True)
 
     def read_header(self, feature_set: FeatureSet, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
@@ -322,7 +346,9 @@ class NNUEReader:
             weight = torch.cat([threat_weight, psq_weight], dim=0)
         else:
             weight = self.tensor(np.int16, [shape[0], shape[1] - num_psqt_buckets])
-        psqt_weight = self.tensor(np.int32, [shape[0], num_psqt_buckets])
+            
+        # Read PSQT weights as int16 (Updated from int32)
+        psqt_weight = self.tensor(np.int16, [shape[0], num_psqt_buckets])
 
         bias, weight, psqt_weight = (
             self.model.quantization.dequantize_feature_transformer(

@@ -51,11 +51,6 @@ class NNUEModel(nn.Module):
         """
         We zero all virtual feature weights because there's not need for them
         to be initialized; they only aid the training of correlated features.
-        """
-    def _zero_virtual_feature_weights(self):
-        """
-        We zero all virtual feature weights because there's not need for them
-        to be initialized; they only aid the training of correlated features.
         
         Assumes weight shape is [in_features, out_features].
         """

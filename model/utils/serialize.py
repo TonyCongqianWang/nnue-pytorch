@@ -82,9 +82,6 @@ class NNUEWriter:
 
         self.buf = bytearray()
 
-        # NOTE: model.clip_weights() should probably be called here. It's not necessary now
-        # because it doesn't have more restrictive bounds than these defined by quantization,
-        # but it might be necessary in the future.
         fc_hash = self.fc_hash(model)
         self.write_header(model, fc_hash, description)
         self.int32(model.feature_set.hash ^ (model.L1 * 2))  # Feature transformer hash
@@ -99,7 +96,8 @@ class NNUEWriter:
             
         # Write PSQ Projection Layer (using same hash for now)
         self.int32(fc_hash)
-        self.write_fc_layer(model, model.psq_proj.linear, is_output=True)
+        # We flag this as a PSQ layer so the quantization manager uses the correct scaling (8.0)
+        self.write_fc_layer(model, model.psq_proj.linear, is_output=True, is_psq_layer=True)
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -117,7 +115,7 @@ class NNUEWriter:
         ]
         for layer in layers:
             layer_hash = 0xCC03DAE4
-            # PSQ buckets might differ from LS buckets, handling normalization
+            # PSQ buckets might differ from LS buckets
             buckets = model.num_ls_buckets
             if layer == model.psq_proj.linear:
                 buckets = model.num_psqt_buckets
@@ -189,7 +187,7 @@ class NNUEWriter:
         self.write_tensor(psqt_weight.flatten().numpy(), ft_compression)
 
     def write_fc_layer(
-        self, model: NNUEModel, layer: nn.Linear, is_output=False
+        self, model: NNUEModel, layer: nn.Linear, is_output=False, is_psq_layer=False
     ) -> None:
         # FC layers are stored as int8 weights, and int32 biases
         bias = layer.bias.data
@@ -212,7 +210,7 @@ class NNUEWriter:
             ascii_hist("fc weight:", weight.numpy())
 
         bias, weight = model.quantization.quantize_fc_layer(
-            bias, weight, is_output, histogram_callback
+            bias, weight, output_layer=is_output, is_psq_layer=is_psq_layer, callback=histogram_callback
         )
 
         # FC inputs are padded to 32 elements by spec.
@@ -281,10 +279,7 @@ class NNUEReader:
 
         # Read PSQ Projection Layer
         self.read_int32(fc_hash)
-        # Assuming buckets are stacked in the linear weight similar to layer_stacks logic,
-        # but psq_proj in FactorizedStackedLinear is already one big linear layer [buckets*out, in]
-        # read_fc_layer will read it as such.
-        self.read_fc_layer(self.model.psq_proj.linear, is_output=True)
+        self.read_fc_layer(self.model.psq_proj.linear, is_output=True, is_psq_layer=True)
 
     def read_header(self, feature_set: FeatureSet, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
@@ -347,7 +342,7 @@ class NNUEReader:
         else:
             weight = self.tensor(np.int16, [shape[0], shape[1] - num_psqt_buckets])
             
-        # Read PSQT weights as int16 (Updated from int32)
+        # Read PSQT weights as int16
         psqt_weight = self.tensor(np.int16, [shape[0], num_psqt_buckets])
 
         bias, weight, psqt_weight = (
@@ -359,7 +354,7 @@ class NNUEReader:
         layer.bias.data = torch.cat([bias, torch.tensor([0] * num_psqt_buckets)])
         layer.weight.data = torch.cat([weight, psqt_weight], dim=1)
 
-    def read_fc_layer(self, layer: nn.Linear, is_output: bool = False) -> None:
+    def read_fc_layer(self, layer: nn.Linear, is_output: bool = False, is_psq_layer: bool = False) -> None:
         # FC inputs are padded to 32 elements by spec.
         non_padded_shape = layer.weight.shape
         padded_shape = (non_padded_shape[0], ((non_padded_shape[1] + 31) // 32) * 32)
@@ -368,7 +363,7 @@ class NNUEReader:
         weight = self.tensor(np.int8, padded_shape)
 
         bias, weight = self.model.quantization.dequantize_fc_layer(
-            bias, weight, is_output
+            bias, weight, output_layer=is_output, is_psq_layer=is_psq_layer
         )
 
         layer.bias.data = bias

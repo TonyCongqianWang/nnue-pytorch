@@ -1,147 +1,213 @@
-from dataclasses import dataclass
-from typing import Callable, NotRequired, TypedDict, TYPE_CHECKING
-
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+from dataclasses import dataclass
+from typing import TypedDict, NotRequired, Tuple
 
-if TYPE_CHECKING:
-    from .model import NNUEModel
-
-
-class WeightClippingConfig(TypedDict):
-    params: list[torch.Tensor]
-    min_weight: float
-    max_weight: float
-    virtual_params: NotRequired[torch.Tensor]
-
+# --- Configuration ---
 
 @dataclass
 class QuantizationConfig:
     nnue2score: float = 600.0
     weight_scale_hidden: float = 64.0
     weight_scale_out: float = 16.0
-    ft_quantized_one: float = 255.0
-    hidden_quantized_one: float = 127.0
+    ft_quantized_one: float = 256.0
+    hidden_quantized_one: float = 128.0
 
 
+# --- Helper Functions ---
+
+def grad_scale(x, scale_factor):
+    y = x
+    y_grad = x * scale_factor
+    return (y - y_grad).detach() + y_grad
+
+def round_pass(x):
+    return (x.round() - x).detach() + x
+
+def get_quantization_params(log_alpha, bits):
+    q_max = (2 ** (bits - 1)) - 1
+    q_min = -q_max
+    
+    alpha_round = round_pass(log_alpha)
+    effective_range = 2 ** alpha_round
+    # Using q_max+1 (128) as the divisor allows exact power-of-two alignment
+    scale = effective_range / (q_max + 1)
+    
+    return scale, q_min, q_max
+
+def compute_requantization_factors(scale_in, scale_weight, scale_out):
+    """
+    Computes int32 multiplier and right shift for:
+    output = (input * weight * multiplier) >> shift
+    """
+    real_factor = (scale_in * scale_weight) / scale_out
+    
+    if real_factor == 0:
+        return 0, 0
+
+    shift = 0
+    while real_factor < (1 << 30):
+        real_factor *= 2
+        shift += 1
+        
+    while real_factor >= (1 << 31):
+        real_factor /= 2
+        shift -= 1
+        
+    multiplier = int(round(real_factor))
+    return multiplier, shift
+
+
+# --- Autograd Function ---
+
+class SymmetricLSQPoT(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, log_alpha, bits):
+        scale, q_min, q_max = get_quantization_params(log_alpha, bits)
+        
+        x_div = input / scale
+        x_div_clipped = x_div.clamp(q_min, q_max)
+        x_quant = round_pass(x_div_clipped)
+        
+        x_fake = x_quant * scale
+        
+        ctx.save_for_backward(x_div, scale)
+        ctx.q_params = (q_min, q_max)
+        return x_fake
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x_div, scale = ctx.saved_tensors
+        q_min, q_max = ctx.q_params
+        
+        mask_lo = (x_div < q_min)
+        mask_hi = (x_div > q_max)
+        mask_in = ~(mask_lo | mask_hi)
+        
+        grad_input = grad_output * mask_in.float()
+        
+        grad_scale_elem = torch.zeros_like(grad_output)
+        grad_scale_elem[mask_lo] = grad_output[mask_lo] * q_min
+        grad_scale_elem[mask_hi] = grad_output[mask_hi] * q_max
+        
+        quant_error = (x_div[mask_in].round() - x_div[mask_in])
+        grad_scale_elem[mask_in] = grad_output[mask_in] * quant_error
+        
+        dims = list(range(grad_scale_elem.ndim))
+        keep_dims = [i for i, s in enumerate(scale.shape) if s > 1]
+        sum_dims = [d for d in dims if d not in keep_dims]
+        
+        grad_scale_val = grad_scale_elem.sum(dim=sum_dims, keepdim=True)
+        grad_log_alpha = grad_scale_val * scale * math.log(2)
+        
+        return grad_input, grad_log_alpha, None
+
+
+# --- Modules ---
+
+class LSQActivation(nn.Module):
+    def __init__(self, in_features, num_groups=1, bits=8, init_range=128.0):
+        super().__init__()
+        self.bits = bits
+        self.num_groups = num_groups
+        self.in_features = in_features
+        
+        if in_features > 0 and in_features % num_groups != 0:
+             raise Exception(f"num_groups {num_groups} must divide in_features {in_features}")
+        
+        init_exp = math.log2(init_range)
+        self.log_alpha = nn.Parameter(torch.full((1, num_groups, 1), init_exp))
+        self.register_buffer('init_done', torch.tensor(False))
+
+    def forward(self, x):
+        B, C = x.shape
+        group_size = C // self.num_groups
+        x_grouped = x.view(B, self.num_groups, group_size)
+        
+        if not self.init_done:
+            with torch.no_grad():
+                max_val = x_grouped.abs().amax(dim=(0, 2), keepdim=True)
+                max_val = max_val.clamp(min=1e-5)
+                self.log_alpha.data = torch.log2(max_val)
+                self.init_done.fill_(True)
+        
+        num_elements = B * group_size
+        q_max = (2 ** (self.bits - 1)) - 1
+        g_factor = 1.0 / math.sqrt(num_elements * q_max) if num_elements > 0 else 1.0
+        
+        log_alpha_scaled = grad_scale(self.log_alpha, g_factor)
+        
+        x_quant = SymmetricLSQPoT.apply(x_grouped, log_alpha_scaled, self.bits)
+        
+        return x_quant.view(B, C)
+
+    def get_scales(self):
+        scale, _, _ = get_quantization_params(self.log_alpha, self.bits)
+        return scale.view(-1)
+
+
+class LSQLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, bits=8):
+        super().__init__(in_features, out_features, bias)
+        self.bits = bits
+        self.log_alpha_w = nn.Parameter(torch.zeros(out_features, 1))
+        self.register_buffer('w_init_done', torch.tensor(False))
+
+    def forward(self, x):
+        w_quant = self.quantized_weight
+        return F.linear(x, w_quant, self.bias)
+
+    @property
+    def quantized_weight(self):
+        if not self.w_init_done:
+            with torch.no_grad():
+                w_abs = self.weight.abs().view(self.out_features, -1)
+                max_val = w_abs.amax(dim=1, keepdim=True)
+                max_val = max_val.clamp(min=1e-5)
+                self.log_alpha_w.data = torch.log2(max_val)
+                self.w_init_done.fill_(True)
+
+        q_max = (2 ** (self.bits - 1)) - 1
+        g_factor = 1.0 / math.sqrt(self.weight.numel() * q_max)
+        
+        log_alpha_w_scaled = grad_scale(self.log_alpha_w, g_factor)
+        return SymmetricLSQPoT.apply(self.weight, log_alpha_w_scaled, self.bits)
+
+    def get_weight_scales(self):
+        scale, _, _ = get_quantization_params(self.log_alpha_w, self.bits)
+        return scale.view(-1)
+
+
+class LSQEmbeddingParams(nn.Module):
+    def __init__(self, num_outputs, bits=16):
+        super().__init__()
+        self.bits = bits
+        self.log_alpha = nn.Parameter(torch.zeros(1, num_outputs))
+        self.register_buffer('init_done', torch.tensor(False))
+
+    def forward(self, weight):
+        if not self.init_done:
+            with torch.no_grad():
+                max_val = weight.abs().amax(dim=0, keepdim=True)
+                max_val = max_val.clamp(min=1e-5)
+                self.log_alpha.data = torch.log2(max_val)
+                self.init_done.fill_(True)
+
+        q_max = (2 ** (self.bits - 1)) - 1
+        g_factor = 1.0 / math.sqrt(weight.numel() * q_max)
+        
+        log_alpha_scaled = grad_scale(self.log_alpha, g_factor)
+        return SymmetricLSQPoT.apply(weight, log_alpha_scaled, self.bits)
+        
+    def get_scales(self):
+        scale, _, _ = get_quantization_params(self.log_alpha, self.bits)
+        return scale.view(-1)
+
+# Backwards compatibility dummy
 class QuantizationManager:
-    def __init__(self, config: QuantizationConfig):
-        self.nnue2score = config.nnue2score
-        self.weight_scale_hidden = config.weight_scale_hidden
-        self.weight_scale_out = config.weight_scale_out
-        self.hidden_quantized_one = config.hidden_quantized_one
-        self.ft_quantized_one = config.ft_quantized_one
-
-        self.max_hidden_weight = config.hidden_quantized_one / self.weight_scale_hidden
-        self.max_threat_weight = config.ft_quantized_one / 512
-        self.max_out_weight = (
-            config.hidden_quantized_one * self.hidden_quantized_one
-        ) / (self.nnue2score * self.weight_scale_out)
-
-    def generate_weight_clipping_config(
-        self, model: "NNUEModel"
-    ) -> list[WeightClippingConfig]:
-        return [
-            {
-                "params": [model.layer_stacks.l1.linear.weight],
-                "min_weight": -self.max_hidden_weight,
-                "max_weight": self.max_hidden_weight,
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-            },
-            {
-                "params": [model.layer_stacks.l2.linear.weight],
-                "min_weight": -self.max_hidden_weight,
-                "max_weight": self.max_hidden_weight,
-            },
-            {
-                "params": [model.layer_stacks.output.linear.weight],
-                "min_weight": -self.max_out_weight,
-                "max_weight": self.max_out_weight,
-            },
-        ]
-
-    def quantize_feature_transformer(
-        self,
-        bias: torch.Tensor,
-        weight: torch.Tensor,
-        psqt_weight: torch.Tensor,
-        callback: Callable = lambda *args, **kwargs: None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bias = bias.mul(self.ft_quantized_one).round().to(torch.int16)
-        weight = weight.mul(self.ft_quantized_one).round().to(torch.int16)
-        psqt_weight = (
-            psqt_weight.mul(self.nnue2score * self.weight_scale_out)
-            .round()
-            .to(torch.int32)
-        )
-
-        callback(bias, weight, psqt_weight)
-
-        return bias, weight, psqt_weight
-
-    def dequantize_feature_transformer(
-        self,
-        bias: torch.Tensor,
-        weight: torch.Tensor,
-        psqt_weight: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bias = bias.divide(self.ft_quantized_one)
-        weight = weight.divide(self.ft_quantized_one)
-        psqt_weight = psqt_weight.divide(self.nnue2score * self.weight_scale_out)
-
-        return bias, weight, psqt_weight
-
-    def quantize_fc_layer(
-        self,
-        bias: torch.Tensor,
-        weight: torch.Tensor,
-        output_layer: bool = False,
-        callback: Callable = lambda *args, **kwargs: None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        kWeightScaleHidden = self.weight_scale_hidden
-        kWeightScaleOut = (
-            self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
-        )
-        kWeightScale = kWeightScaleOut if output_layer else kWeightScaleHidden
-        kBiasScaleOut = self.weight_scale_out * self.nnue2score
-        kBiasScaleHidden = self.weight_scale_hidden * self.hidden_quantized_one
-        kBiasScale = kBiasScaleOut if output_layer else kBiasScaleHidden
-        kMaxWeight = self.hidden_quantized_one / kWeightScale
-
-        bias = bias.mul(kBiasScale).round().to(torch.int32)
-
-        clipped = torch.count_nonzero(weight.clamp(-kMaxWeight, kMaxWeight) - weight)
-        total_elements = torch.numel(weight)
-        clipped_max = torch.max(
-            torch.abs(weight.clamp(-kMaxWeight, kMaxWeight) - weight)
-        )
-
-        weight = (
-            weight.clamp(-kMaxWeight, kMaxWeight)
-            .mul(kWeightScale)
-            .round()
-            .to(torch.int8)
-        )
-
-        callback(bias, weight, clipped, total_elements, clipped_max, kMaxWeight)
-
-        return bias, weight
-
-    def dequantize_fc_layer(
-        self,
-        bias: torch.Tensor,
-        weight: torch.Tensor,
-        output_layer: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        kWeightScaleHidden = self.weight_scale_hidden
-        kWeightScaleOut = (
-            self.nnue2score * self.weight_scale_out / self.hidden_quantized_one
-        )
-        kWeightScale = kWeightScaleOut if output_layer else kWeightScaleHidden
-        kBiasScaleOut = self.weight_scale_out * self.nnue2score
-        kBiasScaleHidden = self.weight_scale_hidden * self.hidden_quantized_one
-        kBiasScale = kBiasScaleOut if output_layer else kBiasScaleHidden
-
-        bias = bias.divide(kBiasScale)
-        weight = weight.divide(kWeightScale)
-
-        return bias, weight
+    def __init__(self, config):
+        pass
+    def generate_weight_clipping_config(self, model):
+        return []

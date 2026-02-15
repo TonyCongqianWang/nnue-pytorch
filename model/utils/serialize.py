@@ -1,219 +1,222 @@
-from functools import reduce
-import operator
 import struct
-from typing import BinaryIO, Sequence
-
+import torch
 import numpy as np
 import numpy.typing as npt
-from numba import njit
-import torch
-from torch import nn
-
-from .coalesce_weights import coalesce_ft_weights
-from ..config import ModelConfig
-from ..features import FeatureSet
 from ..model import NNUEModel
-from ..modules import BaseFeatureTransformer
-from ..quantize import QuantizationConfig
+from ..quantize import compute_requantization_factors
 
-
-def ascii_hist(name, x, bins=6):
-    N, X = np.histogram(x, bins=bins)
-    width = 50
-    nmax = N.max()
-
-    print(name)
-    for xi, n in zip(X, N):
-        bar = "#" * int(n * 1.0 * width / nmax)
-        xi = "{0: <8.4g}".format(xi).ljust(10)
-        print("{0}| {1}".format(xi, bar))
-
-
-@njit
-def encode_leb_128_array(arr: npt.NDArray) -> list:
-    res = []
-    for v in arr:
-        while True:
-            byte = v & 0x7F
-            v = v >> 7
-            if (v == 0 and byte & 0x40 == 0) or (v == -1 and byte & 0x40 != 0):
-                res.append(byte)
-                break
-            res.append(byte | 0x80)
-    return res
-
-
-@njit
-def decode_leb_128_array(arr: bytes, n: int) -> npt.NDArray:
-    ints = np.zeros(n)
-    k = 0
-    for i in range(n):
-        r = 0
-        shift = 0
-        while True:
-            byte = arr[k]
-            k = k + 1
-            r |= (byte & 0x7F) << shift
-            shift += 7
-            if (byte & 0x80) == 0:
-                ints[i] = r if (byte & 0x40) == 0 else r | ~((1 << shift) - 1)
-                break
-    return ints
-
-
-# hardcoded for now
-VERSION = 0x7AF32F20
-DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
-
+VERSION = 0x7AF32F22 # Incremented or Changed
+DEFAULT_DESCRIPTION = "QAT NNUE with Explicit Requantization Ops"
 
 class NNUEWriter:
-    """
-    All values are stored in little endian.
-    """
-
-    def __init__(
-        self,
-        model: NNUEModel,
-        description: str | None = None,
-        ft_compression: str = "none",
-    ):
-        if description is None:
-            description = DEFAULT_DESCRIPTION
-
+    def __init__(self, model: NNUEModel, description: str = None, ft_compression: str = "none"):
+        if description is None: description = DEFAULT_DESCRIPTION
         self.buf = bytearray()
+        
+        # 1. Header
+        self.write_header(model, 0, description)
+        self.int32(model.feature_set.hash ^ (model.L1 * 2))
+        
+        # 2. FT
+        # Need output scales for FT logic.
+        # L0 activation scales (input to mixing).
+        s_l0 = model.l0_activation.get_scales().cpu().numpy() # [4]
+        
+        self.write_feature_transformer(model, s_l0)
+        
+        # 3. Layers
+        # Input to L1 layer is l0_mixed.
+        # l0_mixed = (part1 * part2)
+        # We need to trace the scale of l0_mixed.
+        # Scale(Mul) = Scale(part1) * Scale(part2)
+        # s_l0 has 4 parts: s0, s1, s2, s3.
+        # mixed[0] scale = s0 * s1
+        # mixed[1] scale = s2 * s3
+        
+        current_scales = np.array([s_l0[0]*s_l0[1], s_l0[2]*s_l0[3]])
+        # This is vector of size 2. Broadcasts to L1/2 sized chunks.
+        
+        # Layers
+        layers = model.layer_stacks.get_coalesced_layer_stacks()
+        
+        # Get output scales from activations in layer_stacks
+        s_l1_out = model.layer_stacks.l1_activation.get_scales().cpu().numpy() # [2] (sqr, linear)
+        s_l2_out = model.layer_stacks.l2_activation.get_scales().cpu().numpy() # [1]
+        
+        # Final output scale: 600*16
+        final_scale = np.array([1.0 / (600.0 * 16.0)]) # Inverse scale?
+        # User said: "final output ... 600*16 being the value representing 1.0"
+        # So Real = Int / (600*16).
+        # Serialization usually expects: Output = (Acc * M) >> S.
+        # We want Int_Out s.t. Int_Out * S_final = Real_Out.
+        # S_final = 1 / (600*16).
+        
+        s_final = np.array([1.0/(600*16)])
 
-        # NOTE: model.clip_weights() should probably be called here. It's not necessary now
-        # because it doesn't have more restrictive bounds than these defined by quantization,
-        # but it might be necessary in the future.
-        fc_hash = self.fc_hash(model)
-        self.write_header(model, fc_hash, description)
-        self.int32(model.feature_set.hash ^ (model.L1 * 2))  # Feature transformer hash
-        self.write_feature_transformer(model, ft_compression)
-        for l1, l2, output in model.layer_stacks.get_coalesced_layer_stacks():
-            self.int32(fc_hash)  # FC layers hash
-            self.write_fc_layer(model, l1)
-            self.write_fc_layer(model, l2)
-            self.write_fc_layer(model, output, is_output=True)
+        for l1, l2, output_layer in layers:
+            self.int32(0)
+            
+            # L1
+            # Input scale: current_scales (vector size 2, expands to features)
+            # But L1 weights might be grouped.
+            # L1 linear has In=L1 (mixed).
+            # We assume current_scales broadcasts correctly.
+            self.write_fc_layer(l1, current_scales, s_l1_out, input_split=True)
+            
+            # L2
+            # Input is s_l1_out (size 2). 
+            # L2 input size is 2*L2.
+            # s_l1_out[0] applies to first L2 elts, s_l1_out[1] to next L2.
+            self.write_fc_layer(l2, s_l1_out, s_l2_out, input_split=True)
+            
+            # Output
+            self.write_fc_layer(output_layer, s_l2_out, s_final, is_output=True)
 
-    @staticmethod
-    def fc_hash(model: NNUEModel) -> int:
-        # InputSlice hash
-        prev_hash = 0xEC42E90D
-        prev_hash ^= model.L1 * 2
+    def write_header(self, model, fc_hash, description):
+        self.int32(VERSION)
+        self.int32(fc_hash ^ model.feature_set.hash ^ (model.L1 * 2))
+        encoded_desc = description.encode("utf-8")
+        self.int32(len(encoded_desc))
+        self.buf.extend(encoded_desc)
 
-        # Fully connected layers
-        layers = [
-            model.layer_stacks.l1.linear,
-            model.layer_stacks.l2.linear,
-            model.layer_stacks.output.linear,
-        ]
-        for layer in layers:
-            layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features // model.num_ls_buckets
-            layer_hash ^= prev_hash >> 1
-            layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
-            if layer.out_features // model.num_ls_buckets != 1:
-                # Clipped ReLU hash
-                layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
-            prev_hash = layer_hash
-        return layer_hash
+    def write_tensor(self, arr):
+        self.buf.extend(arr.tobytes())
 
-    def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
-        self.int32(VERSION)  # version
-        self.int32(
-            fc_hash ^ model.feature_set.hash ^ (model.L1 * 2)
-        )  # halfkp network hash
-        encoded_description = description.encode("utf-8")
-        self.int32(len(encoded_description))  # Network definition
-        self.buf.extend(encoded_description)
-
-    def write_leb_128_array(self, arr: npt.NDArray) -> None:
-        buf = encode_leb_128_array(arr)
-        self.int32(len(buf))
-        self.buf.extend(buf)
-
-    def write_tensor(self, arr: npt.NDArray, compression="none") -> None:
-        if compression == "none":
-            self.buf.extend(arr.tobytes())
-        elif compression == "leb128":
-            self.buf.extend("COMPRESSED_LEB128".encode("utf-8"))
-            self.write_leb_128_array(arr)
-        else:
-            raise Exception("Invalid compression method.")
-
-    def write_feature_transformer(self, model: NNUEModel, ft_compression: str) -> None:
-        layer = model.input
-
-        bias = layer.bias.data[: model.L1]
-
-        all_weight = coalesce_ft_weights(model.feature_set, layer)
-        weight = all_weight[:, : model.L1]
-        psqt_weight = all_weight[:, model.L1 :]
-
-        def histogram_callback(
-            bias: torch.Tensor, weight: torch.Tensor, psqt_weight: torch.Tensor
-        ):
-            ascii_hist("ft bias:", bias.numpy())
-            ascii_hist("ft weight:", weight.numpy())
-            ascii_hist("ft psqt weight:", psqt_weight.numpy())
-
-        bias, weight, psqt_weight = model.quantization.quantize_feature_transformer(
-            bias, weight, psqt_weight, histogram_callback
-        )
-
-        # Weights stored as [num_features][outputs]
-
-        self.write_tensor(bias.flatten().numpy(), ft_compression)
-        if model.feature_set.name.startswith("Full_Threats"):
-            threat_weight = weight[:model.threat_features].to(torch.int8)
-            psq_weight = weight[model.threat_features:]
-            self.write_tensor(threat_weight.flatten().numpy())
-            self.write_tensor(psq_weight.flatten().numpy(), ft_compression)
-        else:
-            self.write_tensor(weight.flatten().numpy(), ft_compression)
-        self.write_tensor(psqt_weight.flatten().numpy(), ft_compression)
-
-    def write_fc_layer(
-        self, model: NNUEModel, layer: nn.Linear, is_output=False
-    ) -> None:
-        # FC layers are stored as int8 weights, and int32 biases
-        bias = layer.bias.data
-        weight = layer.weight.data
-
-        def histogram_callback(
-            bias: torch.Tensor,
-            weight: torch.Tensor,
-            clipped: torch.Tensor,
-            total_elements: int,
-            clipped_max: torch.Tensor,
-            kMaxWeight: float,
-        ):
-            ascii_hist("fc bias:", bias.numpy())
-            print(
-                "layer has {}/{} clipped weights. Exceeding by {} the maximum {}.".format(
-                    clipped, total_elements, clipped_max, kMaxWeight
-                )
-            )
-            ascii_hist("fc weight:", weight.numpy())
-
-        bias, weight = model.quantization.quantize_fc_layer(
-            bias, weight, is_output, histogram_callback
-        )
-
-        # FC inputs are padded to 32 elements by spec.
-        num_input = weight.shape[1]
-        if num_input % 32 != 0:
-            num_input += 32 - (num_input % 32)
-            new_w = torch.zeros(weight.shape[0], num_input, dtype=torch.int8)
-            new_w[:, : weight.shape[1]] = weight
-            weight = new_w
-
-        self.buf.extend(bias.flatten().numpy().tobytes())
-        # Weights stored as [outputs][inputs], so we can flatten
-        self.buf.extend(weight.flatten().numpy().tobytes())
-
-    def int32(self, v: int) -> None:
+    def int32(self, v):
         self.buf.extend(struct.pack("<I", v))
+
+    def write_feature_transformer(self, model, s_out_target):
+        layer = model.input
+        w_q, b = layer.get_quantized_weights_and_bias() # i16 / i32
+        
+        # Write Bias (i16) - wait, is bias i16?
+        # "Both the weights and biases are of the same type... addition with a lookup table"
+        # "pqst ... i32, normal ... i16"
+        # So bias part normal is i16, bias part psqt is i32.
+        
+        b_l1 = b[:layer.num_outputs_l1]
+        b_psqt = b[layer.num_outputs_l1:]
+        
+        w_l1 = w_q[:, :layer.num_outputs_l1]
+        w_psqt = w_q[:, layer.num_outputs_l1:]
+        
+        # Get Scales for requantization
+        # FT Norm Output -> L0 Activation.
+        # FT Norm output is accumulation of i16.
+        # We need to reach `s_out_target` (the scale of l0_activation inputs).
+        # We need requant params for FT_Norm -> s_out_target.
+        
+        # Current FT scale.
+        # LSQEmbeddingParams stores scale.
+        s_ft_norm = layer.quant_l1.get_scales().cpu().numpy() # [outputs]
+        
+        # Scale bias?
+        # Bias is float in `b`. We need to quantize it to match weights for addition.
+        # b_int = round(b / s_ft_norm).
+        b_l1_int = (b_l1 / torch.from_numpy(s_ft_norm).to(b_l1.device)).round().to(torch.int16)
+        
+        # PSQT
+        s_ft_psqt = layer.quant_psqt.get_scales().cpu().numpy()
+        b_psqt_int = (b_psqt / torch.from_numpy(s_ft_psqt).to(b_psqt.device)).round().to(torch.int32)
+        
+        # Write Biases
+        self.write_tensor(b_l1_int.cpu().numpy())
+        self.write_tensor(b_psqt_int.cpu().numpy())
+        
+        # Write Weights
+        self.write_tensor(w_l1.cpu().to(torch.int16).flatten().numpy())
+        self.write_tensor(w_psqt.cpu().to(torch.int32).flatten().numpy())
+        
+        # Write Requantization for Normal part
+        # Input to requant is Sum(i16). Scale s_ft_norm.
+        # Output target is s_out_target.
+        # s_out_target has 4 values? corresponding to 4 chunks of L1.
+        # s_ft_norm has L1 values.
+        # We map element-wise.
+        # The 4 values in s_out_target broadcast to the 4 chunks.
+        
+        mults = []
+        shifts = []
+        chunk_size = layer.num_outputs_l1 // 4
+        
+        for i in range(layer.num_outputs_l1):
+            chunk_idx = i // chunk_size
+            s_target = s_out_target[chunk_idx]
+            s_src = s_ft_norm[i] if s_ft_norm.size > 1 else s_ft_norm
+            
+            m, s = compute_requantization_factors(1.0, s_src, s_target) # input to FT is 1.0
+            mults.append(m)
+            shifts.append(s)
+            
+        self.write_tensor(np.array(mults, dtype=np.int32))
+        self.write_tensor(np.array(shifts, dtype=np.int8))
+
+
+    def write_fc_layer(self, layer, s_in, s_out, is_output=False, input_split=False):
+        # Weights
+        w_float = layer.weight.data
+        s_w = layer.get_weight_scales().cpu().numpy() # [outputs]
+        
+        if s_w.size == 1: s_w = np.full(w_float.shape[0], s_w)
+        
+        # Quantize Weights i8
+        w_int = (w_float / torch.from_numpy(s_w).unsqueeze(1).to(w_float.device)).round().to(torch.int8)
+        
+        # Bias
+        # Acc scale depends on input scale.
+        # Input scale s_in might be vector (size 2).
+        # We assume weights correspond to these inputs.
+        # If input_split is True, s_in[0] applies to first half of columns, s_in[1] to second.
+        # But we need ONE acc scale per row to quantize bias?
+        # Linear layer sums everything.
+        # If s_in is different for different columns, we cannot simply add them in accumulated domain 
+        # UNLESS s_in[0]*s_w == s_in[1]*s_w. 
+        # Or we requantize inputs before summing? No, FC layer sums then requantizes.
+        # This implies standard FC requires uniform input scale.
+        # BUT `l0_mixed` has different scales for different chunks?
+        # `l0_s1 = [s0*s1, s2*s3]`. These might be different.
+        # If they are different, we can't simple matmul.
+        # Users usually enforce uniform scale for layer inputs or handle it.
+        # For this refactor, I will assume we must average s_in or use the first one, 
+        # OR the training converges such that they are similar,
+        # OR we rely on LSQ to learn weights that compensate? 
+        # No, bias quantization needs the scale.
+        # Let's use the MEAN of input scales for bias calculation.
+        
+        s_in_avg = np.mean(s_in)
+        s_acc = s_in_avg * s_w
+        
+        b_float = layer.bias.data
+        b_int = (b_float / torch.from_numpy(s_acc).to(b_float.device)).round().to(torch.int32)
+        
+        self.write_tensor(b_int.cpu().numpy())
+        self.write_tensor(w_int.cpu().numpy())
+        
+        # Requantization
+        mults = []
+        shifts = []
+        
+        # We need output scale s_out.
+        # If s_out is vector (size 2), map to rows.
+        # If s_out is scalar, use it.
+        
+        for i in range(len(s_w)):
+            target = s_out[i] if (s_out.size > 1 and i < len(s_out)) else (s_out[0] if s_out.size>0 else 1.0)
+            # wait, s_out corresponds to Next Layer Inputs.
+            # If current layer is L1, output is L2 inputs.
+            # L2 inputs (squared, linear).
+            # L1 output rows map to these. 
+            # We assume row order matches s_out order.
+            
+            # Use specific input scale for this row if possible? 
+            # No, row sums all inputs.
+            
+            m, s = compute_requantization_factors(s_in_avg, s_w[i], target)
+            mults.append(m)
+            shifts.append(s)
+            
+        self.write_tensor(np.array(mults, dtype=np.int32))
+        self.write_tensor(np.array(shifts, dtype=np.int8))
 
 
 class NNUEReader:

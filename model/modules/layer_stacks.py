@@ -21,7 +21,7 @@ class LayerStacks(nn.Module):
         # This is by design. The weights in the further layers should be
         # able to diverge a lot.
         self.l1 = FactorizedStackedLinear(2 * self.L1 // 2, self.L2 + 1, count)
-        self.l2 = StackedLinear(self.L2 * 2, self.L3, count)
+        self.l2 = StackedLinear(self.L2 * 2, self.L3 + 1, count)
         self.output = StackedLinear(self.L3, 1, count)
 
         with torch.no_grad():
@@ -36,10 +36,11 @@ class LayerStacks(nn.Module):
         )
 
         l2c_ = self.l2(l1x_, ls_indices)
-        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+        l2x_, l2x_out = l2c_.split(self.L3, dim=1)
+        l2x_ = torch.clamp(l2x_, 0.0, 1.0)
 
         l3c_ = self.output(l2x_, ls_indices)
-        l3x_ = l3c_ + l1x_out
+        l3x_ = l3c_ + l2x_out + l1x_out
 
         return l3x_
 

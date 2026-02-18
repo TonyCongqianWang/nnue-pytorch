@@ -9,9 +9,8 @@ from .kernel import (
 
 class SparseLinearFunction(autograd.Function):
     @staticmethod
-    def forward(ctx, feature_indices, feature_values, weight, scale, bias):
-        # Save raw parameters (theta) and scale instead of materialized weights
-        ctx.save_for_backward(feature_indices, feature_values, weight, scale, bias)
+    def forward(ctx, feature_indices, feature_values, weight, scale, in_boundaries, out_boundaries, bias):
+        ctx.save_for_backward(feature_indices, feature_values, weight, scale, in_boundaries, out_boundaries, bias)
 
         assert len(feature_indices.shape) == 2
         assert len(feature_values.shape) == 2
@@ -23,10 +22,15 @@ class SparseLinearFunction(autograd.Function):
         assert len(weight.shape) == 2
         assert weight.dtype == torch.float32
         
-        # Scale assertions
+        assert len(bucket_boundaries.shape) == 1
+        assert bucket_boundaries.dtype == torch.int32
+
+        num_in_buckets = in_boundaries.shape[0]
+        num_out_buckets = out_boundaries.shape[0]
+        
         assert len(scale.shape) == 2 
-        assert scale.shape[0] == 1 # Assuming broadcast over rows
-        assert scale.shape[1] == weight.shape[1]
+        assert scale.shape[0] == num_in_buckets
+        assert scale.shape[1] == num_out_buckets
         assert scale.dtype == torch.float32
 
         assert len(bias.shape) == 1
@@ -36,17 +40,23 @@ class SparseLinearFunction(autograd.Function):
         assert feature_values.is_cuda
         assert weight.is_cuda
         assert scale.is_cuda
+        assert in_boundaries.is_cuda
+        assert out_boundaries.is_cuda
         assert bias.is_cuda
 
         assert feature_values.device == feature_indices.device
         assert weight.device == feature_indices.device
         assert scale.device == feature_indices.device
+        assert in_boundaries.device == feature_indices.device
+        assert out_boundaries.device == feature_indices.device
         assert bias.device == feature_indices.device
 
         assert feature_indices.is_contiguous()
         assert feature_values.is_contiguous()
         assert weight.is_contiguous()
         assert scale.is_contiguous()
+        assert in_boundaries.is_contiguous()
+        assert out_boundaries.is_contiguous()
         assert bias.is_contiguous()
 
         device = feature_indices.device
@@ -61,17 +71,19 @@ class SparseLinearFunction(autograd.Function):
             device=device,
             requires_grad=True,
         )
-
+        
         kernel = make_sparse_input_linear_forward_kernel(
-            max_active_features, output_size
+            max_active_features, output_size, num_in_buckets, num_out_buckets
         )
         kernel(
             grid=(batch_size,),
             args=(
                 feature_indices.data_ptr(),
                 feature_values.data_ptr(),
-                weight.data_ptr(), # Raw theta
-                scale.data_ptr(),  # Scale factor
+                weight.data_ptr(),
+                scale.data_ptr(),
+                in_boundaries.data_ptr(),
+                out_boundaries.data_ptr(),
                 bias.data_ptr(),
                 output.data_ptr(),
             ),
@@ -86,33 +98,38 @@ class SparseLinearFunction(autograd.Function):
 
         grad_output = grad_output.contiguous()
 
-        feature_indices, feature_values, weight, scale, bias = ctx.saved_tensors
+        feature_indices, feature_values, weight, scale, in_boundaries, out_boundaries, bias = ctx.saved_tensors
 
         device = feature_indices.device
         batch_size = feature_indices.shape[0]
         max_active_features = feature_indices.shape[1]
         output_size = weight.shape[1]
+        num_buckets = bucket_boundaries.shape[0]
 
         weight_grad = torch.zeros(
             weight.shape[0], weight.shape[1], dtype=torch.float32, device=device
         )
         bias_grad = torch.zeros(output_size, dtype=torch.float32, device=device)
 
+        num_in_buckets = in_boundaries.shape[0]
+        num_out_buckets = out_boundaries.shape[0]
+        
         kernel = make_sparse_input_linear_backward_kernel(
-            max_active_features, output_size
+            max_active_features, output_size, num_in_buckets, num_out_buckets
         )
+        
         kernel(
             grid=(batch_size,),
             args=(
                 feature_indices.data_ptr(),
                 feature_values.data_ptr(),
-                weight.data_ptr(), # Needed for derivative calc
-                scale.data_ptr(),  # Needed for derivative calc
-                weight_grad.data_ptr(),
-                bias_grad.data_ptr(),
-                grad_output.data_ptr(),
+                weight.data_ptr(),
+                scale.data_ptr(),
+                in_boundaries.data_ptr(),
+                out_boundaries.data_ptr(),
+                bias.data_ptr(),
+                output.data_ptr(),
             ),
         )
 
-        # Return None for scale grad (registered buffer)
-        return None, None, weight_grad, None, bias_grad
+        return None, None, weight_grad, None, None, bias_grad

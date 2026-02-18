@@ -5,6 +5,39 @@ import torch.nn.functional as F
 
 from .functions import SparseLinearFunction
 
+def expand_2d_bucketed_scales(
+    scale: torch.Tensor, 
+    in_boundaries: torch.Tensor, 
+    out_boundaries: torch.Tensor, 
+    num_inputs: int,
+    output_size: int
+) -> torch.Tensor:
+    """
+    Expands a (num_in_buckets, num_out_buckets) scale tensor 
+    into a full (num_inputs, output_size) dense tensor.
+    """
+    full_scale = torch.empty((num_inputs, output_size), dtype=scale.dtype, device=scale.device)
+    
+    in_start = 0
+    for i, in_bound in enumerate(in_boundaries):
+        in_end = min(in_bound.item(), num_inputs)
+        if in_start >= in_end:
+            continue
+            
+        out_start = 0
+        for j, out_bound in enumerate(out_boundaries):
+            out_end = min(out_bound.item(), output_size)
+            if out_start >= out_end:
+                continue
+                
+            # Fill the rectangular region with the single scalar value
+            full_scale[in_start:in_end, out_start:out_end] = scale[i, j]
+            
+            out_start = out_end
+        in_start = in_end
+        
+    return full_scale
+
 class SmartSlice:
     def __init__(self, proxy, key):
         self.proxy = proxy
@@ -87,15 +120,22 @@ class WeightProxy:
 
 
 class BaseFeatureTransformer(nn.Module):
-    def __init__(self, num_inputs, num_outputs, out_scale=None):
+    def __init__(self, num_inputs, num_outputs, out_scale_config=None):
         super().__init__()
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
 
-        if out_scale is None:
-            out_scale = torch.full((1, num_outputs), 16.0, dtype=torch.float32)
-        else:
-            out_scale = out_scale.view(1, -1)
+        if out_scale_config is None:
+            out_scale_config = dict(
+                scale=torch.tensor([[1.0]]),
+                in_boundaries=torch.tensor([num_inputs]),
+                out_boundaries=torch.tensor([num_outputs]),
+            )
+        out_scale = expand_2d_bucketed_scales(**out_scale_config, num_inputs=num_inputs, output_size=num_outputs)
+        
+        self.register_buffer('scale', out_scale_config['scale']) 
+        self.register_buffer('in_boundaries', out_scale_config['in_boundaries'])
+        self.register_buffer('out_boundaries', out_scale_config['out_boundaries'])
         self.register_buffer('out_scale', out_scale)
 
         self._weight_param = nn.Parameter(torch.empty((num_inputs, num_outputs), dtype=torch.float32))
@@ -139,7 +179,8 @@ class BaseFeatureTransformer(nn.Module):
 class FeatureTransformer(BaseFeatureTransformer):
     def forward(self, feature_indices, feature_values):
         return SparseLinearFunction.apply(
-            feature_indices, feature_values, self._weight_param, self.out_scale, self.bias
+            feature_indices, feature_values, self._weight_param,
+            self.scale, self.in_boundaries, self.out_boundaries, self.bias
         )
 
 
@@ -148,13 +189,15 @@ class DoubleFeatureTransformer(BaseFeatureTransformer):
         self, feature_indices_0, feature_values_0, feature_indices_1, feature_values_1
     ):
         w = self._weight_param
-        a = self.out_scale
+        a = self.scale
+        ib = self.in_boundaries
+        ob = self.out_boundaries
         b = self.bias
         return (
             SparseLinearFunction.apply(
-                feature_indices_0, feature_values_0, w, a, b,
+                feature_indices_0, feature_values_0, w, a, ib, ob, b,
             ),
             SparseLinearFunction.apply(
-                feature_indices_1, feature_values_1, w, a, b,
+                feature_indices_1, feature_values_1, w, a, ib, ob, b,
             ),
         )

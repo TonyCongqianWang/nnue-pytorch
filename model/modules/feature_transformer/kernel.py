@@ -48,25 +48,19 @@ _sparse_input_linear_forward_kernel_cache = dict()
 
 
 @torch.compiler.disable(recursive=False)
-def make_sparse_input_linear_forward_kernel(max_active_indices: int, output_size: int):
-    """
-    @param: max_active_indices
-        The maximum number of indices that are non-zero
-        for a single position. This value determines
-        the shape of the inputs.
-        This value is of type uint32_t.
-
-    @param: output_size
-        The number of outputs. Must match the shape of weights
-        and biases.
-        This value is of type uint32.
-    """
+def make_sparse_input_linear_forward_kernel(
+    max_active_indices: int, 
+    output_size: int, 
+    num_in_buckets: int, 
+    num_out_buckets: int
+):
     num_threads = _get_num_threads_for_forward(output_size)
     output_thread_slice_size = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads, "fused_tanh")
+    key = (max_active_indices, output_size, num_threads, num_in_buckets, num_out_buckets, "fused_tanh_2d_buckets")
     if key not in _sparse_input_linear_forward_kernel_cache:
         kernel = cp.RawKernel(
             r"""
+
 typedef unsigned int uint32_t;
 typedef int int32_t;
 
@@ -74,8 +68,10 @@ extern "C" __global__
 void sparse_input_linear_forward(
     const int32_t* const input_indices,
     const float* const input_values,
-    const float* const weight_param, /* theta */
-    const float* const scale,        /* a */
+    const float* const weight_param,
+    const float* const scale,
+    const int32_t* const in_bucket_boundaries,
+    const int32_t* const out_bucket_boundaries,
     const float* const bias,
           float* const output
 ) {{
@@ -87,11 +83,29 @@ void sparse_input_linear_forward(
 
           float* const output_slice        = output + block_idx * {output_size} + slice_offset;
     const float* const bias_slice          = bias                               + slice_offset;
-    const float* const scale_slice         = scale                              + slice_offset;
           float* shared_output_slice = shared_output                      + slice_offset;
 
     const int32_t* const input_index_row     = input_indices + block_idx * {max_active_indices};
     const float* const input_value_row     = input_values  + block_idx * {max_active_indices};
+
+    /* Pre-calculate which output region each slice of this thread belongs to */
+    uint32_t out_regions[{output_thread_slice_size}];
+    #pragma unroll
+    for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
+    {{
+        uint32_t out_idx = slice_offset + s;
+        uint32_t r = {num_out_buckets} - 1;
+        #pragma unroll
+        for (uint32_t b = 0; b < {num_out_buckets}; ++b)
+        {{
+            if (out_idx < out_bucket_boundaries[b])
+            {{
+                r = b;
+                break;
+            }}
+        }}
+        out_regions[s] = r;
+    }}
 
     #pragma unroll
     for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
@@ -105,13 +119,26 @@ void sparse_input_linear_forward(
         const float   input_value = input_value_row[k];
         if (input_index != -1)
         {{
-            /* Access raw theta parameter */
+            /* 1. Find input region */
+            uint32_t in_region_idx = {num_in_buckets} - 1;
+            #pragma unroll
+            for (uint32_t b = 0; b < {num_in_buckets}; ++b)
+            {{
+                if (input_index < in_bucket_boundaries[b])
+                {{
+                    in_region_idx = b;
+                    break;
+                }}
+            }}
+
             const float* const weight_slice = weight_param + input_index * {output_size} + slice_offset;
+            const float* const scale_row    = scale        + in_region_idx * {num_out_buckets};
+            
             #pragma unroll
             for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
             {{
-                /* Fuse Reparameterization: w = a * tanh(theta / a) */
-                float a = scale_slice[s];
+                /* 2. Fetch the exact 2D scalar using the pre-computed out_region */
+                float a = scale_row[out_regions[s]]; 
                 float theta = weight_slice[s];
                 float w = a * tanhf(theta / a);
                 
@@ -126,10 +153,13 @@ void sparse_input_linear_forward(
         output_slice[s] = shared_output_slice[s];
     }}
 }}
+
 """.format(
                 max_active_indices=max_active_indices,
                 output_thread_slice_size=output_thread_slice_size,
                 output_size=output_size,
+                num_in_buckets=num_in_buckets,
+                num_out_buckets=num_out_buckets,
             ),
             "sparse_input_linear_forward",
         )
@@ -144,13 +174,19 @@ _sparse_input_linear_backward_kernel_cache = dict()
 
 
 @torch.compiler.disable(recursive=False)
-def make_sparse_input_linear_backward_kernel(max_active_indices: int, output_size: int):
+def make_sparse_input_linear_backward_kernel(
+    max_active_indices: int, 
+    output_size: int, 
+    num_in_buckets: int, 
+    num_out_buckets: int
+):
     num_threads = _get_num_threads_for_backward(output_size)
     output_thread_slice_size = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads, "fused_tanh")
+    key = (max_active_indices, output_size, num_threads, num_in_buckets, num_out_buckets, "fused_tanh_2d_buckets")
     if key not in _sparse_input_linear_backward_kernel_cache:
         kernel = cp.RawKernel(
             r"""
+
 typedef unsigned int uint32_t;
 typedef int int32_t;
 
@@ -158,8 +194,10 @@ extern "C" __global__
 void sparse_input_linear_backward(
     const int32_t* const input_indices,
     const float* const input_values,
-    const float* const weight_param, /* theta */
-    const float* const scale,        /* a */
+    const float* const weight_param,
+    const float* const scale,
+    const int32_t* const in_bucket_boundaries,
+    const int32_t* const out_bucket_boundaries,
           float* const weight_grad,
           float* const bias_grad,
     const float* const output_grad
@@ -172,11 +210,29 @@ void sparse_input_linear_backward(
 
     const float* const output_grad_slice        = output_grad + block_idx * {output_size} + slice_offset;
           float* const bias_grad_slice          = bias_grad                               + slice_offset;
-    const float* const scale_slice              = scale                                   + slice_offset;
           float* shared_output_grad_slice = shared_output_grad                      + slice_offset;
 
     const int32_t* const input_index_row          = input_indices + block_idx * {max_active_indices};
     const float* const input_value_row          = input_values  + block_idx * {max_active_indices};
+
+    /* Pre-calculate which output region each slice of this thread belongs to */
+    uint32_t out_regions[{output_thread_slice_size}];
+    #pragma unroll
+    for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
+    {{
+        uint32_t out_idx = slice_offset + s;
+        uint32_t r = {num_out_buckets} - 1;
+        #pragma unroll
+        for (uint32_t b = 0; b < {num_out_buckets}; ++b)
+        {{
+            if (out_idx < out_bucket_boundaries[b])
+            {{
+                r = b;
+                break;
+            }}
+        }}
+        out_regions[s] = r;
+    }}
 
     #pragma unroll
     for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
@@ -200,8 +256,20 @@ void sparse_input_linear_backward(
         const float   input_value = input_value_row[k];
         if (input_index != -1)
         {{
-            float* const weight_grad_slice  = weight_grad  + input_index * {output_size} + slice_offset;
+            uint32_t in_region_idx = {num_in_buckets} - 1;
+            #pragma unroll
+            for (uint32_t b = 0; b < {num_in_buckets}; ++b)
+            {{
+                if (input_index < in_bucket_boundaries[b])
+                {{
+                    in_region_idx = b;
+                    break;
+                }}
+            }}
+
+                  float* const weight_grad_slice  = weight_grad  + input_index * {output_size} + slice_offset;
             const float* const weight_param_slice = weight_param + input_index * {output_size} + slice_offset;
+            const float* const scale_row          = scale        + in_region_idx * {num_out_buckets};
             
             #pragma unroll
             for (int s = 0; s < {output_thread_slice_size}; ++s)
@@ -209,8 +277,7 @@ void sparse_input_linear_backward(
                 const float sog = shared_output_grad_slice[s];
                 if (sog != 0.0f)
                 {{
-                    /* Fuse Derivative: grad_theta = grad_w * (1 - tanh^2(theta/a)) */
-                    float a = scale_slice[s];
+                    float a = scale_row[out_regions[s]];
                     float theta = weight_param_slice[s];
                     float t = tanhf(theta / a);
                     float d_tanh = 1.0f - t * t;
@@ -221,10 +288,13 @@ void sparse_input_linear_backward(
         }} else break;
     }}
 }}
+
 """.format(
                 max_active_indices=max_active_indices,
                 output_thread_slice_size=output_thread_slice_size,
                 output_size=output_size,
+                num_in_buckets=num_in_buckets,
+                num_out_buckets=num_out_buckets,
             ),
             "sparse_input_linear_backward",
         )

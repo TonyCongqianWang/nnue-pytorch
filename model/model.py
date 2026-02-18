@@ -26,9 +26,14 @@ class NNUEModel(nn.Module):
         self.num_psqt_buckets = num_psqt_buckets
         self.num_ls_buckets = num_ls_buckets
 
+        ft_scale_confg = dict(
+            scale=torch.tensor([[1.0, 2.0], [4.0, 8.0]]),
+            in_boundaries=torch.tensor([self.threat_features, feature_set.num_features]),
+            out_boundaries=torch.tensor([self.L1, self.L1 + self.num_psqt_buckets]),
+        )
         self.input = DoubleFeatureTransformer(
             feature_set.num_features, self.L1 + self.num_psqt_buckets,
-            out_scale=torch.cat([torch.full((1, self.L1), 2.0), torch.full((1, self.num_psqt_buckets), 16.0)], dim=1)
+            ft_scale_config=ft_scale_confg
         )
         self.feature_set = feature_set
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config)

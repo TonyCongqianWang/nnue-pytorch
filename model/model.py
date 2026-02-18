@@ -95,23 +95,16 @@ class NNUEModel(nn.Module):
                         ys = p_data_fp32.shape[1] // virtual_params.shape[1]
                         expanded_virtual_layer = virtual_params.repeat(xs, ys)
                         if min_weight is not None:
-                            min_weight_t = (
+                            min_weight = (
                                 p_data_fp32.new_full(p_data_fp32.shape, min_weight)
                                 - expanded_virtual_layer
                             )
-                            p_data_fp32 = torch.max(p_data_fp32, min_weight_t)
                         if max_weight is not None:
-                            max_weight_t = (
+                            max_weight = (
                                 p_data_fp32.new_full(p_data_fp32.shape, max_weight)
                                 - expanded_virtual_layer
                             )
-                            p_data_fp32 = torch.min(p_data_fp32, max_weight_t)
-                    else:
-                        if min_weight is not None and max_weight is not None:
-                            p_data_fp32.clamp_(min_weight, max_weight)
-                        else:
-                            raise Exception("Not supported.")
-                    p.data.copy_(p_data_fp32)
+                    p_data_fp32.clamp_(min_weight, max_weight)
 
     def clip_threat_weights(self):
         if self.feature_set.name.startswith("Full_Threats"):

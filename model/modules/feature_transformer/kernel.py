@@ -63,60 +63,21 @@ def make_sparse_input_linear_forward_kernel(max_active_indices: int, output_size
     """
     num_threads = _get_num_threads_for_forward(output_size)
     output_thread_slice_size = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads)
+    key = (max_active_indices, output_size, num_threads, "fused_tanh")
     if key not in _sparse_input_linear_forward_kernel_cache:
         kernel = cp.RawKernel(
             r"""
-
 typedef unsigned int uint32_t;
 typedef int int32_t;
 
 extern "C" __global__
-
-/*
-    @assumptions:
-        The blocks must have dimensionality (BATCH_SIZE,)
-        The threads must have dimensionality (N,), where
-        N * output_thread_slice_size == output_size.
-
-    @param: input_indices
-        A matrix of shape (BATCH_SIZE, max_active_indices)
-        containing indices of active indices for each position
-        in a batch. Input index of -1 means that the slot is empty
-        and the weights will not be accumulated for it. Moreover
-        no further indices from this block will be considered.
-        The indices form an implicit matrix of shape
-        (BATCH_SIZE, NUM_INPUTS), where the first dimension index is
-        inferred from the memory location (BATCH_SIZE), and the
-        second dimension index is stored in the input_indices matrix.
-        The type for input indices is int32_t.
-
-    @param: input_values
-        A matrix of shape (BATCH_SIZE, max_active_indices)
-        containing the values (arity) of the corresponding
-        input index in input_indices.
-        The type for the input value (arity) is float32.
-
-    @param: weight
-        The weight matrix of shape (NUM_INPUTS, output_size).
-        Weights must be of type float32.
-
-    @param: bias
-        The bias vector of shape (output_size,).
-        Bias values must be of type float32.
-
-    @param: output
-        An output matrix of shape (BATCH_SIZE, output_size).
-        It may not be initialized, bias is always copied
-        to the output first.
-        Output values must have type float32.
-*/
 void sparse_input_linear_forward(
     const int32_t* const input_indices,
-    const float*   const input_values,
-    const float*   const weight,
-    const float*   const bias,
-          float*   const output
+    const float* const input_values,
+    const float* const weight_param, /* theta */
+    const float* const scale,        /* a */
+    const float* const bias,
+          float* const output
 ) {{
     __shared__
           float          shared_output[{output_size}];
@@ -124,12 +85,13 @@ void sparse_input_linear_forward(
     const uint32_t       block_idx           = blockIdx.x;
     const uint32_t       slice_offset        = threadIdx.x * {output_thread_slice_size};
 
-          float*   const output_slice        = output + block_idx * {output_size} + slice_offset;
-    const float*   const bias_slice          = bias                               + slice_offset;
-          float*         shared_output_slice = shared_output                      + slice_offset;
+          float* const output_slice        = output + block_idx * {output_size} + slice_offset;
+    const float* const bias_slice          = bias                               + slice_offset;
+    const float* const scale_slice         = scale                              + slice_offset;
+          float* shared_output_slice = shared_output                      + slice_offset;
 
     const int32_t* const input_index_row     = input_indices + block_idx * {max_active_indices};
-    const float*   const input_value_row     = input_values  + block_idx * {max_active_indices};
+    const float* const input_value_row     = input_values  + block_idx * {max_active_indices};
 
     #pragma unroll
     for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
@@ -143,11 +105,17 @@ void sparse_input_linear_forward(
         const float   input_value = input_value_row[k];
         if (input_index != -1)
         {{
-            const float* const weight_slice = weight + input_index * {output_size} + slice_offset;
+            /* Access raw theta parameter */
+            const float* const weight_slice = weight_param + input_index * {output_size} + slice_offset;
             #pragma unroll
             for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
             {{
-                shared_output_slice[s] += weight_slice[s] * input_value;
+                /* Fuse Reparameterization: w = a * tanh(theta / a) */
+                float a = scale_slice[s];
+                float theta = weight_slice[s];
+                float w = a * tanhf(theta / a);
+                
+                shared_output_slice[s] += w * input_value;
             }}
         }} else break;
     }}
@@ -158,7 +126,6 @@ void sparse_input_linear_forward(
         output_slice[s] = shared_output_slice[s];
     }}
 }}
-
 """.format(
                 max_active_indices=max_active_indices,
                 output_thread_slice_size=output_thread_slice_size,
@@ -178,75 +145,24 @@ _sparse_input_linear_backward_kernel_cache = dict()
 
 @torch.compiler.disable(recursive=False)
 def make_sparse_input_linear_backward_kernel(max_active_indices: int, output_size: int):
-    """
-    @param: max_active_indices
-        The maximum number of indices that are non-zero for
-        a single position. This value determines the shape
-        of the inputs.
-        This value is of type uint32_t.
-
-    @param: output_size
-        The number of outputs. Must match the shape of weights
-        and biases.
-        This value is of type uint32.
-    """
     num_threads = _get_num_threads_for_backward(output_size)
     output_thread_slice_size = output_size // num_threads
-    key = (max_active_indices, output_size, num_threads)
+    key = (max_active_indices, output_size, num_threads, "fused_tanh")
     if key not in _sparse_input_linear_backward_kernel_cache:
         kernel = cp.RawKernel(
             r"""
-
 typedef unsigned int uint32_t;
 typedef int int32_t;
 
 extern "C" __global__
-/*
-    @assumptions:
-        The blocks must have dimensionality (BATCH_SIZE,)
-        The threads must have dimensionality (N,), where
-        N * output_thread_slice_size == output_size.
-
-    @param: input_indices
-        A matrix of shape (BATCH_SIZE, max_active_indices)
-        containing indices of active indices for each position
-        in a batch. Input index of -1 means that the slot is empty
-        and the weights will not be accumulated for it. Moreover
-        no further indices from this block will be considered.
-        The indices form an implicit matrix of shape
-        (BATCH_SIZE, NUM_INPUTS), where the first dimension index is
-        inferred from the memory location (BATCH_SIZE), and the
-        second dimension index is stored in the input_indices matrix.
-        The type for input indices is int32_t.
-
-    @param: input_values
-        A matrix of shape (BATCH_SIZE, max_active_indices)
-        containing the values (arity) of the corresponding
-        input index in input_indices.
-        The type for the input value (arity) is float32.
-
-    @param: weight_grad
-        The weight gradient matrix of shape (NUM_INPUTS, output_size).
-        The gradient is accumulated, i.e. it must be zero initialized
-        on the first call.
-        Weights must be of type float32.
-
-    @param: bias_grad
-        The bias gradient vector of shape (output_size,).
-        The gradient is accumulated, i.e. it must be zero initialized
-        on the first call.
-        Bias values must be of type float32.
-
-    @param: output_grad
-        An output gradient matrix of shape (BATCH_SIZE, output_size).
-        Output values must have type float32.
-*/
 void sparse_input_linear_backward(
     const int32_t* const input_indices,
-    const float*   const input_values,
-          float*   const weight_grad,
-          float*   const bias_grad,
-    const float*   const output_grad
+    const float* const input_values,
+    const float* const weight_param, /* theta */
+    const float* const scale,        /* a */
+          float* const weight_grad,
+          float* const bias_grad,
+    const float* const output_grad
 ) {{
     __shared__
           float          shared_output_grad[{output_size}];
@@ -254,12 +170,13 @@ void sparse_input_linear_backward(
     const uint32_t       block_idx                = blockIdx.x;
     const uint32_t       slice_offset             = threadIdx.x * {output_thread_slice_size};
 
-    const float*   const output_grad_slice        = output_grad + block_idx * {output_size} + slice_offset;
-          float*   const bias_grad_slice          = bias_grad                               + slice_offset;
-          float*         shared_output_grad_slice = shared_output_grad                      + slice_offset;
+    const float* const output_grad_slice        = output_grad + block_idx * {output_size} + slice_offset;
+          float* const bias_grad_slice          = bias_grad                               + slice_offset;
+    const float* const scale_slice              = scale                                   + slice_offset;
+          float* shared_output_grad_slice = shared_output_grad                      + slice_offset;
 
     const int32_t* const input_index_row          = input_indices + block_idx * {max_active_indices};
-    const float*   const input_value_row          = input_values  + block_idx * {max_active_indices};
+    const float* const input_value_row          = input_values  + block_idx * {max_active_indices};
 
     #pragma unroll
     for (uint32_t s = 0; s < {output_thread_slice_size}; ++s)
@@ -283,20 +200,27 @@ void sparse_input_linear_backward(
         const float   input_value = input_value_row[k];
         if (input_index != -1)
         {{
-            float* const weight_grad_slice = weight_grad + input_index * {output_size} + slice_offset;
+            float* const weight_grad_slice  = weight_grad  + input_index * {output_size} + slice_offset;
+            const float* const weight_param_slice = weight_param + input_index * {output_size} + slice_offset;
+            
             #pragma unroll
             for (int s = 0; s < {output_thread_slice_size}; ++s)
             {{
                 const float sog = shared_output_grad_slice[s];
                 if (sog != 0.0f)
                 {{
-                    atomicAdd(&weight_grad_slice[s], sog * input_value);
+                    /* Fuse Derivative: grad_theta = grad_w * (1 - tanh^2(theta/a)) */
+                    float a = scale_slice[s];
+                    float theta = weight_param_slice[s];
+                    float t = tanhf(theta / a);
+                    float d_tanh = 1.0f - t * t;
+                    
+                    atomicAdd(&weight_grad_slice[s], sog * input_value * d_tanh);
                 }}
             }}
         }} else break;
     }}
 }}
-
 """.format(
                 max_active_indices=max_active_indices,
                 output_thread_slice_size=output_thread_slice_size,

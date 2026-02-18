@@ -27,7 +27,8 @@ class NNUEModel(nn.Module):
         self.num_ls_buckets = num_ls_buckets
 
         self.input = DoubleFeatureTransformer(
-            feature_set.num_features, self.L1 + self.num_psqt_buckets
+            feature_set.num_features, self.L1 + self.num_psqt_buckets,
+            out_scale=torch.cat([torch.full((1, self.L1), 0.5), torch.full((1, self.num_psqt_buckets), 2.0)], dim=1)
         )
         self.feature_set = feature_set
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config)
@@ -99,26 +100,22 @@ class NNUEModel(nn.Module):
                                 p_data_fp32.new_full(p_data_fp32.shape, min_weight)
                                 - expanded_virtual_layer
                             )
-                            p_data_fp32 = torch.max(p_data_fp32, min_weight_t)
+                        else:
+                            min_weight_t = None
                         if max_weight is not None:
                             max_weight_t = (
                                 p_data_fp32.new_full(p_data_fp32.shape, max_weight)
                                 - expanded_virtual_layer
                             )
-                            p_data_fp32 = torch.min(p_data_fp32, max_weight_t)
+                        else:
+                            max_weight_t = None
+                        p_data_fp32.clamp_(min=min_weight_t, max=max_weight_t)
                     else:
                         if min_weight is not None and max_weight is not None:
                             p_data_fp32.clamp_(min_weight, max_weight)
                         else:
                             raise Exception("Not supported.")
-                    p.data.copy_(p_data_fp32)
 
-    def clip_threat_weights(self):
-        if self.feature_set.name.startswith("Full_Threats"):
-            p = self.input.weight[0:self.threat_features]
-            min_weight = -128 / 255
-            max_weight = 127 / 255
-            p.data.clamp_(min_weight, max_weight)
 
     def set_feature_set(self, new_feature_set: FeatureSet):
         """

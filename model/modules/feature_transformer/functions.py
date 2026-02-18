@@ -9,8 +9,9 @@ from .kernel import (
 
 class SparseLinearFunction(autograd.Function):
     @staticmethod
-    def forward(ctx, feature_indices, feature_values, weight, bias):
-        ctx.save_for_backward(feature_indices, feature_values, weight, bias)
+    def forward(ctx, feature_indices, feature_values, weight, scale, bias):
+        # Save raw parameters (theta) and scale instead of materialized weights
+        ctx.save_for_backward(feature_indices, feature_values, weight, scale, bias)
 
         assert len(feature_indices.shape) == 2
         assert len(feature_values.shape) == 2
@@ -21,6 +22,12 @@ class SparseLinearFunction(autograd.Function):
 
         assert len(weight.shape) == 2
         assert weight.dtype == torch.float32
+        
+        # Scale assertions
+        assert len(scale.shape) == 2 
+        assert scale.shape[0] == 1 # Assuming broadcast over rows
+        assert scale.shape[1] == weight.shape[1]
+        assert scale.dtype == torch.float32
 
         assert len(bias.shape) == 1
         assert bias.dtype == torch.float32
@@ -28,15 +35,18 @@ class SparseLinearFunction(autograd.Function):
         assert feature_indices.is_cuda
         assert feature_values.is_cuda
         assert weight.is_cuda
+        assert scale.is_cuda
         assert bias.is_cuda
 
         assert feature_values.device == feature_indices.device
         assert weight.device == feature_indices.device
+        assert scale.device == feature_indices.device
         assert bias.device == feature_indices.device
 
         assert feature_indices.is_contiguous()
         assert feature_values.is_contiguous()
         assert weight.is_contiguous()
+        assert scale.is_contiguous()
         assert bias.is_contiguous()
 
         device = feature_indices.device
@@ -60,7 +70,8 @@ class SparseLinearFunction(autograd.Function):
             args=(
                 feature_indices.data_ptr(),
                 feature_values.data_ptr(),
-                weight.data_ptr(),
+                weight.data_ptr(), # Raw theta
+                scale.data_ptr(),  # Scale factor
                 bias.data_ptr(),
                 output.data_ptr(),
             ),
@@ -75,7 +86,7 @@ class SparseLinearFunction(autograd.Function):
 
         grad_output = grad_output.contiguous()
 
-        feature_indices, feature_values, weight, bias = ctx.saved_tensors
+        feature_indices, feature_values, weight, scale, bias = ctx.saved_tensors
 
         device = feature_indices.device
         batch_size = feature_indices.shape[0]
@@ -95,10 +106,13 @@ class SparseLinearFunction(autograd.Function):
             args=(
                 feature_indices.data_ptr(),
                 feature_values.data_ptr(),
+                weight.data_ptr(), # Needed for derivative calc
+                scale.data_ptr(),  # Needed for derivative calc
                 weight_grad.data_ptr(),
                 bias_grad.data_ptr(),
                 grad_output.data_ptr(),
             ),
         )
 
-        return None, None, weight_grad, bias_grad
+        # Return None for scale grad (registered buffer)
+        return None, None, weight_grad, None, bias_grad

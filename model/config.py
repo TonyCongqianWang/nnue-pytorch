@@ -6,8 +6,8 @@ from dataclasses import dataclass
 class ModelConfig:
     threat_features: int = 60144
     L1: int = 1024
-    L2: int = 31
-    L3: int = 31
+    L2: int = 32
+    L3: int = 32
 
 
 # parameters needed for the definition of the loss

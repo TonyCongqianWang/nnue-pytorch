@@ -21,9 +21,6 @@ class SparseLinearFunction(autograd.Function):
 
         assert len(weight.shape) == 2
         assert weight.dtype == torch.float32
-        
-        assert len(bucket_boundaries.shape) == 1
-        assert bucket_boundaries.dtype == torch.int32
 
         num_in_buckets = in_boundaries.shape[0]
         num_out_buckets = out_boundaries.shape[0]
@@ -104,15 +101,14 @@ class SparseLinearFunction(autograd.Function):
         batch_size = feature_indices.shape[0]
         max_active_features = feature_indices.shape[1]
         output_size = weight.shape[1]
-        num_buckets = bucket_boundaries.shape[0]
+        
+        num_in_buckets = in_boundaries.shape[0]
+        num_out_buckets = out_boundaries.shape[0]
 
         weight_grad = torch.zeros(
             weight.shape[0], weight.shape[1], dtype=torch.float32, device=device
         )
         bias_grad = torch.zeros(output_size, dtype=torch.float32, device=device)
-
-        num_in_buckets = in_boundaries.shape[0]
-        num_out_buckets = out_boundaries.shape[0]
         
         kernel = make_sparse_input_linear_backward_kernel(
             max_active_features, output_size, num_in_buckets, num_out_buckets
@@ -127,9 +123,10 @@ class SparseLinearFunction(autograd.Function):
                 scale.data_ptr(),
                 in_boundaries.data_ptr(),
                 out_boundaries.data_ptr(),
-                bias.data_ptr(),
-                output.data_ptr(),
+                weight_grad.data_ptr(),
+                bias_grad.data_ptr(),
+                grad_output.data_ptr(),            
             ),
         )
 
-        return None, None, weight_grad, None, None, bias_grad
+        return None, None, weight_grad, None, None, None, bias_grad

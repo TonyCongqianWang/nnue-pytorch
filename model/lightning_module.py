@@ -12,6 +12,26 @@ from .quantize import QuantizationConfig
 def _get_parameters(layers: list[nn.Module]):
     return [p for layer in layers for p in layer.parameters()]
 
+def groupwise_max_l1_loss(l1_activations, k):
+    shape = l1_activations.shape
+    new_shape = shape[:-1] + (shape[-1] // k, k)
+    x_grouped = l1_activations.view(*new_shape)
+    
+    group_maxima, _ = torch.max(torch.abs(x_grouped), dim=-1)
+    loss = torch.mean(group_maxima)
+    
+    return loss
+
+def mse_like_loss(prediction, target, qp_asymmetry, w1, w2):
+    loss = torch.pow(torch.abs(prediction - target), 2.5)
+    if qp_asymmetry != 0.0:
+        loss = loss * ((target > prediction) * qp_asymmetry + 1)
+
+    weights = 1 + (2.0**w1 - 1) * torch.pow((target - 0.5) ** 2 * target * (1 - target), w2)
+    loss = (loss * weights).sum() / weights.sum()
+
+    return loss
+
 
 class NNUE(L.LightningModule):
     """
@@ -70,7 +90,7 @@ class NNUE(L.LightningModule):
             layer_stack_indices,
         ) = batch
 
-        scorenet = (
+        scorenet, l1_activations = (
             self.model(
                 us,
                 them,
@@ -80,9 +100,10 @@ class NNUE(L.LightningModule):
                 black_values,
                 psqt_indices,
                 layer_stack_indices,
+                return_l1_activations=True,
             )
-            * self.model.quantization.nnue2score
         )
+        scorenet = scorenet * self.model.quantization.nnue2score
 
         p = self.loss_params
         # convert the network and search scores to an estimate match result
@@ -103,12 +124,10 @@ class NNUE(L.LightningModule):
         pt = pf * actual_lambda + t * (1.0 - actual_lambda)
 
         # use a MSE-like loss function
-        loss = torch.pow(torch.abs(pt - qf), p.pow_exp)
-        if p.qp_asymmetry != 0.0:
-            loss = loss * ((qf > pt) * p.qp_asymmetry + 1)
+        error_loss = mse_like_loss(qf, pt, p.qp_asymmetry, p.w1, p.w2)
+        sparsity_loss = p.sparsity_loss_weight * groupwise_max_l1_loss(l1_activations, 4)
 
-        weights = 1 + (2.0**p.w1 - 1) * torch.pow((pf - 0.5) ** 2 * pf * (1 - pf), p.w2)
-        loss = (loss * weights).sum() / weights.sum()
+        loss = error_loss + sparsity_loss
 
         self.log(loss_type, loss, prog_bar=True)
 

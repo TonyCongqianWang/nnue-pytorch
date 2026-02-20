@@ -23,4 +23,4 @@ class LossParams:
     qp_asymmetry: float = 0.0
     w1: float = 0.0
     w2: float = 0.5
-    sparsity_loss_weight: float = 1e-3
+    sparsity_loss_weight: float = 1e-4

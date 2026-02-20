@@ -82,6 +82,21 @@ class Features(FeatureBlock):
 
     def get_initial_psqt_features(self) -> list[int]:
         return halfka_psqts()
+    
+    def get_indeces(self, is_white_pov: bool | None=None, king_sq: int | None=None, sq: int | None=None, p: chess.Piece | None=None) -> list[int]:
+        pov_range = [True, False] if is_white_pov is None else [is_white_pov]
+        ksq_range = range(64) if king_sq is None else [king_sq]
+        sq_range = range(64) if sq is None else [sq]
+        p_range = chess.PIECE_TYPES if p is None else [p.piece_type]
+        idxs = [
+            halfka_idx(is_white_pov, ksq, sq, p)
+            for is_white_pov in pov_range
+            for ksq in ksq_range
+            for sq in sq_range
+            for p in [chess.Piece(piece, chess.WHITE) for piece in p_range]
+        ]
+        
+        return idxs
 
 
 class FactorizedFeatures(FeatureBlock):
@@ -96,7 +111,7 @@ class FactorizedFeatures(FeatureBlock):
         raise Exception(
             "Not supported yet, you must use the c++ data loader for factorizer support during training"
         )
-
+    
     def get_feature_factors(self, idx: int) -> list[int]:
         if idx >= self.num_real_features:
             raise Exception("Feature must be real")

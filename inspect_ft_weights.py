@@ -25,8 +25,12 @@ def calculate_statistics(weights, x0, x1, y0, y1):
     l1_norms = np.linalg.norm(sub_matrix, ord=1, axis=1)
     l2_norms = np.linalg.norm(sub_matrix, ord=2, axis=1)
     linf_norms = np.linalg.norm(sub_matrix, ord=np.inf, axis=1)
-
-    percentiles = [50, 90, 99, 99.9, 99.99]
+    
+    l1_norms_t = np.linalg.norm(sub_matrix, ord=1, axis=0)
+    l2_norms_t = np.linalg.norm(sub_matrix, ord=2, axis=0)
+    linf_norms_t = np.linalg.norm(sub_matrix, ord=np.inf, axis=0)
+    
+    percentiles = [50, 90, 95, 99, 99.9, 99.99]
     
     print(f"\n--- Statistics for Region (X: {x_start} to {x_end}, Y: {y_start} to {y_end}) ---")
     print(f"Extracted Shape: {sub_matrix.shape}")
@@ -34,7 +38,10 @@ def calculate_statistics(weights, x0, x1, y0, y1):
     stats_to_print = [
         ("L1", l1_norms),
         ("L2", l2_norms),
-        ("L_inf", linf_norms)
+        ("L_inf", linf_norms),
+        ("L1_T", l1_norms_t),
+        ("L2_T", l2_norms_t),
+        ("L_inf_T", linf_norms_t)
     ]
     
     for name, norms in stats_to_print:

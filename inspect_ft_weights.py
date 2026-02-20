@@ -22,10 +22,12 @@ def calculate_statistics(weights, x0, x1, y0, y1):
         return
 
     # Calculate norms along the rows (axis=1)
+    l0_norms = np.linalg.norm(sub_matrix, ord=0, axis=1)
     l1_norms = np.linalg.norm(sub_matrix, ord=1, axis=1)
     l2_norms = np.linalg.norm(sub_matrix, ord=2, axis=1)
     linf_norms = np.linalg.norm(sub_matrix, ord=np.inf, axis=1)
     
+    l0_norms_t = np.linalg.norm(sub_matrix, ord=0, axis=0)
     l1_norms_t = np.linalg.norm(sub_matrix, ord=1, axis=0)
     l2_norms_t = np.linalg.norm(sub_matrix, ord=2, axis=0)
     linf_norms_t = np.linalg.norm(sub_matrix, ord=np.inf, axis=0)
@@ -36,9 +38,11 @@ def calculate_statistics(weights, x0, x1, y0, y1):
     print(f"Extracted Shape: {sub_matrix.shape}")
     
     stats_to_print = [
+        ("L0", l0_norms),
         ("L1", l1_norms),
         ("L2", l2_norms),
         ("L_inf", linf_norms),
+        ("L0_T", l0_norms_t),
         ("L1_T", l1_norms_t),
         ("L2_T", l2_norms_t),
         ("L_inf_T", linf_norms_t)

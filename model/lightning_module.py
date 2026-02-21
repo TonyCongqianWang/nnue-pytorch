@@ -1,5 +1,5 @@
 import lightning as L
-import ranger21
+import schedulefree
 import torch
 from torch import Tensor, nn
 
@@ -8,9 +8,13 @@ from .model import NNUEModel
 from .quantize import QuantizationConfig
 
 
-def _get_parameters(layers: list[nn.Module]):
-    return [p for layer in layers for p in layer.parameters()]
-
+def _get_parameters(layers: list[nn.Module], get_biases: bool = False):
+    return [
+        p 
+        for layer in layers 
+        for name, p in layer.named_parameters() 
+        if ("bias" in name) == get_biases and p.requires_grad
+    ]
 
 class NNUE(L.LightningModule):
     """
@@ -31,27 +35,59 @@ class NNUE(L.LightningModule):
         config: ModelConfig,
         quantize_config: QuantizationConfig,
         max_epoch=800,
-        num_batches_per_epoch=int(100_000_000 / 16384),
-        gamma=0.992,
-        lr=8.75e-4,
+        lr=0.05,
+        warmup_steps=1000,
+        ft_weight_decay=0.0,
+        dense_weight_decay=0.0,
         param_index=0,
         num_psqt_buckets=8,
         num_ls_buckets=8,
         loss_params=LossParams(),
+        **kwargs,
     ):
         super().__init__()
+        
+        # Catch and warn about any unused or deprecated arguments
+        if kwargs:
+            import warnings
+            deprecated_args = {"gamma", "num_batches_per_epoch"}
+            used_deprecated = [k for k in kwargs if k in deprecated_args]
+            other_unused = [k for k in kwargs if k not in deprecated_args]
+            
+            warning_parts = ["The following keyword arguments are unused and will be ignored:"]
+            if used_deprecated:
+                warning_parts.append(
+                    f"\n  - Deprecated (due to Schedule-Free Adam): {', '.join(used_deprecated)}"
+                )
+            if other_unused:
+                warning_parts.append(
+                    f"\n  - Unknown/Unrecognized: {', '.join(other_unused)}"
+                )
+                
+            warnings.warn("".join(warning_parts), UserWarning)
+
         self.model: NNUEModel = NNUEModel(
             feature_name, config, quantize_config, num_psqt_buckets, num_ls_buckets
         )
         self.loss_params = loss_params
         self.max_epoch = max_epoch
-        self.num_batches_per_epoch = num_batches_per_epoch
-        self.gamma = gamma
         self.lr = lr
+        self.warmup_steps = warmup_steps
+        self.dense_weight_decay = dense_weight_decay
+        self.ft_weight_decay = ft_weight_decay
         self.param_index = param_index
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
+
+    def on_train_epoch_start(self):
+        self.optimizers().optimizer.train()
+
+    def on_validation_epoch_start(self):
+        self.optimizers().optimizer.eval()
+
+    def on_test_epoch_start(self):
+        self.optimizers().optimizer.eval()
 
     def step_(self, batch: tuple[Tensor, ...], batch_idx, loss_type):
         _ = batch_idx  # unused, but required by pytorch-lightning
@@ -124,37 +160,29 @@ class NNUE(L.LightningModule):
 
     def configure_optimizers(self):
         LR = self.lr
+        
         train_params = [
-            {"params": _get_parameters([self.model.input]), "lr": LR, "gc_dim": 0},
-            {"params": [self.model.layer_stacks.l1.factorized_linear.weight], "lr": LR},
-            {"params": [self.model.layer_stacks.l1.factorized_linear.bias], "lr": LR},
-            {"params": [self.model.layer_stacks.l1.linear.weight], "lr": LR},
-            {"params": [self.model.layer_stacks.l1.linear.bias], "lr": LR},
-            {"params": [self.model.layer_stacks.l2.linear.weight], "lr": LR},
-            {"params": [self.model.layer_stacks.l2.linear.bias], "lr": LR},
-            {"params": [self.model.layer_stacks.output.linear.weight], "lr": LR},
-            {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR},
+            # Feature Transformer
+            {"params": _get_parameters([self.model.input], get_biases=False), "lr": LR, "weight_decay": self.ft_weight_decay},
+            {"params": _get_parameters([self.model.input], get_biases=True), "lr": LR, "weight_decay": 0.0},
+            
+            # Dense Layer Stacks
+            {"params": [self.model.layer_stacks.l1.factorized_linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l1.factorized_linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.l1.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l1.linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.l2.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l2.linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.output.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR, "weight_decay": 0.0},
         ]
 
-        optimizer = ranger21.Ranger21(
+        optimizer = schedulefree.AdamWScheduleFree(
             train_params,
-            lr=1.0,
+            lr=LR,
             betas=(0.9, 0.999),
             eps=1.0e-7,
-            using_gc=False,
-            using_normgc=False,
-            weight_decay=0.0,
-            num_batches_per_epoch=self.num_batches_per_epoch,
-            num_epochs=self.max_epoch,
-            warmdown_active=False,
-            use_warmup=False,
-            use_adaptive_gradient_clipping=False,
-            softplus=False,
-            pnm_momentum_factor=0.0,
+            warmup_steps=self.warmup_steps
         )
 
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=1, gamma=self.gamma
-        )
-
-        return [optimizer], [scheduler]
+        return optimizer

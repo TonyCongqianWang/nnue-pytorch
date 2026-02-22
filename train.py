@@ -103,6 +103,93 @@ def str2bool(v):
 def flatten_once(lst):
     return sum(lst, [])
 
+def add_resume_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--resume-from-model",
+        dest="resume_from_model",
+        help="Initializes training from the given .ckpt or .pt model. See --resume-strategy for details about behaviour.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        dest="resume_from_checkpoint",
+        help="Initializes training using a given .ckpt model",
+    )
+    parser.add_argument("--resume-strategy", type=str, default="pickled_pt_full_load",
+                        dest="resume_strategy",
+                        choices=[
+                            "pickled_pt_full_load",
+                            "pickled_pt_weights_only",
+                            "raw_pt",
+                            "lightning_model",
+                            "lightning_trainer"
+                        ],
+                        help="Specifies how to interpret the model given in --resume-from-model. "
+                             "pickled_pt_full_load (default) and pickled_pt_weights_only expect a .pt file containing the full model object."
+                             "pickled_pt_weights_only will only load the weights pickled class metadata. "
+                             "raw_pt expects a .pt file containing only the state_dict.")
+
+    parser.add_argument("--strict", type=lambda x: str(x).lower() in ['true', '1', 'y'], default=True)
+    return parser
+
+def setup_model(args, M, feature_name, loss_params, batch_size):
+    max_epoch = args.max_epochs or 800
+    model_kwargs = dict(
+        feature_name=feature_name,
+        loss_params=loss_params,
+        max_epoch=max_epoch,
+        num_batches_per_epoch=max(1, args.epoch_size // batch_size),
+        gamma=args.gamma,
+        lr=args.lr,
+        param_index=args.param_index,
+        config=M.ModelConfig.get_model_config(args),
+        quantize_config=M.QuantizationConfig(),
+    )
+
+    if args.resume_from_model is None or args.resume_strategy == "lightning_trainer":
+        return M.NNUE(**model_kwargs)
+
+    assert os.path.exists(args.resume_from_model)
+
+    if args.resume_strategy == "lightning_model":
+        return M.NNUE.load_from_checkpoint(
+            checkpoint_path=args.resume_from_model,
+            strict=args.strict,
+            **model_kwargs
+        )
+
+    if args.resume_strategy == "pickled_pt_full_load":
+        try:
+            nnue = torch.load(args.resume_from_model, weights_only=False)
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                f"Could not load checkpoint: {e}. The model to be resumed was probably saved with a different version of the code."
+            )
+
+        nnue.model.set_feature_set(feature_set)
+        nnue.loss_params = loss_params
+        nnue.max_epoch = max_epoch
+        nnue.num_batches_per_epoch = args.epoch_size / batch_size
+        nnue.gamma = args.gamma
+        nnue.lr = args.lr
+        nnue.param_index = args.param_index
+        return nnue
+
+    if args.resume_strategy in ["pickled_pt_weights_only", "raw_pt"]:
+        nnue = M.NNUE(**model_kwargs)
+        is_pickled = (args.resume_strategy == "pickled_pt_weights_only")
+
+        try:
+            checkpoint = torch.load(args.resume_from_model, map_location="cpu", weights_only=not is_pickled)
+        except ModuleNotFoundError as e:
+            raise RuntimeError(f"Could not load checkpoint: {e}.")
+
+        if hasattr(checkpoint, "state_dict"):
+            state_dict = checkpoint.state_dict()
+        else:
+            state_dict = checkpoint.get("state_dict", checkpoint)
+
+        nnue.load_state_dict(state_dict, strict=args.strict)
+        return nnue
 
 def main():
     parser = argparse.ArgumentParser(description="Trains the network.")
@@ -199,17 +286,8 @@ def main():
     )
 
     data_loader.DataloaderSkipConfig.add_dataloader_skip_args(parser)
+    add_resume_args(parser)
 
-    parser.add_argument(
-        "--resume-from-model",
-        dest="resume_from_model",
-        help="Initializes training using the weights from the given .pt model",
-    )
-    parser.add_argument(
-        "--resume-from-checkpoint",
-        dest="resume_from_checkpoint",
-        help="Initializes training using a given .ckpt model",
-    )
     parser.add_argument(
         "--network-save-period",
         type=int,
@@ -308,38 +386,10 @@ def main():
     print("Loss parameters:")
     print(loss_params)
 
-    max_epoch = args.max_epochs or 800
-    if args.resume_from_model is None:
-        nnue = M.NNUE(
-            feature_name=feature_name,
-            loss_params=loss_params,
-            max_epoch=max_epoch,
-            num_batches_per_epoch=max(1, args.epoch_size // global_batch_size_requested),
-            gamma=args.gamma,
-            lr=args.lr,
-            param_index=args.param_index,
-            config=M.ModelConfig.get_model_config(args),
-            quantize_config=M.QuantizationConfig(),
-        )
-    else:
-        assert os.path.exists(args.resume_from_model)
-        try:
-            nnue = torch.load(args.resume_from_model, weights_only=False)
-        except ModuleNotFoundError as e:
-            raise RuntimeError(
-                f"Could not load checkpoint: {e}. The model to be resumed was probably saved with a different version of the code."
-            )
-        nnue.loss_params = loss_params
-        nnue.max_epoch = max_epoch
-        nnue.num_batches_per_epoch = max(1, args.epoch_size // global_batch_size_requested)
-        # we can set the following here just like that because when resuming
-        # from .pt the optimizer is only created after the training is started
-        nnue.gamma = args.gamma
-        nnue.lr = args.lr
-        nnue.param_index = args.param_index
-
     print("Feature set: {}".format(feature_name))
     print("Num inputs: {}".format(feature_cls.NUM_INPUTS))
+
+    nnue = setup_model(args, M, feature_name, loss_params, global_batch_size_requested)
 
     print("Training with: {}".format(train_datasets))
     print("Validating with: {}".format(val_datasets))
@@ -412,8 +462,9 @@ def main():
         args.validation_size,
     )
 
-    if args.resume_from_checkpoint:
-        trainer.fit(nnue, train, val, ckpt_path=args.resume_from_checkpoint)
+    if args.resume_from_checkpoint or (args.resume_from_model and args.resume_strategy == "lightning_trainer"):
+        ckpt_path = args.resume_from_checkpoint if args.resume_from_checkpoint else args.resume_from_model
+        trainer.fit(nnue, train, val, ckpt_path=ckpt_path)
     else:
         trainer.fit(nnue, train, val)
 

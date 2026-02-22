@@ -1,5 +1,5 @@
-from .callbacks import WeightClippingCallback
-from .config import ModelConfig, LossParams
+from .callbacks import WeightClippingCallback, PhaseTrainingScheduleCallback
+from .config import ModelConfig, LossParams, get_default_qat_training_schedule
 from .features import add_feature_args, FeatureSet, get_feature_set_from_name
 from .lightning_module import NNUE
 from .model import NNUEModel
@@ -15,6 +15,8 @@ from .utils import (
 
 __all__ = [
     "WeightClippingCallback",
+    "PhaseTrainingScheduleCallback",
+    "get_default_qat_training_schedule"
     "ModelConfig",
     "LossParams",
     "add_feature_args",

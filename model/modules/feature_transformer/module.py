@@ -5,7 +5,6 @@ from torch import nn
 
 from .functions import SparseLinearFunction
 
-
 class BaseFeatureTransformer(nn.Module):
     def __init__(self, num_inputs, num_outputs):
         super().__init__()

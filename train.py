@@ -372,6 +372,13 @@ def main():
         dest="w2",
         help="weight boost parameter 2 (default=0.5)",
     )
+    
+    parser.add_argument(
+        "--qat-durations", 
+        type=str, 
+        default=None,
+        help="Duration (in epochs) for the first two active QAT training phases. The remaining time is used to train the layerstack. Off by default. Example: --qat-durations \"400,300\""
+    )
 
     parser.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     M.add_feature_args(parser)
@@ -493,6 +500,19 @@ def main():
         save_top_k=-1,
     )
 
+    trainer_callbacks=[
+            checkpoint_callback,
+            TQDMProgressBar(refresh_rate=300),
+            TimeLimitAfterCheckpoint(args.max_time),
+            M.WeightClippingCallback(),
+        ]
+    if args.qat_durations is not None:
+        qat_durations = tuple(int(x.strip()) for x in args.qat_durations.split(","))
+        assert len(qat_durations) == 2
+        training_schedule = M.get_default_qat_training_schedule(qat_durations)
+        qat_phase_callback = M.PhaseTrainingScheduleCallback(training_schedule)
+        trainer_callbacks.append(qat_phase_callback)
+
     trainer = L.Trainer(
         default_root_dir=logdir,
         max_epochs=args.max_epochs,
@@ -501,12 +521,7 @@ def main():
         if args.gpus
         else "auto",
         logger=tb_logger,
-        callbacks=[
-            checkpoint_callback,
-            TQDMProgressBar(refresh_rate=300),
-            TimeLimitAfterCheckpoint(args.max_time),
-            M.WeightClippingCallback(),
-        ],
+        callbacks=trainer_callbacks,
         enable_progress_bar=True,
         enable_checkpointing=True,
         benchmark=True,

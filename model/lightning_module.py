@@ -22,6 +22,9 @@ def groupwise_max_l1_loss(l1_activations, k):
     
     return loss
 
+def mean_square_loss(activations):
+    return torch.mean(torch.square(activations))
+
 def mse_like_loss(prediction, target, qp_asymmetry, w1, w2):
     loss = torch.pow(torch.abs(prediction - target), 2.5)
     if qp_asymmetry != 0.0:
@@ -31,7 +34,6 @@ def mse_like_loss(prediction, target, qp_asymmetry, w1, w2):
     loss = (loss * weights).sum() / weights.sum()
 
     return loss
-
 
 class NNUE(L.LightningModule):
     """
@@ -70,6 +72,15 @@ class NNUE(L.LightningModule):
         self.gamma = gamma
         self.lr = lr
         self.param_index = param_index
+        
+        self._activations = {}
+        self.model.l1_pre_probe.register_forward_hook(self._get_activation("l1_pre"))
+        self.model.l1_post_probe.register_forward_hook(self._get_activation("l1_post"))
+    
+    def _get_activation(self, name):
+        def hook(model, input, output):
+            self._activations[name] = output
+        return hook
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -90,7 +101,7 @@ class NNUE(L.LightningModule):
             layer_stack_indices,
         ) = batch
 
-        scorenet, l1_activations = (
+        scorenet = (
             self.model(
                 us,
                 them,
@@ -100,7 +111,6 @@ class NNUE(L.LightningModule):
                 black_values,
                 psqt_indices,
                 layer_stack_indices,
-                return_l1_activations=True,
             )
         )
         scorenet = scorenet * self.model.quantization.nnue2score
@@ -125,9 +135,14 @@ class NNUE(L.LightningModule):
 
         # use a MSE-like loss function
         error_loss = mse_like_loss(qf, pt, p.qp_asymmetry, p.w1, p.w2)
-        sparsity_loss = p.sparsity_loss_weight * groupwise_max_l1_loss(l1_activations, 4)
+        
+        # auxiliary losses to encourage sparsity and low activations in the l1 layer
+        l1_pre = self._activations.get("l1_pre")
+        l1_post = self._activations.get("l1_post")
+        sparsity_loss = p.sparsity_loss_weight * groupwise_max_l1_loss(l1_pre, 4)
+        activation_loss = p.activation_loss_weight * mean_square_loss(l1_post)
 
-        loss = error_loss + sparsity_loss
+        loss = error_loss + sparsity_loss + activation_loss
 
         self.log(loss_type, loss, prog_bar=True)
 

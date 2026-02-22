@@ -372,6 +372,20 @@ def main():
         dest="w2",
         help="weight boost parameter 2 (default=0.5)",
     )
+    parser.add_argument(
+        "--sparsity_loss_weight",
+        type=float,
+        default=1e-4,
+        dest="sparsity_loss_weight",
+        help="weight for sparsity loss (default=1e-4)",
+    )
+    parser.add_argument(
+        "--activation_loss_weight",
+        type=float,
+        default=1e-4,
+        dest="activation_loss_weight",
+        help="weight for activation loss (default=1e-4)",
+    )
 
     parser.add_argument("--l1", type=int, default=M.ModelConfig().L1)
     M.add_feature_args(parser)
@@ -419,6 +433,8 @@ def main():
         qp_asymmetry=args.qp_asymmetry,
         w1=args.w1,
         w2=args.w2,
+        sparsity_loss_weight=args.sparsity_loss_weight,
+        activation_loss_weight=args.activation_loss_weight,
     )
     print("Loss parameters:")
     print(loss_params)

@@ -37,6 +37,9 @@ class NNUEModel(nn.Module):
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
         self._init_layers()
+        
+        self.l1_pre_probe = nn.Identity()
+        self.l1_post_probe = nn.Identity()
 
     def _init_layers(self):
         self._zero_virtual_feature_weights()
@@ -167,21 +170,23 @@ class NNUEModel(nn.Module):
         black_values: torch.Tensor,
         psqt_indices: torch.Tensor,
         layer_stack_indices: torch.Tensor,
-        return_l1_activations=False,
-    ):
+    ) -> torch.Tensor:
         wp, bp = self.input(white_indices, white_values, black_indices, black_values)
         w, wpsqt = torch.split(wp, self.L1, dim=1)
         b, bpsqt = torch.split(bp, self.L1, dim=1)
         l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
+        l0_pre = self.l1_pre_probe(l0_)
+        
         l0_ = torch.clamp(l0_, 0.0, 1.0)
-
         l0_s = torch.split(l0_, self.L1 // 2, dim=1)
+        
         # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         # and it's more efficient to divide by 128 instead.
         scale = 127 / 128
         l0_s1 = (l0_s[0] * l0_s[1] * scale, l0_s[2] * l0_s[3] * scale)
 
         l0_ = torch.cat(l0_s1, dim=1)
+        l0_ = self.l1_post_probe(l0_)
 
         psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)
@@ -191,6 +196,4 @@ class NNUEModel(nn.Module):
         # which does both the averaging and sign flip for black to move)
         x = self.layer_stacks(l0_, layer_stack_indices) + (wpsqt - bpsqt) * (us - 0.5)
 
-        if return_l1_activations:
-            return x, l0_
         return x

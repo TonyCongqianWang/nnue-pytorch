@@ -24,3 +24,4 @@ class LossParams:
     w1: float = 0.0
     w2: float = 0.5
     sparsity_loss_weight: float = 1e-4
+    activation_loss_weight: float = 1e-4

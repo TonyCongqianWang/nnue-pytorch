@@ -103,6 +103,40 @@ def str2bool(v):
 def flatten_once(lst):
     return sum(lst, [])
 
+def add_optimizer_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--gamma",
+        default=0.992,
+        type=float,
+        dest="gamma",
+        help="Multiplicative factor applied to the learning rate after every epoch.",
+    )
+    parser.add_argument(
+        "--lr", default=8.75e-4, type=float, dest="lr", help="Initial learning rate."
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        default=1000,
+        type=int,
+        dest="warmup_steps",
+        help="Number of steps to warm up the learning rate for.",
+    )
+    parser.add_argument(
+        "--ft-weight-decay",
+        default=0.0,
+        type=float,
+        dest="ft_weight_decay",
+        help="Weight decay to use for the feature transformer. Default 0.0.",
+    )
+    parser.add_argument(
+        "--dense-weight-decay",
+        default=0.0,
+        type=float,
+        dest="dense_weight_decay",
+        help="Weight decay to use for the dense layers. Default 0.0.",
+    )
+    return parser
+
 def add_resume_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--resume-from-model",
@@ -236,16 +270,8 @@ def main():
         help="Validation data to use for validation instead of the training data.",
     )
 
-    parser.add_argument(
-        "--gamma",
-        default=0.992,
-        type=float,
-        dest="gamma",
-        help="Multiplicative factor applied to the learning rate after every epoch.",
-    )
-    parser.add_argument(
-        "--lr", default=8.75e-4, type=float, dest="lr", help="Initial learning rate."
-    )
+    add_optimizer_args(parser)
+
     parser.add_argument(
         "--num-workers",
         default=1,

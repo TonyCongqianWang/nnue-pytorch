@@ -10,9 +10,9 @@ from .quantize import QuantizationConfig
 
 def _get_parameters(layers: list[nn.Module], get_biases: bool = False):
     return [
-        p 
-        for layer in layers 
-        for name, p in layer.named_parameters() 
+        p
+        for layer in layers
+        for name, p in layer.named_parameters()
         if ("bias" in name) == get_biases and p.requires_grad
     ]
 
@@ -46,14 +46,14 @@ class NNUE(L.LightningModule):
         **kwargs,
     ):
         super().__init__()
-        
+
         # Catch and warn about any unused or deprecated arguments
         if kwargs:
             import warnings
             deprecated_args = {"gamma", "num_batches_per_epoch"}
             used_deprecated = [k for k in kwargs if k in deprecated_args]
             other_unused = [k for k in kwargs if k not in deprecated_args]
-            
+
             warning_parts = ["The following keyword arguments are unused and will be ignored:"]
             if used_deprecated:
                 warning_parts.append(
@@ -63,7 +63,7 @@ class NNUE(L.LightningModule):
                 warning_parts.append(
                     f"\n  - Unknown/Unrecognized: {', '.join(other_unused)}"
                 )
-                
+
             warnings.warn("".join(warning_parts), UserWarning)
 
         self.model: NNUEModel = NNUEModel(
@@ -77,17 +77,68 @@ class NNUE(L.LightningModule):
         self.ft_weight_decay = ft_weight_decay
         self.param_index = param_index
 
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
+    # --- setup optimizers and training hooks ---
+
+    def configure_optimizers(self):
+        LR = self.lr
+
+        train_params = [
+            # Feature Transformer
+            {"params": _get_parameters([self.model.input], get_biases=False), "lr": LR, "weight_decay": self.ft_weight_decay},
+            {"params": _get_parameters([self.model.input], get_biases=True), "lr": LR, "weight_decay": 0.0},
+
+            # Dense Layer Stacks
+            {"params": [self.model.layer_stacks.l1.factorized_linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l1.factorized_linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.l1.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l1.linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.l2.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.l2.linear.bias], "lr": LR, "weight_decay": 0.0},
+            {"params": [self.model.layer_stacks.output.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
+            {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR, "weight_decay": 0.0},
+        ]
+
+        optimizer = schedulefree.AdamWScheduleFree(
+            train_params,
+            lr=LR,
+            betas=(0.9, 0.999),
+            eps=1.0e-7,
+            warmup_steps=self.warmup_steps
+        )
+
+        return optimizer
 
     def on_train_epoch_start(self):
         self.optimizers().optimizer.train()
+
+    def on_train_epoch_end(self):
+        self.optimizers().optimizer.eval()
 
     def on_validation_epoch_start(self):
         self.optimizers().optimizer.eval()
 
     def on_test_epoch_start(self):
         self.optimizers().optimizer.eval()
+
+    def on_save_checkpoint(self, checkpoint):
+        self.optimizers().optimizer.eval()
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self.optimizers().optimizer.train()
+
+    # --- Training step implementation ---
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
+    def training_step(self, batch, batch_idx):
+        return self.step_(batch, batch_idx, "train_loss")
+
+    def validation_step(self, batch, batch_idx):
+        self.step_(batch, batch_idx, "val_loss")
+
+    def test_step(self, batch, batch_idx):
+        self.step_(batch, batch_idx, "test_loss")
 
     def step_(self, batch: tuple[Tensor, ...], batch_idx, loss_type):
         _ = batch_idx  # unused, but required by pytorch-lightning
@@ -148,41 +199,3 @@ class NNUE(L.LightningModule):
         self.log(loss_type, loss, prog_bar=True, sync_dist=True)
 
         return loss
-
-    def training_step(self, batch, batch_idx):
-        return self.step_(batch, batch_idx, "train_loss")
-
-    def validation_step(self, batch, batch_idx):
-        self.step_(batch, batch_idx, "val_loss")
-
-    def test_step(self, batch, batch_idx):
-        self.step_(batch, batch_idx, "test_loss")
-
-    def configure_optimizers(self):
-        LR = self.lr
-        
-        train_params = [
-            # Feature Transformer
-            {"params": _get_parameters([self.model.input], get_biases=False), "lr": LR, "weight_decay": self.ft_weight_decay},
-            {"params": _get_parameters([self.model.input], get_biases=True), "lr": LR, "weight_decay": 0.0},
-            
-            # Dense Layer Stacks
-            {"params": [self.model.layer_stacks.l1.factorized_linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
-            {"params": [self.model.layer_stacks.l1.factorized_linear.bias], "lr": LR, "weight_decay": 0.0},
-            {"params": [self.model.layer_stacks.l1.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
-            {"params": [self.model.layer_stacks.l1.linear.bias], "lr": LR, "weight_decay": 0.0},
-            {"params": [self.model.layer_stacks.l2.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
-            {"params": [self.model.layer_stacks.l2.linear.bias], "lr": LR, "weight_decay": 0.0},
-            {"params": [self.model.layer_stacks.output.linear.weight], "lr": LR, "weight_decay": self.dense_weight_decay},
-            {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR, "weight_decay": 0.0},
-        ]
-
-        optimizer = schedulefree.AdamWScheduleFree(
-            train_params,
-            lr=LR,
-            betas=(0.9, 0.999),
-            eps=1.0e-7,
-            warmup_steps=self.warmup_steps
-        )
-
-        return optimizer

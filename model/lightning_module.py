@@ -1,6 +1,7 @@
 import lightning as L
 import ranger21
 import torch
+from functools import partial
 from torch import Tensor, nn
 
 from .config import LossParams, ModelConfig
@@ -12,14 +13,17 @@ from .quantize import QuantizationConfig
 def _get_parameters(layers: list[nn.Module]):
     return [p for layer in layers for p in layer.parameters()]
 
+def _get_activation_hook(model, input, output, dict, name):
+    dict[name] = output
+
 def groupwise_max_l1_loss(l1_activations, k):
     shape = l1_activations.shape
     new_shape = shape[:-1] + (shape[-1] // k, k)
     x_grouped = l1_activations.view(*new_shape)
-    
+
     group_maxima, _ = torch.max(torch.abs(x_grouped), dim=-1)
     loss = torch.mean(group_maxima)
-    
+
     return loss
 
 def mean_square_loss(activations):
@@ -72,15 +76,11 @@ class NNUE(L.LightningModule):
         self.gamma = gamma
         self.lr = lr
         self.param_index = param_index
-        
+
         self._activations = {}
-        self.model.l1_pre_probe.register_forward_hook(self._get_activation("l1_pre"))
-        self.model.l1_post_probe.register_forward_hook(self._get_activation("l1_post"))
-    
-    def _get_activation(self, name):
-        def hook(model, input, output):
-            self._activations[name] = output
-        return hook
+
+        self.model.l1_pre_probe.register_forward_hook(partial(_get_activation_hook, dict=self._activations, name="l1_pre"))
+        self.model.l1_post_probe.register_forward_hook(partial(_get_activation_hook, dict=self._activations, name="l1_post"))
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -135,7 +135,7 @@ class NNUE(L.LightningModule):
 
         # use a MSE-like loss function
         error_loss = mse_like_loss(qf, pt, p.qp_asymmetry, p.w1, p.w2)
-        
+
         # auxiliary losses to encourage sparsity and low activations in the l1 layer
         l1_pre = self._activations.get("l1_pre")
         l1_post = self._activations.get("l1_post")

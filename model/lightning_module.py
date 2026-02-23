@@ -51,6 +51,30 @@ class NNUE(L.LightningModule):
         self.lr = lr
         self.param_index = param_index
 
+        self._register_load_state_dict_pre_hook(self._backward_compatibility_hook)
+
+    def _backward_compatibility_hook(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        old_weight_key = prefix + "model.input.weight"
+        old_bias_key = prefix + "model.input.bias"
+
+        new_weight_key_1 = prefix + "model.input_l1.weight"
+        new_bias_key_1 = prefix + "model.input_l1.bias"
+        new_weight_key_2 = prefix + "model.input_psqt.weight"
+        new_bias_key_2 = prefix + "model.input_psqt.bias"
+
+        if old_weight_key in state_dict:
+            old_w = state_dict.pop(old_weight_key)
+            old_b = state_dict.pop(old_bias_key)
+
+            l1_w_dim1 = self.model.input_l1.weight.shape[1]
+            l1_b_dim0 = self.model.input_l1.bias.shape[0]
+
+            state_dict[prefix + new_weight_key_1] = old_w[:, :l1_w_dim1]
+            state_dict[prefix + new_weight_key_2] = old_w[:, l1_w_dim1:]
+
+            state_dict[prefix + new_bias_key_1] = old_b[:l1_b_dim0]
+            state_dict[prefix + new_bias_key_2] = old_b[l1_b_dim0:]
+
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 

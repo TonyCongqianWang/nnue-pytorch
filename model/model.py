@@ -189,12 +189,6 @@ class NNUEModel(nn.Module):
             for p in self.layer_stacks.parameters():
                 p.requires_grad = config["layer_stacks"]
 
-        # 2. Update the short-circuit flag for the forward pass
-        # We only short-circuit if PSQT is True AND everything else is explicitly False
-        is_psqt_active = config.get("psqt", False)
-        is_rest_frozen = not config.get("l1", True) and not config.get("layer_stacks", True)
-        self.train_psqt_only = is_psqt_active and is_rest_frozen
-
     def clip_weights(self):
         """
         Clips the weights of the model based on the min/max values allowed

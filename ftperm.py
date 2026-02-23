@@ -474,9 +474,7 @@ def forward_ft(
     psqt_indices: torch.Tensor,
     layer_stack_indices: torch.Tensor,
 ) -> torch.Tensor:
-    wp, bp = model.input(white_indices, white_values, black_indices, black_values)
-    w, _ = torch.split(wp, model.L1, dim=1)
-    b, _ = torch.split(bp, model.L1, dim=1)
+    w, b = model.input_l1(white_indices, white_values, black_indices, black_values)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     l0_ = torch.clamp(l0_, 0.0, model.quantization.ft_quantized_one)
 
@@ -552,7 +550,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bo
     BATCH_SIZE = 1000
 
     quantized_model = copy.deepcopy(model)
-    quantize_ft(quantized_model)
+    #quantize_ft(quantized_model)
     quantized_model.cuda()
 
     fen_batch_provider = make_fen_batch_provider(dataset, BATCH_SIZE)
@@ -572,6 +570,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bo
             [0] * len(fens),
         )
         actmat = eval_ft(quantized_model, b).cpu()
+        print(actmat)
         actmat = actmat <= ZERO_POINT
         actmats.append(actmat.numpy())
         data_loader.destroy_sparse_batch(b)

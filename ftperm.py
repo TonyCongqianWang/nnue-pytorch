@@ -455,12 +455,11 @@ def filter_fens(fens: list[str]) -> list[str]:
 
 
 def quantize_ft(model: NNUEModel) -> None:
-    model.input.weight.data = model.input.weight.data.mul(
-        model.quantization.ft_quantized_one
-    ).round()
-    model.input.bias.data = model.input.bias.data.mul(
-        model.quantization.ft_quantized_one
-    ).round()
+    model.replace_with_quantized_weights(target="feature_transformer")
+    
+def quantize_activation(act: torch.Tensor, scale: float, bits: int=7) -> torch.Tensor:
+    max_val = 2 ** bits - 1
+    return torch.clamp((act / scale).round(), 0, max_val)
 
 
 def forward_ft(
@@ -476,13 +475,13 @@ def forward_ft(
 ) -> torch.Tensor:
     w, b = model.input_l1(white_indices, white_values, black_indices, black_values)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
-    l0_ = torch.clamp(l0_, 0.0, model.quantization.ft_quantized_one)
+    l0_ = quantize_activation(l0_, 1 / (model.quantization.ft_quantized_one))
 
     l0_s = torch.split(l0_, model.L1 // 2, dim=1)
-    l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
-    # We multiply by 255/512 because in the quantized network 1.0 is represented by 255
-    # and we want to scale to 1.0=127, but a shift is faster than a division (in inference)
-    l0_ = torch.cat(l0_s1, dim=1) * (1 / 512)
+    scale = model.quantization.ft_quantized_one / 128
+    l0_s1 = [l0_s[0] * l0_s[1] * scale, l0_s[2] * l0_s[3] * scale]
+
+    l0_ = torch.cat(l0_s1, dim=1) * (scale / model.quantization.ft_quantized_one)
 
     return l0_.round()
 
@@ -528,11 +527,11 @@ def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     permutation.extend([x + l1_size // 2 for x in permutation])
 
     # Add identity permutation for PSQT weights
-    ft_permutation = permutation + list(range(l1_size, model.input.num_outputs))
+    ft_permutation = permutation
 
     # Apply the permutation in place.
-    model.input.weight.data = model.input.weight.data[:, ft_permutation]
-    model.input.bias.data = model.input.bias.data[ft_permutation]
+    model.input_l1.weight.data = model.input_l1.weight.data[:, ft_permutation]
+    model.input_l1.bias.data = model.input_l1.bias.data[ft_permutation]
     model.layer_stacks.l1.linear.weight.data = model.layer_stacks.l1.linear.weight.data[
         :, permutation
     ]
@@ -550,7 +549,7 @@ def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bo
     BATCH_SIZE = 1000
 
     quantized_model = copy.deepcopy(model)
-    #quantize_ft(quantized_model)
+    quantize_ft(quantized_model)
     quantized_model.cuda()
 
     fen_batch_provider = make_fen_batch_provider(dataset, BATCH_SIZE)
@@ -570,7 +569,6 @@ def gather_impl(model: NNUEModel, dataset: str, count: int) -> npt.NDArray[np.bo
             [0] * len(fens),
         )
         actmat = eval_ft(quantized_model, b).cpu()
-        print(actmat)
         actmat = actmat <= ZERO_POINT
         actmats.append(actmat.numpy())
         data_loader.destroy_sparse_batch(b)

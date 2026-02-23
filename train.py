@@ -507,7 +507,7 @@ def main():
             M.WeightClippingCallback(),
         ]
     if args.qat_durations is not None:
-        qat_durations = tuple(int(x.strip()) for x in args.qat_durations.split(","))
+        qat_durations = tuple(int(x.strip(' "\'')) for x in args.qat_durations.split(","))
         assert len(qat_durations) == 2
         training_schedule = M.get_default_qat_training_schedule(qat_durations)
         qat_phase_callback = M.PhaseTrainingScheduleCallback(training_schedule)

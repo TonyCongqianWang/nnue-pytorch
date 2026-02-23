@@ -55,13 +55,6 @@ class NNUE(L.LightningModule):
         return self.model(*args, **kwargs)
 
     def step_(self, batch: tuple[Tensor, ...], batch_idx, loss_type):
-        if batch_idx == 0:
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    if param.grad is not None:
-                        print(f"{name} grad norm: {param.grad.norm().item()}")
-                    else:
-                        print(f"{name} HAS NO GRADIENT!")
         _ = batch_idx  # unused, but required by pytorch-lightning
 
         (

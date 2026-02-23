@@ -9,7 +9,6 @@ class ModelConfig:
     L2: int = 31
     L3: int = 31
 
-
 # parameters needed for the definition of the loss
 @dataclass
 class LossParams:

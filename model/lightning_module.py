@@ -77,6 +77,8 @@ class NNUE(L.LightningModule):
         self.ft_weight_decay = ft_weight_decay
         self.param_index = param_index
 
+        self.needs_train_flip = False
+
     # --- setup optimizers and training hooks ---
 
     def configure_optimizers(self):
@@ -110,21 +112,28 @@ class NNUE(L.LightningModule):
 
     def on_train_epoch_start(self):
         self.optimizers().optimizer.train()
+        self.needs_train_flip = False
 
     def on_train_epoch_end(self):
         self.optimizers().optimizer.eval()
+        self.needs_train_flip = True
 
     def on_validation_epoch_start(self):
         self.optimizers().optimizer.eval()
+        self.needs_train_flip = True
 
     def on_test_epoch_start(self):
         self.optimizers().optimizer.eval()
+        self.needs_train_flip = True
 
     def on_save_checkpoint(self, checkpoint):
         self.optimizers().optimizer.eval()
+        self.needs_train_flip = True
 
     def on_train_batch_start(self, batch, batch_idx):
-        self.optimizers().optimizer.train()
+        if self.needs_train_flip:
+            self.optimizers().optimizer.train()
+            self.needs_train_flip = False
 
     # --- Training step implementation ---
 

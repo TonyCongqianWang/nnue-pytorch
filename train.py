@@ -167,6 +167,8 @@ def main():
                 1, args.epoch_size // global_batch_size_requested
             ),
             gamma=args.gamma,
+            ft_weight_decay=args.ft_weight_decay,
+            dense_weight_decay=args.dense_weight_decay,
             lr=args.lr,
             param_index=args.param_index,
             config=M.ModelConfig.get_model_config(args),

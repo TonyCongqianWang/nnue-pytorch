@@ -31,6 +31,12 @@ class TrainingConfig(LossParams, DataloaderSkipConfig, FeatureConfig, ModelConfi
     gamma: float = 0.992
     """Multiplicative factor applied to the learning rate after every epoch."""
 
+    ft_weight_decay: float = 0.0
+    """Weight decay to apply to the feature transformer parameters."""
+
+    dense_weight_decay: float = 0.0
+    """Weight decay to apply to the dense layer parameters."""
+
     lr: float = 8.75e-4
     """Initial learning rate."""
 

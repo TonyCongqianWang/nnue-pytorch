@@ -1,4 +1,3 @@
-import argparse
 import time
 import warnings
 import os
@@ -14,6 +13,9 @@ from lightning.pytorch.callbacks import TQDMProgressBar, Callback, ModelCheckpoi
 
 import data_loader
 import model as M
+import tyro
+
+from config import TrainingConfig
 
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
@@ -89,284 +91,22 @@ def make_data_loaders(
     return train, val
 
 
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
-
-def flatten_once(lst):
-    return sum(lst, [])
-
-def add_optimizer_args(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--gamma",
-        default=0.992,
-        type=float,
-        dest="gamma",
-        help="Multiplicative factor applied to the learning rate after every epoch.",
-    )
-    parser.add_argument(
-        "--lr", default=8.75e-4, type=float, dest="lr", help="Initial learning rate."
-    )
-    parser.add_argument(
-        "--warmup-steps",
-        default=1000,
-        type=int,
-        dest="warmup_steps",
-        help="Number of steps to warm up the learning rate for.",
-    )
-    parser.add_argument(
-        "--ft-weight-decay",
-        default=0.0,
-        type=float,
-        dest="ft_weight_decay",
-        help="Weight decay to use for the feature transformer. Default 0.0.",
-    )
-    parser.add_argument(
-        "--dense-weight-decay",
-        default=0.0,
-        type=float,
-        dest="dense_weight_decay",
-        help="Weight decay to use for the dense layers. Default 0.0.",
-    )
-    return parser
-
-def add_resume_args(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--resume-from-model",
-        dest="resume_from_model",
-        help="Initializes training from the given .ckpt or .pt model. See --resume-strategy for details about behaviour.",
-    )
-    parser.add_argument(
-        "--resume-from-checkpoint",
-        dest="resume_from_checkpoint",
-        help="Initializes training using a given .ckpt model",
-    )
-    parser.add_argument("--resume-strategy", type=str, default="pickled_pt_full_load",
-                        dest="resume_strategy",
-                        choices=[
-                            "pickled_pt_full_load",
-                            "pickled_pt_weights_only",
-                            "raw_pt",
-                            "lightning_model",
-                            "lightning_trainer"
-                        ],
-                        help="Specifies how to interpret the model given in --resume-from-model. "
-                             "pickled_pt_full_load (default) and pickled_pt_weights_only expect a .pt file containing the full model object."
-                             "pickled_pt_weights_only will only load the weights pickled class metadata. "
-                             "raw_pt expects a .pt file containing only the state_dict.")
-
-    parser.add_argument("--strict", type=lambda x: str(x).lower() in ['true', '1', 'y'], default=True)
-    return parser
-
-def setup_model(args, M, feature_name, loss_params, batch_size):
-    max_epoch = args.max_epochs or 800
-    model_kwargs = dict(
-        feature_name=feature_name,
-        loss_params=loss_params,
-        max_epoch=max_epoch,
-        num_batches_per_epoch=max(1, args.epoch_size // batch_size),
-        gamma=args.gamma,
-        lr=args.lr,
-        param_index=args.param_index,
-        config=M.ModelConfig.get_model_config(args),
-        quantize_config=M.QuantizationConfig(),
-    )
-
-    if args.resume_from_model is None or args.resume_strategy == "lightning_trainer":
-        return M.NNUE(**model_kwargs)
-
-    assert os.path.exists(args.resume_from_model)
-
-    if args.resume_strategy == "lightning_model":
-        return M.NNUE.load_from_checkpoint(
-            checkpoint_path=args.resume_from_model,
-            strict=args.strict,
-            **model_kwargs
-        )
-
-    if args.resume_strategy == "pickled_pt_full_load":
-        try:
-            nnue = torch.load(args.resume_from_model, weights_only=False)
-        except ModuleNotFoundError as e:
-            raise RuntimeError(
-                f"Could not load checkpoint: {e}. The model to be resumed was probably saved with a different version of the code."
-            )
-
-        nnue.model.set_feature_set(feature_set)
-        nnue.loss_params = loss_params
-        nnue.max_epoch = max_epoch
-        nnue.num_batches_per_epoch = args.epoch_size / batch_size
-        nnue.gamma = args.gamma
-        nnue.lr = args.lr
-        nnue.param_index = args.param_index
-        return nnue
-
-    if args.resume_strategy in ["pickled_pt_weights_only", "raw_pt"]:
-        nnue = M.NNUE(**model_kwargs)
-        is_pickled = (args.resume_strategy == "pickled_pt_weights_only")
-
-        try:
-            checkpoint = torch.load(args.resume_from_model, map_location="cpu", weights_only=not is_pickled)
-        except ModuleNotFoundError as e:
-            raise RuntimeError(f"Could not load checkpoint: {e}.")
-
-        if hasattr(checkpoint, "state_dict"):
-            state_dict = checkpoint.state_dict()
-        else:
-            state_dict = checkpoint.get("state_dict", checkpoint)
-
-        nnue.load_state_dict(state_dict, strict=args.strict)
-        return nnue
-
 def main():
-    parser = argparse.ArgumentParser(description="Trains the network.")
-    parser.add_argument(
-        "datasets",
-        action="append",
-        nargs="+",
-        help="Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if not validation data is specified.",
-    )
-    parser.add_argument(
-        "--default_root_dir",
-        type=str,
-        default=None,
-        dest="default_root_dir",
-        help="Default root directory for logs and checkpoints. Default: None (use current directory).",
-    )
-    parser.add_argument(
-        "--gpus",
-        type=str,
-        default=None,
-        dest="gpus",
-        help="List of gpus to use, e.g. 0,1,2,3 for 4 gpus. Default: None (Use device 0 only).",
-    )
-    parser.add_argument(
-        "--max_epochs",
-        default=800,
-        type=int,
-        dest="max_epochs",
-        help="Maximum number of epochs to train for. Default 800.",
-    )
-    parser.add_argument(
-        "--max_time",
-        default="30:00:00:00",
-        type=str,
-        dest="max_time",
-        help="The maximum time to train for. A string in the format DD:HH:MM:SS (Default 30:00:00:00).",
-    )
-    parser.add_argument(
-        "--validation-data",
-        type=str,
-        action="append",
-        nargs="+",
-        dest="validation_datasets",
-        help="Validation data to use for validation instead of the training data.",
-    )
+    args = tyro.cli(TrainingConfig)
 
-    add_optimizer_args(parser)
+    datasets = args.datasets
+    val_datasets = args.validation_datasets
 
-    parser.add_argument(
-        "--num-workers",
-        default=1,
-        type=int,
-        dest="num_workers",
-        help="Number of worker threads to use for data loading. Currently only works well for binpack.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        default=-1,
-        type=int,
-        dest="batch_size",
-        help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.",
-    )
-    parser.add_argument(
-        "--threads",
-        default=-1,
-        type=int,
-        dest="threads",
-        help="Number of torch threads to use. Default automatic (cores) .",
-    )
-    parser.add_argument(
-        "--compile-backend",
-        default="inductor",
-        choices=["inductor", "cudagraphs"],
-        type=str,
-        dest="compile_backend",
-        help="Which backend to use for torch.compile. inductor works well with larger nets, cudagraphs with smaller nets",
-    )
-    parser.add_argument(
-        "--seed", default=42, type=int, dest="seed", help="torch seed to use."
-    )
-    parser.add_argument(
-        "--smart-fen-skipping",
-        action="store_true",
-        dest="smart_fen_skipping_deprecated",
-        help="If enabled positions that are bad training targets will be skipped during loading. Default: True, kept for backwards compatibility. This option is ignored",
-    )
-
-    data_loader.DataloaderSkipConfig.add_dataloader_skip_args(parser)
-    add_resume_args(parser)
-
-    parser.add_argument(
-        "--network-save-period",
-        type=int,
-        default=20,
-        dest="network_save_period",
-        help="Number of epochs between network snapshots. None to disable.",
-    )
-    parser.add_argument(
-        "--save-last-network",
-        type=str2bool,
-        default=True,
-        dest="save_last_network",
-        help="Whether to always save the last produced network.",
-    )
-    parser.add_argument(
-        "--epoch-size",
-        type=int,
-        default=100000000,
-        dest="epoch_size",
-        help="Number of positions per epoch.",
-    )
-    parser.add_argument(
-        "--validation-size",
-        type=int,
-        default=0,
-        dest="validation_size",
-        help="Number of positions per validation step.",
-    )
-
-    M.LossParams.add_loss_args(parser)
-    M.ModelConfig.add_model_args(parser)
-    M.add_feature_args(parser)
-
-    args = parser.parse_args()
-
-    args.datasets = flatten_once(args.datasets)
-    if args.validation_datasets:
-        args.validation_datasets = flatten_once(args.validation_datasets)
-    else:
-        args.validation_datasets = []
-
-    for dataset in args.datasets:
+    for dataset in datasets:
         if not os.path.exists(dataset):
             raise Exception("{0} does not exist".format(dataset))
 
-    for val_dataset in args.validation_datasets:
+    for val_dataset in val_datasets:
         if not os.path.exists(val_dataset):
             raise Exception("{0} does not exist".format(val_dataset))
 
-    train_datasets = args.datasets
+    train_datasets = datasets
     val_datasets = train_datasets
-    if len(args.validation_datasets) > 0:
-        val_datasets = args.validation_datasets
 
     if (args.start_lambda is not None) != (args.end_lambda is not None):
         raise Exception(
@@ -384,38 +124,76 @@ def main():
         try:
             devices = [int(x) for x in args.gpus.rstrip(",").split(",") if x]
         except ValueError:
-            parser.error(
+            print(
                 f"Invalid --gpus argument: '{args.gpus}'. "
-                "Expected a comma separated list of ints, e.g. 0,1"
+                "Expected a comma separated list of ints, e.g. 0,1",
+                file=sys.stderr,
             )
+            return
     else:
         devices = [0]
     n_devices = len(devices)
     if n_devices == 0:
-        parser.error(
+        print(
             f"Invalid --gpus argument: '{args.gpus}'. "
-            "Expected a comma separated list of ints, e.g. 0,1"
+            "Expected a comma separated list of ints, e.g. 0,1",
+            file=sys.stderr,
         )
+        return
     if global_batch_size_requested % n_devices != 0:
         raise ValueError(
             f"--batch-size {global_batch_size_requested} must be divisible by number of gpus ({n_devices}). "
             f"Got --gpus={args.gpus or '0'}"
         )
     per_gpu_batch_size = global_batch_size_requested // n_devices
-    print(f"batch_size(global)={global_batch_size_requested} | n_devices={n_devices} | batch_size(per_gpu)={per_gpu_batch_size}", flush=True)
+    print(
+        f"batch_size(global)={global_batch_size_requested} | n_devices={n_devices} | batch_size(per_gpu)={per_gpu_batch_size}",
+        flush=True,
+    )
 
-    feature_cls = M.get_feature_cls(args.features)
-    feature_name = feature_cls.FEATURE_NAME
-    input_feature_name = feature_cls.INPUT_FEATURE_NAME
+    feature_name = args.features
 
     loss_params = M.LossParams.get_loss_params_from_args(args)
     print("Loss parameters:")
     print(loss_params)
 
-    print("Feature set: {}".format(feature_name))
-    print("Num inputs: {}".format(feature_cls.NUM_INPUTS))
+    max_epoch = args.max_epochs or 800
+    if args.resume_from_model is None:
+        nnue = M.NNUE(
+            feature_name=feature_name,
+            loss_params=loss_params,
+            max_epoch=max_epoch,
+            num_batches_per_epoch=max(
+                1, args.epoch_size // global_batch_size_requested
+            ),
+            gamma=args.gamma,
+            lr=args.lr,
+            param_index=args.param_index,
+            config=M.ModelConfig.get_model_config(args),
+            quantize_config=M.QuantizationConfig(),
+        )
+    else:
+        assert os.path.exists(args.resume_from_model)
+        try:
+            nnue = torch.load(args.resume_from_model, weights_only=False)
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                f"Could not load checkpoint: {e}. The model to be resumed was probably saved with a different version of the code."
+            )
+        nnue.loss_params = loss_params
+        nnue.max_epoch = max_epoch
+        nnue.num_batches_per_epoch = max(
+            1, args.epoch_size // global_batch_size_requested
+        )
+        # we can set the following here just like that because when resuming
+        # from .pt the optimizer is only created after the training is started
+        nnue.gamma = args.gamma
+        nnue.lr = args.lr
+        nnue.param_index = args.param_index
 
-    nnue = setup_model(args, M, feature_name, loss_params, global_batch_size_requested)
+    input_feature_name = nnue.model.input_feature_name
+    print("Feature set: {}".format(feature_name))
+    print("Num inputs: {}".format(nnue.model.input.NUM_INPUTS))
 
     print("Training with: {}".format(train_datasets))
     print("Validating with: {}".format(val_datasets))
@@ -423,8 +201,8 @@ def main():
     L.seed_everything(args.seed)
     print("Seed {}".format(args.seed))
 
-    print("Smart fen skipping: {}".format(not args.no_smart_fen_skipping))
-    print("WLD fen skipping: {}".format(not args.no_wld_fen_skipping))
+    print("Smart fen skipping: {}".format(args.filtered))
+    print("WLD fen skipping: {}".format(args.wld_filtered))
     print("Random fen skipping: {}".format(args.random_fen_skipping))
     print("Skip early plies: {}".format(args.early_fen_skipping))
     print("Skip simple eval : {}".format(args.simple_eval_skipping))
@@ -488,9 +266,8 @@ def main():
         args.validation_size,
     )
 
-    if args.resume_from_checkpoint or (args.resume_from_model and args.resume_strategy == "lightning_trainer"):
-        ckpt_path = args.resume_from_checkpoint if args.resume_from_checkpoint else args.resume_from_model
-        trainer.fit(nnue, train, val, ckpt_path=ckpt_path)
+    if args.resume_from_checkpoint:
+        trainer.fit(nnue, train, val, ckpt_path=args.resume_from_checkpoint)
     else:
         trainer.fit(nnue, train, val)
 

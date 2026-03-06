@@ -10,7 +10,7 @@
 #include <thread>
 #include <deque>
 #include <random>
-#include <variant>
+#include <vector>
 
 #include "lib/nnue_training_data_formats.h"
 #include "lib/nnue_training_data_stream.h"
@@ -29,6 +29,12 @@
     #endif
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+    #define NNUE_COLD __attribute__((cold))
+#else
+    #define NNUE_COLD
+#endif
+
 using namespace binpack;
 using namespace chess;
 
@@ -41,6 +47,16 @@ static Square orient_flip_2(Color color, Square sq, Square ksq) {
         sq = sq.flippedHorizontally();
     return sq;
 }
+
+struct IFeatureExtractor {
+    virtual ~IFeatureExtractor()                                        = default;
+    virtual int                 inputs() const                          = 0;
+    virtual int                 max_active_features() const             = 0;
+    virtual std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                                     int*                     features,
+                                                     float*                   values,
+                                                     Color                    color) const = 0;
+};
 
 struct HalfKAv2_hm {
     static constexpr std::string_view NAME = "HalfKAv2_hm";
@@ -93,13 +109,24 @@ struct HalfKAv2_hm {
     }
 };
 
+struct HalfKAv2_hmExtractor: IFeatureExtractor {
+    int inputs() const override { return HalfKAv2_hm::INPUTS; }
+    int max_active_features() const override { return HalfKAv2_hm::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             float*                   values,
+                                             Color                    color) const override {
+        return HalfKAv2_hm::fill_features_sparse(e, features, values, color);
+    }
+};
+
 constexpr int numvalidtargets[12] = {6, 6, 10, 10, 8, 8, 8, 8, 10, 10, 0, 0};
 
 using ThreatOffsetTable = std::array<std::array<int, 66>, 12>;
 
 struct ThreatFeatureCalculation {
     ThreatOffsetTable table;
-    int totalfeatures;
+    int               totalfeatures;
 };
 
 constexpr auto threatfeaturecalc = []() {
@@ -141,18 +168,20 @@ constexpr auto threatfeaturecalc = []() {
     return ThreatFeatureCalculation{t, pieceoffset};
 }();
 
-constexpr ThreatOffsetTable threatoffsets = threatfeaturecalc.table;
-constexpr int threatfeatures = threatfeaturecalc.totalfeatures;
+constexpr ThreatOffsetTable threatoffsets  = threatfeaturecalc.table;
+constexpr int               threatfeatures = threatfeaturecalc.totalfeatures;
 static_assert(threatfeatures == 60144);
 
-struct Full_Threats {
+struct FullThreats {
     static constexpr std::string_view NAME = "Full_Threats";
 
     static constexpr int SQUARE_NB           = 64;
     static constexpr int PIECE_NB            = 12;
     static constexpr int COLOR_NB            = 2;
     static constexpr int PIECE_TYPE_NB       = 6;
-    static constexpr int MAX_ACTIVE_FEATURES = 128 + 32;
+    static constexpr int MAX_ACTIVE_FEATURES = 128;
+
+    static constexpr int INPUTS = threatfeatures;  // 60,144
 
     // clang-format off
     static constexpr Square OrientTBL[COLOR_NB][SQUARE_NB] = {
@@ -182,33 +211,7 @@ struct Full_Threats {
       {0, 1, 2, 3, 4, -1},
       {-1, -1, -1, -1, -1, -1}
     };
-
-    static constexpr int KingBuckets[64] = {
-      -1, -1, -1, -1, 31, 30, 29, 28,
-      -1, -1, -1, -1, 27, 26, 25, 24,
-      -1, -1, -1, -1, 23, 22, 21, 20,
-      -1, -1, -1, -1, 19, 18, 17, 16,
-      -1, -1, -1, -1, 15, 14, 13, 12,
-      -1, -1, -1, -1, 11, 10, 9, 8,
-      -1, -1, -1, -1, 7, 6, 5, 4,
-      -1, -1, -1, -1, 3, 2, 1, 0
-    };
     // clang-format on
-
-    static constexpr int NUM_SQ     = 64;
-    static constexpr int NUM_PT     = 12;
-    static constexpr int NUM_PLANES = NUM_SQ * NUM_PT;
-
-    static constexpr int NUM_THREAT_FEATURES = threatfeatures;
-    static constexpr int INPUTS     = NUM_THREAT_FEATURES + NUM_PLANES * NUM_SQ / 2;
-
-
-    static int psq_index(Color color, Square ksq, Square sq, Piece p) {
-        Square o_ksq = orient_flip_2(color, ksq, ksq);
-        auto   p_idx = static_cast<int>(p.type()) * 2 + (p.color() != color);
-        return NUM_THREAT_FEATURES + static_cast<int>(orient_flip_2(color, sq, ksq)) + p_idx * NUM_SQ
-             + KingBuckets[static_cast<int>(o_ksq)] * NUM_PLANES;
-    }
 
     static int
     threat_index(Color Perspective, Piece attkr, Square from, Square to, Piece attkd, Square ksq) {
@@ -283,20 +286,11 @@ struct Full_Threats {
                             k++;
                         }
                     }
-                    for (Square from : bb)
-                    {
-                        values[k]   = 1.0f;
-                        features[k] = psq_index(color, ksq, from, attkr);
-                        k++;
-                    }
                 }
                 else
                 {
                     for (Square from : bb)
                     {
-                        values[k]   = 1.0f;
-                        features[k] = psq_index(color, ksq, from, attkr);
-                        k++;
                         Bitboard attacks = pos.attacks(from) & pieces;
                         for (Square to : attacks)
                         {
@@ -318,82 +312,130 @@ struct Full_Threats {
     }
 };
 
-template<typename T, typename... Ts>
-struct FeatureSet {
-    static_assert(sizeof...(Ts) == 0, "Currently only one feature subset supported.");
-
-    static constexpr int INPUTS              = T::INPUTS;
-    static constexpr int MAX_ACTIVE_FEATURES = T::MAX_ACTIVE_FEATURES;
-
-    static constexpr std::string_view NAME = T::NAME;
-
-    static std::pair<int, int>
-    fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color) {
-        return T::fill_features_sparse(e, features, values, color);
+struct FullThreatsExtractor: IFeatureExtractor {
+    int inputs() const override { return FullThreats::INPUTS; }
+    int max_active_features() const override { return FullThreats::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             float*                   values,
+                                             Color                    color) const override {
+        return FullThreats::fill_features_sparse(e, features, values, color);
     }
 };
 
+struct ComposedFeatureExtractor: IFeatureExtractor {
+    std::vector<std::unique_ptr<IFeatureExtractor>> extractors;
+    int                                             m_inputs;
+    int                                             m_max_active;
 
-template<typename... Ts>
-auto find_feature(std::string_view name) {
-    using Variant = std::variant<std::monostate, Ts...>;
-    using Factory = Variant (*)();
-
-    struct Entry {
-        std::string_view name;
-        Factory          make;
-    };
-
-    static constexpr Entry factories[] = {{Ts::NAME, +[]() -> Variant { return Ts{}; }}...};
-
-    for (auto& f : factories)
-    {
-        if (name == f.name)
-            return f.make();
+    ComposedFeatureExtractor(std::vector<std::unique_ptr<IFeatureExtractor>> exts) :
+        extractors(std::move(exts)),
+        m_inputs(0),
+        m_max_active(0) {
+        for (auto& e : extractors)
+        {
+            m_inputs += e->inputs();
+            m_max_active += e->max_active_features();
+        }
     }
 
-    return Variant{std::monostate{}};
+    int inputs() const override { return m_inputs; }
+    int max_active_features() const override { return m_max_active; }
+
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             float*                   values,
+                                             Color                    color) const override {
+        int total_written = 0;
+        int input_offset  = 0;
+
+        for (auto& ext : extractors)
+        {
+            auto [written, ext_inputs] =
+              ext->fill_features_sparse(e, features + total_written, values + total_written, color);
+
+            // Offset the feature indices for this component
+            for (int i = 0; i < written; ++i)
+                features[total_written + i] += input_offset;
+
+            input_offset += ext_inputs;
+            total_written += written;
+        }
+
+        return {total_written, m_inputs};
+    }
+};
+
+static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
+    if (name == "HalfKAv2_hm")
+        return std::make_unique<HalfKAv2_hmExtractor>();
+    if (name == "Full_Threats")
+        return std::make_unique<FullThreatsExtractor>();
+    return nullptr;
 }
 
-auto get_feature(std::string_view name) {
-    return find_feature<HalfKAv2_hm,    //
-                        Full_Threats     //
-                        >(name);
+static std::shared_ptr<IFeatureExtractor> get_feature(std::string_view name) {
+    std::vector<std::unique_ptr<IFeatureExtractor>> components;
+    std::size_t                                     start = 0;
+
+    while (start < name.size())
+    {
+        auto pos  = name.find('+', start);
+        auto part = name.substr(start, pos == std::string_view::npos ? pos : pos - start);
+        auto ext  = make_single_extractor(part);
+
+        if (!ext)
+        {
+            std::cerr << "Unknown feature component: " << part << std::endl;
+            return nullptr;
+        }
+
+        components.push_back(std::move(ext));
+        start = (pos == std::string_view::npos) ? name.size() : pos + 1;
+    }
+
+    if (components.empty())
+        return nullptr;
+
+    if (components.size() == 1)
+        return std::shared_ptr<IFeatureExtractor>(std::move(components[0]));
+
+    return std::make_shared<ComposedFeatureExtractor>(std::move(components));
 }
 
 struct SparseBatch {
     static constexpr bool IS_BATCH = true;
 
-    template<typename... Ts>
-    SparseBatch(FeatureSet<Ts...>, const std::vector<TrainingDataEntry>& entries) {
-        num_inputs          = FeatureSet<Ts...>::INPUTS;
+    SparseBatch(const IFeatureExtractor&              feature_set,
+                const std::vector<TrainingDataEntry>& entries) {
+        num_inputs          = feature_set.inputs();
         size                = entries.size();
+        max_active_features = feature_set.max_active_features();
         is_white            = new float[size];
         outcome             = new float[size];
         score               = new float[size];
-        white               = new int[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
-        black               = new int[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
-        white_values        = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
-        black_values        = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
+        white               = new int[size * max_active_features];
+        black               = new int[size * max_active_features];
+        white_values        = new float[size * max_active_features];
+        black_values        = new float[size * max_active_features];
         psqt_indices        = new int[size];
         layer_stack_indices = new int[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
-        max_active_features       = FeatureSet<Ts...>::MAX_ACTIVE_FEATURES;
 
-        for (std::size_t i = 0; i < size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES; ++i)
+        for (int i = 0; i < size * max_active_features; ++i)
             white[i] = -1;
-        for (std::size_t i = 0; i < size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES; ++i)
+        for (int i = 0; i < size * max_active_features; ++i)
             black[i] = -1;
-        for (std::size_t i = 0; i < size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES; ++i)
+        for (int i = 0; i < size * max_active_features; ++i)
             white_values[i] = 0.0f;
-        for (std::size_t i = 0; i < size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES; ++i)
+        for (int i = 0; i < size * max_active_features; ++i)
             black_values[i] = 0.0f;
 
-        for (int i = 0; i < entries.size(); ++i)
+        for (int i = 0; i < size; ++i)
         {
-            fill_entry(FeatureSet<Ts...>{}, i, entries[i]);
+            fill_entry(feature_set, i, entries[i]);
         }
     }
 
@@ -426,25 +468,21 @@ struct SparseBatch {
     }
 
    private:
-    template<typename... Ts>
-    void fill_entry(FeatureSet<Ts...>, int i, const TrainingDataEntry& e) {
+    void fill_entry(const IFeatureExtractor& fs, int i, const TrainingDataEntry& e) {
         is_white[i]            = static_cast<float>(e.pos.sideToMove() == Color::White);
         outcome[i]             = (e.result + 1.0f) / 2.0f;
         score[i]               = e.score;
         psqt_indices[i]        = (e.pos.piecesBB().count() - 1) / 4;
         layer_stack_indices[i] = psqt_indices[i];
-        fill_features(FeatureSet<Ts...>{}, i, e);
+        fill_features(fs, i, e);
     }
 
-    template<typename... Ts>
-    void fill_features(FeatureSet<Ts...>, int i, const TrainingDataEntry& e) {
-        const int offset = i * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES;
-        num_active_white_features += FeatureSet<Ts...>::fill_features_sparse(
-                                       e, white + offset, white_values + offset, Color::White)
-                                       .first;
-        num_active_black_features += FeatureSet<Ts...>::fill_features_sparse(
-                                       e, black + offset, black_values + offset, Color::Black)
-                                       .first;
+    void fill_features(const IFeatureExtractor& fs, int i, const TrainingDataEntry& e) {
+        const int offset = i * max_active_features;
+        num_active_white_features +=
+          fs.fill_features_sparse(e, white + offset, white_values + offset, Color::White).first;
+        num_active_black_features +=
+          fs.fill_features_sparse(e, black + offset, black_values + offset, Color::Black).first;
     }
 };
 
@@ -471,37 +509,13 @@ struct Stream: AnyStream {
     std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
 };
 
-template<typename StorageT>
-struct AsyncStream: Stream<StorageT> {
-    using BaseType = Stream<StorageT>;
-
-    AsyncStream(int                                           concurrency,
-                const std::vector<std::string>&               filenames,
-                bool                                          cyclic,
-                std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        BaseType(1, filenames, cyclic, skipPredicate) {}
-
-    ~AsyncStream() {
-        if (m_next.valid())
-        {
-            delete m_next.get();
-        }
-    }
-
-   protected:
-    std::future<StorageT*> m_next;
-};
-
-template<typename FeatureSetT, typename StorageT>
-struct FeaturedBatchStream: Stream<StorageT> {
-    static_assert(StorageT::IS_BATCH);
-
-    using FeatureSet = FeatureSetT;
-    using BaseType   = Stream<StorageT>;
+struct FeaturedBatchStream: Stream<SparseBatch> {
+    using BaseType = Stream<SparseBatch>;
 
     static constexpr int num_feature_threads_per_reading_thread = 2;
 
-    FeaturedBatchStream(int                                           concurrency,
+    FeaturedBatchStream(std::shared_ptr<IFeatureExtractor>            feature_set,
+                        int                                           concurrency,
                         const std::vector<std::string>&               filenames,
                         int                                           batch_size,
                         bool                                          cyclic,
@@ -514,6 +528,7 @@ struct FeaturedBatchStream: Stream<StorageT> {
                  skipPredicate,
                  rank,
                  world_size),
+        m_feature_set(std::move(feature_set)),
         m_concurrency(concurrency),
         m_batch_size(batch_size) {
         m_stop_flag.store(false);
@@ -535,7 +550,7 @@ struct FeaturedBatchStream: Stream<StorageT> {
                     }
                 }
 
-                auto batch = new StorageT(FeatureSet{}, entries);
+                auto batch = new SparseBatch(*m_feature_set, entries);
 
                 {
                     std::unique_lock lock(m_batch_mutex);
@@ -568,7 +583,7 @@ struct FeaturedBatchStream: Stream<StorageT> {
         }
     }
 
-    StorageT* next() override {
+    SparseBatch* next() override {
         std::unique_lock lock(m_batch_mutex);
         m_batches_any.wait(lock,
                            [this]() { return !m_batches.empty() || m_num_workers.load() == 0; });
@@ -605,15 +620,16 @@ struct FeaturedBatchStream: Stream<StorageT> {
     }
 
    private:
-    int                     m_batch_size;
-    int                     m_concurrency;
-    std::deque<StorageT*>   m_batches;
-    std::mutex              m_batch_mutex;
-    std::mutex              m_stream_mutex;
-    std::condition_variable m_batches_not_full;
-    std::condition_variable m_batches_any;
-    std::atomic_bool        m_stop_flag;
-    std::atomic_int         m_num_workers;
+    std::shared_ptr<IFeatureExtractor> m_feature_set;
+    int                                m_batch_size;
+    int                                m_concurrency;
+    std::deque<SparseBatch*>           m_batches;
+    std::mutex                         m_batch_mutex;
+    std::mutex                         m_stream_mutex;
+    std::condition_variable            m_batches_not_full;
+    std::condition_variable            m_batches_any;
+    std::atomic_bool                   m_stop_flag;
+    std::atomic_int                    m_num_workers;
 
     std::vector<std::thread> m_workers;
 };
@@ -950,21 +966,10 @@ EXPORT SparseBatch* get_sparse_batch_from_fens(const char*        feature_set_c,
         e.result = results[i];
     }
 
-    auto feature_variant = get_feature(feature_set_c);
-
-    return std::visit(
-      [&](const auto fs) -> SparseBatch* {
-          using F = std::decay_t<decltype(fs)>;
-          if constexpr (std::is_same_v<F, std::monostate>)
-          {
-              return nullptr;
-          }
-          else
-          {
-              return new SparseBatch(FeatureSet<decltype(fs)>{}, entries);
-          }
-      },
-      feature_variant);
+    auto feature = get_feature(feature_set_c);
+    if (!feature)
+        return nullptr;
+    return new SparseBatch(*feature, entries);
 }
 
 // changing the signature needs matching changes in data_loader/_native.py
@@ -982,7 +987,7 @@ EXPORT FenBatchStream* CDECL create_fen_batch_stream(int                  concur
                               ddp_config.rank, ddp_config.world_size);
 }
 
-EXPORT void CDECL destroy_fen_batch_stream(FenBatchStream* stream) { delete stream; }
+EXPORT NNUE_COLD void CDECL destroy_fen_batch_stream(FenBatchStream* stream) { delete stream; }
 
 // changing the signature needs matching changes in data_loader/_native.py
 EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*          feature_set_c,
@@ -996,26 +1001,14 @@ EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char*        
     auto skipPredicate = make_skip_predicate(config);
     auto filenames_vec = std::vector<std::string>(filenames, filenames + num_files);
 
-    auto feature_variant = get_feature(feature_set_c);
-
-    return std::visit(
-      [&](const auto fs) -> Stream<SparseBatch>* {
-          using F = std::decay_t<decltype(fs)>;
-          if constexpr (std::is_same_v<F, std::monostate>)
-          {
-              return nullptr;
-          }
-          else
-          {
-              return new FeaturedBatchStream<FeatureSet<decltype(fs)>, SparseBatch>(
-                concurrency, filenames_vec, batch_size, cyclic, skipPredicate, ddp_config.rank,
-                ddp_config.world_size);
-          }
-      },
-      feature_variant);
+    auto feature = get_feature(feature_set_c);
+    if (!feature)
+        return nullptr;
+    return new FeaturedBatchStream(std::move(feature), concurrency, filenames_vec, batch_size,
+                                   cyclic, skipPredicate, ddp_config.rank, ddp_config.world_size);
 }
 
-EXPORT void CDECL destroy_sparse_batch_stream(Stream<SparseBatch>* stream) { delete stream; }
+EXPORT NNUE_COLD void CDECL destroy_sparse_batch_stream(Stream<SparseBatch>* stream) { delete stream; }
 
 EXPORT SparseBatch* CDECL fetch_next_sparse_batch(Stream<SparseBatch>* stream) {
     return stream->next();
@@ -1027,97 +1020,3 @@ EXPORT void CDECL destroy_sparse_batch(SparseBatch* e) { delete e; }
 
 EXPORT void CDECL destroy_fen_batch(FenBatch* e) { delete e; }
 }
-
-#if defined(BENCH)
-
-/* benches
-   compile and run with:
-     g++ -std=c++20 -g3 -O3 -DNDEBUG -DBENCH -march=native training_data_loader.cpp && ./a.out /path/to/binpack
-*/
-
-    #include <chrono>
-    #include <iostream>
-    #include <iomanip>
-    #include <fstream>
-    #include <string>
-
-long long get_rchar_self() {
-    std::ifstream io_file("/proc/self/io");
-    std::string   line;
-    while (std::getline(io_file, line))
-    {
-        if (line.rfind("rchar:", 0) == 0)
-        {
-            return std::stoll(line.substr(6));
-        }
-    }
-    return -1;  // Error or not found
-}
-
-int main(int argc, char** argv) {
-    if (argc < 2)
-    {
-        std::cerr << "Usage: " << argv[0] << " file1 [file2 ...]\n";
-        return 1;
-    }
-    const char** files      = const_cast<const char**>(&argv[1]);
-    int          file_count = argc - 1;
-
-    #ifdef PGO_BUILD
-    const int concurrency = 1;
-    #else
-    const int concurrency = std::thread::hardware_concurrency();
-    #endif
-    // some typical numbers, more skipping means more load
-    const int                  batch_size = 16384;
-    const bool                 cyclic     = true;
-    const DataloaderSkipConfig config     = {.filtered             = true,
-                                             .random_fen_skipping  = 3,
-                                             .wld_filtered         = true,
-                                             .early_fen_skipping   = 5,
-                                             .simple_eval_skipping = 0,
-                                             .param_index          = 0,
-                                             .pc_y1                = 1.0,
-                                             .pc_y2                = 2.0,
-                                             .pc_y3                = 1.0};
-    const DataloaderDDPConfig  ddp_config = {.rank = 0, .world_size = 1};
-    auto stream = create_sparse_batch_stream("Full_Threats", concurrency, file_count, files,
-                                             batch_size, cyclic, config, ddp_config);
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    #ifdef PGO_BUILD
-    constexpr int iteration_count = 30;
-    #else
-    constexpr int iteration_count = 6000;
-    #endif
-
-    for (int i = 1; i <= iteration_count; ++i)
-    {
-        destroy_sparse_batch(stream->next());
-        auto t1 = std::chrono::high_resolution_clock::now();
-        if (i % 1 == 0)
-        {
-            double    sec   = (t1 - t0).count() / 1e9;
-            long long bytes = get_rchar_self();
-
-            double mpos = i * batch_size / (sec * 1000 * 1000);
-            double its  = i / sec;
-            double mbps = bytes / (sec * 1024 * 1024);
-            double bpos = bytes / (i * batch_size);
-
-            std::cout << "\rIter: " << std::setw(8) << i                                //
-                      << "   Time(s): " << std::setw(8) << std::setprecision(3) << sec  //
-                      << "   MPos/s: " << std::setw(8) << std::setprecision(3) << mpos  //
-                      << "   It/s: " << std::setw(8) << std::setprecision(1) << its     //
-                      << "   MB/s: " << std::setw(8) << std::setprecision(1) << mbps    //
-                      << "   B/pos: " << std::setw(8) << std::setprecision(1) << bpos   //
-                      << std::flush;
-        }
-    }
-    std::cout << std::endl;
-
-    return 0;
-}
-
-#endif

@@ -8,4 +8,6 @@ numba
 numpy<2.0
 requests
 lightning
+tyro
+ruff
 schedulefree

@@ -7,6 +7,10 @@ try:
 except ImportError:
     _schedulefree_import_error = True
 
+class ScheduleFreeConfig:
+    warmup_steps: int = 10000
+    """Number of steps to warmup schedulefree optimizer."""
+
 class ScheduleFreeWrapper:
     def __init__(
         self,

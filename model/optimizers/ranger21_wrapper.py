@@ -8,6 +8,13 @@ try:
 except ImportError:
     _ranger21_import_error = True
 
+class Ranger21Config:
+    gamma: float = 0.992
+    """Multiplicative factor applied to the learning rate after every epoch."""
+
+    num_batches_per_epoch: int = 6100
+    """Number of batches per epoch, used by Ranger21 for scheduling."""
+
 class Ranger21Wrapper:
     def __init__(
         self,

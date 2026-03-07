@@ -28,6 +28,9 @@ class TrainingConfig(LossParams, DataloaderSkipConfig, FeatureConfig, ModelConfi
     validation_datasets: UseAppendAction[Tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
 
+    optimizer_name: Literal["schedulefree", "ranger21"] = "ranger21"
+    """Which optimizer to use. """
+
     gamma: float = 0.992
     """Multiplicative factor applied to the learning rate after every epoch."""
 

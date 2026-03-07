@@ -1,5 +1,4 @@
 import lightning as L
-import schedulefree
 import torch
 from torch import Tensor, nn
 
@@ -7,6 +6,8 @@ from .config import LossParams, ModelConfig
 from .model import NNUEModel
 from .quantize import QuantizationConfig
 
+from .optimizers.ranger21_wrapper import Ranger21Wrapper
+from .optimizers.schedulefree_wrapper import ScheduleFreeWrapper
 
 def _get_parameters(layers: list[nn.Module], get_biases: bool = False):
     return [
@@ -16,9 +17,12 @@ def _get_parameters(layers: list[nn.Module], get_biases: bool = False):
         if ("bias" in name) == get_biases and p.requires_grad
     ]
 
+
 class NNUE(L.LightningModule):
     """
     feature_name - a string identifying the feature transformer (e.g. "HalfKAv2_hm")
+
+    optimizer_name - a string identifying the optimizer wrapper ("schedulefree" or "ranger21")
 
     lambda_ = 0.0 - purely based on game results
     0.0 < lambda_ < 1.0 - interpolated score and result
@@ -34,8 +38,11 @@ class NNUE(L.LightningModule):
         feature_name: str,
         config: ModelConfig,
         quantize_config: QuantizationConfig,
+        optimizer_name: str = "ranger21",
         max_epoch=800,
-        lr=0.05,
+        num_batches_per_epoch=int(100_000_000 / 16384),
+        gamma=0.992,
+        lr=8.75e-4,
         warmup_steps=10000,
         ft_weight_decay=0.0,
         dense_weight_decay=0.0,
@@ -47,39 +54,35 @@ class NNUE(L.LightningModule):
     ):
         super().__init__()
 
-        # Catch and warn about any unused or deprecated arguments
-        if kwargs:
-            import warnings
-            deprecated_args = {"gamma", "num_batches_per_epoch"}
-            used_deprecated = [k for k in kwargs if k in deprecated_args]
-            other_unused = [k for k in kwargs if k not in deprecated_args]
-
-            warning_parts = ["The following keyword arguments are unused and will be ignored:"]
-            if used_deprecated:
-                warning_parts.append(
-                    f"\n  - Deprecated (due to Schedule-Free Adam): {', '.join(used_deprecated)}"
-                )
-            if other_unused:
-                warning_parts.append(
-                    f"\n  - Unknown/Unrecognized: {', '.join(other_unused)}"
-                )
-
-            warnings.warn("".join(warning_parts), UserWarning)
-
         self.model: NNUEModel = NNUEModel(
             feature_name, config, quantize_config, num_psqt_buckets, num_ls_buckets
         )
         self.loss_params = loss_params
         self.max_epoch = max_epoch
         self.lr = lr
-        self.warmup_steps = warmup_steps
         self.dense_weight_decay = dense_weight_decay
         self.ft_weight_decay = ft_weight_decay
         self.param_index = param_index
 
-        self.needs_train_flip = False
+        optimizer_name = optimizer_name.lower().strip()
+        if optimizer_name == "schedulefree":
+            self.optimizer_wrapper = ScheduleFreeWrapper(
+                lr=lr,
+                warmup_steps=warmup_steps,
+                **kwargs
+            )
+        elif optimizer_name == "ranger21":
+            self.optimizer_wrapper = Ranger21Wrapper(
+                max_epoch=max_epoch,
+                gamma=gamma,
+                num_batches_per_epoch=num_batches_per_epoch,
+                **kwargs
+            )
+        else:
+            raise ValueError(f"Unknown optimizer_name: '{optimizer_name}'. Expected 'schedulefree' or 'ranger21'.")
 
-        print(f"Using schedule-free Adam with warmup_steps={warmup_steps}, lr={lr}, ft_weight_decay={ft_weight_decay}, dense_weight_decay={dense_weight_decay}.")
+        if self.dense_weight_decay > 0.0 or self.ft_weight_decay > 0.0:
+            print(f"Using weight decay - ft_weight_decay: {self.ft_weight_decay}, dense_weight_decay: {self.dense_weight_decay}")
 
     # --- setup optimizers and training hooks ---
 
@@ -102,40 +105,25 @@ class NNUE(L.LightningModule):
             {"params": [self.model.layer_stacks.output.linear.bias], "lr": LR, "weight_decay": 0.0},
         ]
 
-        optimizer = schedulefree.AdamWScheduleFree(
-            train_params,
-            lr=LR,
-            betas=(0.9, 0.999),
-            eps=1.0e-7,
-            warmup_steps=self.warmup_steps
-        )
-
-        return optimizer
+        return self.optimizer_wrapper.configure_optimizers(train_params)
 
     def on_train_epoch_start(self):
-        self.optimizers().optimizer.train()
-        self.needs_train_flip = False
+        self.optimizer_wrapper.on_train_epoch_start(self)
 
     def on_train_epoch_end(self):
-        self.optimizers().optimizer.eval()
-        self.needs_train_flip = True
+        self.optimizer_wrapper.on_train_epoch_end(self)
 
     def on_validation_epoch_start(self):
-        self.optimizers().optimizer.eval()
-        self.needs_train_flip = True
+        self.optimizer_wrapper.on_validation_epoch_start(self)
 
     def on_test_epoch_start(self):
-        self.optimizers().optimizer.eval()
-        self.needs_train_flip = True
+        self.optimizer_wrapper.on_test_epoch_start(self)
 
     def on_save_checkpoint(self, checkpoint):
-        self.optimizers().optimizer.eval()
-        self.needs_train_flip = True
+        self.optimizer_wrapper.on_save_checkpoint(self, checkpoint)
 
     def on_train_batch_start(self, batch, batch_idx):
-        if self.needs_train_flip:
-            self.optimizers().optimizer.train()
-            self.needs_train_flip = False
+        self.optimizer_wrapper.on_train_batch_start(self, batch, batch_idx)
 
     # --- Training step implementation ---
 

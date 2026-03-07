@@ -162,6 +162,7 @@ def main():
         nnue = M.NNUE(
             feature_name=feature_name,
             loss_params=loss_params,
+            optimizer_name=args.optimizer_name,
             max_epoch=max_epoch,
             num_batches_per_epoch=max(
                 1, args.epoch_size // global_batch_size_requested

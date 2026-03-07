@@ -36,7 +36,7 @@ class NNUE(L.LightningModule):
         quantize_config: QuantizationConfig,
         max_epoch=800,
         lr=0.05,
-        warmup_steps=1000,
+        warmup_steps=10000,
         ft_weight_decay=0.0,
         dense_weight_decay=0.0,
         param_index=0,
@@ -78,6 +78,8 @@ class NNUE(L.LightningModule):
         self.param_index = param_index
 
         self.needs_train_flip = False
+
+        print(f"Using schedule-free Adam with warmup_steps={warmup_steps}, lr={lr}, ft_weight_decay={ft_weight_decay}, dense_weight_decay={dense_weight_decay}.")
 
     # --- setup optimizers and training hooks ---
 

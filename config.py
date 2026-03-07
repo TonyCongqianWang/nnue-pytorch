@@ -40,6 +40,9 @@ class TrainingConfig(LossParams, DataloaderSkipConfig, FeatureConfig, ModelConfi
     lr: float = 8.75e-4
     """Initial learning rate."""
 
+    warmup_steps: int = 10000
+    """Number of steps to warmup schedulefree optimizer."""
+
     num_workers: int = 1
     """Number of worker threads to use for data loading. Currently only works well for binpack."""
 

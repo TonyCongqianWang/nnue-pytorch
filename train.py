@@ -194,6 +194,8 @@ def main():
         nnue.gamma = args.gamma
         nnue.lr = args.lr
         nnue.param_index = args.param_index
+        nnue.ft_weight_decay = args.ft_weight_decay
+        nnue.dense_weight_decay = args.dense_weight_decay
 
     input_feature_name = nnue.model.input_feature_name
     print("Feature set: {}".format(feature_name))

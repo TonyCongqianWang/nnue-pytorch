@@ -22,9 +22,19 @@ class CliConfig:
         default_factory=M.NNUELightningConfig
     )
 
+import torch
+
 def extract_psqt(nnue: M.NNUE, psqt_size: int) -> torch.Tensor:
-    """Extracts the PSQT weights from the embedding layer."""
-    w = nnue.model.input.weight.float()
+    """Extracts and concatenates PSQT weights from multiple input layers."""
+    input_module = nnue.model.input.features
+
+    weights = []
+    sub_keys = sorted([k for k in input_module._modules.keys() if k.isdigit()], key=int)
+
+    for k in sub_keys:
+        weights.append(getattr(input_module, k).weight.float())
+
+    w = torch.cat(weights, dim=0)
     return w[:, -psqt_size:]
 
 def spearman_rank_correlation(x: torch.Tensor, y: torch.Tensor) -> float:

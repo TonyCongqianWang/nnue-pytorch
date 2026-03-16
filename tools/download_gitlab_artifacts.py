@@ -5,18 +5,10 @@ import re
 import zipfile
 import sys
 
+DEFAULT_PROJECT = "cscs-ci/ci-testing/webhook-ci/mirrors/5137461961076608/2926829081096545"
+
 def get_default_project():
-    """Attempts to extract the GitLab project path from local .git/config."""
-    try:
-        if os.path.exists(".git/config"):
-            with open(".git/config", "r") as f:
-                content = f.read()
-                match = re.search(r"url = .*gitlab\.com[:/](.*?)(?:\.git)?\n", content)
-                if match:
-                    return match.group(1)
-    except Exception:
-        pass
-    return None
+    return DEFAULT_PROJECT
 
 def download_and_extract(project_path, pipeline_id, output_dir, unzip=True, token=None):
     encoded_path = project_path.replace("/", "%2F")

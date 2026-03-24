@@ -1,6 +1,7 @@
 import lightning as L
 import torch
 from torch import Tensor, nn
+from torchmetrics import MeanMetric, MetricCollection
 
 from .config import NNUELightningConfig
 from .model import NNUEModel
@@ -52,7 +53,12 @@ class NNUE(L.LightningModule):
     def setup(self, stage):
         _ = stage # unused, but required by pytorch-lightning
         ParamFreezer(self.config).apply_freeze(self.model)
-        pass
+
+        self.loss_metrics = MetricCollection ({
+            "train_loss_epoch": MeanMetric(),
+            "val_loss_epoch": MeanMetric(),
+            "test_loss_epoch": MeanMetric(),
+        })
 
     # --- setup optimizers and training hooks ---
     def configure_optimizers(self):
@@ -154,11 +160,35 @@ class NNUE(L.LightningModule):
     def training_step(self, batch, batch_idx):
         return self.step_(batch, batch_idx, "train_loss")
 
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         self.step_(batch, batch_idx, "val_loss")
 
+    @torch.no_grad()
     def test_step(self, batch, batch_idx):
         self.step_(batch, batch_idx, "test_loss")
+
+    @torch.compiler.disable
+    def _log(self, loss_type, loss):
+        self.loss_metrics[f"{loss_type}_epoch"](loss)
+
+        self.log(
+            loss_type,
+            loss,
+            prog_bar=False,
+            sync_dist=False,
+            on_epoch=False,
+            on_step=True,
+        )
+
+        self.log(
+            f"{loss_type}_epoch",
+            self.loss_metrics[f"{loss_type}_epoch"],
+            prog_bar=False,
+            sync_dist=True,
+            on_epoch=True,
+            on_step=False,
+        )
 
     def step_(self, batch: tuple[Tensor, ...], batch_idx, loss_type):
         _ = batch_idx  # unused, but required by pytorch-lightning
@@ -216,13 +246,6 @@ class NNUE(L.LightningModule):
         weights = 1 + (2.0**p.w1 - 1) * torch.pow((pf - 0.5) ** 2 * pf * (1 - pf), p.w2)
         loss = (loss * weights).sum() / weights.sum()
 
-        self.log(
-            loss_type,
-            loss,
-            prog_bar=False,
-            sync_dist=True,
-            on_epoch=False,
-            on_step=True,
-        )
+        self._log(loss_type, loss)
 
         return loss

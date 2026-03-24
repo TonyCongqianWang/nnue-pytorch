@@ -36,6 +36,7 @@ class NNUEModel(nn.Module):
 
         self.psqt_only = False
 
+    @torch.no_grad()
     def clip_weights(self):
         """
         Clips the weights of the model based on the min/max values allowed

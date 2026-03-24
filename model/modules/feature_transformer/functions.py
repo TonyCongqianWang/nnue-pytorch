@@ -4,13 +4,15 @@ from torch import autograd
 from .kernel import (
     make_sparse_input_linear_forward_kernel,
     make_sparse_input_linear_backward_kernel,
+    make_sparse_input_linear_backward_sparse_kernel,
 )
 
 
 class SparseLinearFunction(autograd.Function):
     @staticmethod
-    def forward(ctx, feature_indices, feature_values, weight, bias):
+    def forward(ctx, feature_indices, feature_values, weight, bias, use_sparse_grad=False):
         ctx.save_for_backward(feature_indices, feature_values, weight, bias)
+        ctx.use_sparse_grad = use_sparse_grad
 
         assert len(feature_indices.shape) == 2
         assert len(feature_values.shape) == 2
@@ -81,9 +83,10 @@ class SparseLinearFunction(autograd.Function):
         batch_size = feature_indices.shape[0]
         max_active_features = feature_indices.shape[1]
         output_size = weight.shape[1]
+        num_inputs = weight.shape[0]
 
-        weight_grad = torch.zeros(
-            weight.shape[0], weight.shape[1], dtype=torch.float32, device=device
+        weight_grad_dense = torch.zeros(
+            num_inputs, output_size, dtype=torch.float32, device=device
         )
         bias_grad = torch.zeros(output_size, dtype=torch.float32, device=device)
 
@@ -95,10 +98,26 @@ class SparseLinearFunction(autograd.Function):
             args=(
                 feature_indices.data_ptr(),
                 feature_values.data_ptr(),
-                weight_grad.data_ptr(),
+                weight_grad_dense.data_ptr(),
                 bias_grad.data_ptr(),
                 grad_output.data_ptr(),
             ),
         )
 
-        return None, None, weight_grad, bias_grad
+        if getattr(ctx, 'use_sparse_grad', False):
+            # get sparsified grad tensor
+            unique_indices = torch.unique(feature_indices)
+            valid_indices = unique_indices[unique_indices != -1]
+            sparse_values = weight_grad_dense[valid_indices]
+
+            weight_grad = torch.sparse_coo_tensor(
+                valid_indices.unsqueeze(0).to(torch.int64),
+                sparse_values,
+                size=(num_inputs, output_size),
+                device=device,
+                requires_grad=False
+            )
+        else:
+            weight_grad = weight_grad_dense
+
+        return None, None, weight_grad, bias_grad, None

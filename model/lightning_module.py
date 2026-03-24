@@ -46,9 +46,11 @@ class NNUE(L.LightningModule):
         self.max_epoch = max_epoch
         self.num_batches_per_epoch = num_batches_per_epoch
         self.param_index = param_index
-
         # lazy init so `resume_from_model` with config changes works correctly
         self.optimizer_wrapper = None
+        # default flags
+        self.input_use_sparse_bwd = False
+        self.automatic_optimization = True
 
     # --- setup optimizers and training hooks ---
     def configure_optimizers(self):
@@ -56,6 +58,10 @@ class NNUE(L.LightningModule):
             print("[NNUE] Required parameter for training not set: max_epoch")
 
         optimizer_config = self.config.optimizer_config
+        self.input_use_sparse_bwd = self.config.optimizer_config.input_input_use_sparse_bwd
+        if self.input_use_sparse_bwd:
+            self.automatic_optimization = False
+
         self.optimizer_wrapper = optimizer_config.get_optimizer_wrapper(
             self.max_epoch, self.num_batches_per_epoch
         )
@@ -64,7 +70,7 @@ class NNUE(L.LightningModule):
         ft_wd = optimizer_config.ft_weight_decay
         dense_wd = optimizer_config.dense_weight_decay
 
-        train_params = [
+        train_params_sparse = [
             # Feature Transformer
             {
                 "params": _get_parameters([self.model.input], get_biases=False),
@@ -75,7 +81,10 @@ class NNUE(L.LightningModule):
                 "params": _get_parameters([self.model.input], get_biases=True),
                 "lr": LR,
                 "weight_decay": 0.0,
-            },
+            }
+        ]
+
+        train_params_dense = [
             # Dense Layer Stacks
             {
                 "params": [self.model.layer_stacks.l1.factorized_linear.weight],
@@ -119,7 +128,7 @@ class NNUE(L.LightningModule):
             },
         ]
 
-        return self.optimizer_wrapper.configure_optimizers(train_params)
+        return self.optimizer_wrapper.configure_optimizers(train_params_sparse, train_params_dense)
 
     def on_train_epoch_start(self):
         self.optimizer_wrapper.on_train_epoch_start(self)
@@ -145,7 +154,17 @@ class NNUE(L.LightningModule):
         return self.model(*args, **kwargs)
 
     def training_step(self, batch, batch_idx):
-        return self.step_(batch, batch_idx, "train_loss")
+        if not self.input_use_sparse_bwd:
+            return self.step_(batch, batch_idx, "train_loss")
+
+        opt_sparse, opt_dense = self.optimizers()
+        loss = self.step_(batch, batch_idx, "train_loss")
+        opt_sparse.zero_grad()
+        opt_dense.zero_grad()
+
+        self.manual_backward(loss)
+        opt_sparse.step()
+        opt_dense.step()
 
     def validation_step(self, batch, batch_idx):
         self.step_(batch, batch_idx, "val_loss")
@@ -179,6 +198,7 @@ class NNUE(L.LightningModule):
                 black_values,
                 psqt_indices,
                 layer_stack_indices,
+                self.input_use_sparse_bwd
             )
             * self.model.quantization.nnue2score
         )

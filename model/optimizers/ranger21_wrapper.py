@@ -2,6 +2,7 @@ import lightning as L
 import torch
 
 from dataclasses import dataclass
+from torch.optim import SparseAdam
 
 
 try:
@@ -28,8 +29,9 @@ class Ranger21Wrapper:
         self.max_epoch = max_epoch
         self.num_batches_per_epoch = num_batches_per_epoch
         self.gamma = config.gamma
+        self.use_sparse_adam = config.input_use_sparse_adam
 
-    def configure_optimizers(self, train_params):
+    def configure_optimizers(self, train_param_sparse, train_params_dense):
         if _ranger21_import_error:
             raise ImportError("The required ranger21 library is not installed. ")
         if self.num_batches_per_epoch is None:
@@ -37,7 +39,7 @@ class Ranger21Wrapper:
                 "[Ranger21Wrapper] Required parameter for training not set: num_batches_per_epoch"
             )
         optimizer = ranger21.Ranger21(
-            train_params,
+            train_param_sparse,
             lr=1.0,
             betas=(0.9, 0.999),
             eps=1.0e-7,
@@ -57,7 +59,11 @@ class Ranger21Wrapper:
             optimizer, step_size=1, gamma=self.gamma
         )
 
-        return [optimizer], [scheduler]
+        optimizers = [optimizer]
+        if self.use_sparse_adam:
+            optimizers.append(SparseAdam(train_params_dense))
+
+        return optimizers, [scheduler]
 
     # Ranger21 does not require train/eval flip hooks
     def on_train_epoch_start(self, pl_module: L.LightningModule):

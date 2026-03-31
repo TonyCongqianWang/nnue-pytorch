@@ -429,6 +429,7 @@ def main():
         enable_checkpointing=True,
         benchmark=True,
         num_sanity_val_steps=0 if val is None else 4,
+        gradient_clip_val=0.1,
     )
 
     if actual_threads > 0:
@@ -442,7 +443,7 @@ def main():
     if 0 <= args.swa_start_epoch < args.max_epochs:
         swa_state_dict = swa_callback.swa_model.module.state_dict() if trainer.is_global_zero else None
         swa_state_dict = trainer.strategy.broadcast(swa_state_dict, src=0)
-        
+
         nnue.train()
         nnue.model.load_state_dict(swa_state_dict)
         nnue.eval()
@@ -450,10 +451,10 @@ def main():
         # NOTE: If BN is used, it has to be updated here. Be careful when using DDP.
         swa_savepath = os.path.join(logdir, "lightning_logs", f"version_{tb_logger.version}", "checkpoints", "last_swa.ckpt")
         trainer.save_checkpoint(swa_savepath)
-        
+
         if trainer.is_global_zero:
             print(f"SWA model saved to {swa_savepath}")
-            
+
         if val is not None:
             trainer.validate(nnue, val)
         else:

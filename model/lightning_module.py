@@ -263,3 +263,24 @@ class NNUE(L.LightningModule):
             on_step=True,
         )
         return loss
+
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val, gradient_clip_algorithm):
+        # 1. Calculate the raw total norm before the 'clip_gradients' call
+        # We aggregate all parameters from the optimizer groups
+        all_params = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
+
+        if all_params:
+            raw_norm = torch.norm(
+                torch.stack([torch.norm(p.grad.detach(), 2) for p in all_params]), 2
+            )
+
+            # 2. Log the tail distribution data
+            self.log("grad/raw_total_norm", raw_norm)
+
+            # Binary flag to track how often the 'tail' exceeds your threshold
+            if gradient_clip_val is not None:
+                is_clipped = float(raw_norm > gradient_clip_val)
+                self.log("grad/clipping_event", is_clipped, on_step=True, on_epoch=True)
+
+        # 3. Call the default implementation to perform the actual clipping
+        super().configure_gradient_clipping(optimizer, gradient_clip_val, gradient_clip_algorithm)

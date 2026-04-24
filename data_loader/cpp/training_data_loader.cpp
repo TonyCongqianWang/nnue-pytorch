@@ -718,14 +718,17 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
         static thread_local int last_ply = -1;
         static thread_local bool last_score = VALUE_NONE;
 
-        // skip when 0 was used as placeholder for unavailable value
-        // detected through heuristic: Game was not a draw
-        // and last value was somewhat large
+        // skip when score 0 was used as placeholder
+        // detected through heuristic:
+        // Game was not a draw and
+        // last valid score was somewhat large
+
         bool skip_placeholder_zero =
             e.ply > last_ply &&
             last_score != VALUE_NONE &&
             std::abs(last_score) > 100 &&
-            e.result != 0;
+            e.result != 0 &&
+            e.score == 0;
 
         last_ply = e.ply;
 

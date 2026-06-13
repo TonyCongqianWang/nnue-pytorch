@@ -7675,7 +7675,7 @@ namespace binpack
             m_rank(rank),
             m_world_size(world_size)
         {
-            std::vector<double> sizes; // discrete distribution wants double weights
+            std::vector<std::uint64_t> sizes; // discrete distribution wants double weights
             for (const auto& path : paths)
             {
                 auto& file = m_inputFiles.emplace_back(path, om | std::ios_base::in);
@@ -7685,7 +7685,7 @@ namespace binpack
                      throw std::runtime_error("Empty or corrupted file: " + path);
                 }
 
-                sizes.emplace_back(static_cast<double>(file.sizeBytes()));
+                sizes.emplace_back(static_cast<std::uint64_t>(file.sizeBytes()));
             }
 
             for (size_t i = 0; i < m_inputFiles.size(); ++i)
@@ -7714,7 +7714,7 @@ namespace binpack
             auto readerWorker = [this]()
             {
                 auto& prng = rng::get_thread_local_rng();
-                std::discrete_distribution<std::size_t> local_dist(
+                rng::lightweight_discrete_distribution<std::size_t> local_dist(
                     m_distribution_weights.begin(), m_distribution_weights.end()
                 );
 
@@ -8064,7 +8064,7 @@ namespace binpack
 
         // Per File Lock
         std::vector<std::unique_ptr<std::timed_mutex>> m_fileMutexes;
-        std::vector<double> m_distribution_weights;
+        std::vector<std::uint64_t> m_distribution_weights;
         std::function<bool(const TrainingDataEntry&)> m_skipPredicate;
 
         // Avoid blocking too long on a contended per-file mutex; if locking times out,

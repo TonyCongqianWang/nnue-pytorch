@@ -7656,7 +7656,7 @@ namespace binpack
     struct CompressedTrainingDataEntryParallelReader
     {
         static constexpr std::size_t chunkSize = suggestedChunkSize;
-        static constexpr std::size_t sharedChunkQueueCapacity = 16;
+        static constexpr std::size_t sharedChunkQueueCapacity = 256;
         using FileChunk = std::vector<unsigned char>;
 
         CompressedTrainingDataEntryParallelReader(

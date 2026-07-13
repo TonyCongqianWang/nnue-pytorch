@@ -103,12 +103,12 @@ class LossParams:
     """weight boost parameter 1 (default=0.0)"""
     w2: float = 0.5
     """weight boost parameter 2 (default=0.5)"""
-    tb_remap_base: float = 7000.0
-    """Tablebase score remapping base value (default=7000.0)"""
-    tb_remap_scale: float = 20000.0
-    """Tablebase score remapping scale value (default=20000.0)"""
-    tb_remap_decay: float = 0.8
-    """Tablebase score remapping decay parameter (default=0.8)"""
+    tb_remap_base: float = 4000.0
+    """Tablebase score remapping base value"""
+    tb_remap_scale: float = 4000.0
+    """Tablebase score remapping scale value"""
+    tb_remap_decay: float = 0.85
+    """Tablebase score remapping decay parameter"""
 
 @dataclass(kw_only=True)
 class NNUELightningConfig(FeatureConfig):

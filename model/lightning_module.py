@@ -96,6 +96,11 @@ class NNUE(L.LightningModule):
         self.num_batches_per_epoch = num_batches_per_epoch
         self.param_index = param_index
 
+        self.max_steps = 0
+        if max_epoch is not None and num_batches_per_epoch is not None:
+            self.max_steps = max_epoch * num_batches_per_epoch
+        self.step_counter = 0
+
         # lazy init so `resume_from_model` with config changes works correctly
         self.optimizer_wrapper = None
 
@@ -225,6 +230,9 @@ class NNUE(L.LightningModule):
 
     def on_train_batch_start(self, batch, batch_idx):
         self.optimizer_wrapper.on_train_batch_start(self, batch, batch_idx)
+        self.step_counter = self.global_step
+        if self.max_epoch is not None and self.num_batches_per_epoch is not None:
+            self.max_steps = self.max_epoch * self.num_batches_per_epoch
 
     def _log_epoch_end(self, loss_type):
         self.log(
@@ -277,8 +285,8 @@ class NNUE(L.LightningModule):
 
         actual_lambda = self.lambda_scheduler(
             loss_params=self.config.loss_params,
-            current_epoch=self.current_epoch,
-            max_epoch=self.max_epoch,
+            current_step=self.step_counter,
+            max_steps=self.max_steps,
             is_training=self.training,
             scorenet=scorenet
         )

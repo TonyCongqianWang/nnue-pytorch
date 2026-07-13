@@ -34,9 +34,9 @@ jobs:
       - name: Checkout Compatible Stockfish Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: anematode/Stockfish
           path: Stockfish
-          ref: d5bbc6b67d3184fc39fa87a18596e77e92af990c
+          ref: df3ee125629b13b240d8e6d777ea192bf15d4847
           persist-credentials: false
 
       - name: Compile Compatible Stockfish

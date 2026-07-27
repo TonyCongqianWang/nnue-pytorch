@@ -36,7 +36,7 @@ jobs:
         with:
           repository: TonyCongqianWang/Stockfish
           path: Stockfish
-          ref: 66a1cb5321ab9fe133e9b1d92ee26a11226871bf
+          ref: 66a1cb53ae48ea725effdee21963c06ccaeff08b
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
@@ -47,10 +47,10 @@ jobs:
       - name: Perform Test Run of entire Training Pipeline on CPU
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            python -u tests/test_training_pipeline_run.py -y --device cpu --test-dir /data/logs/training/runs/unittests_train_pipeline_cpu --features Full_Threats+PP_3Wide+QK4+K32Q2^
+            python -u tests/test_training_pipeline_run.py -y --device cpu --test-dir /data/logs/training/runs/unittests_train_pipeline_cpu
 
       - name: Perform Cross-Check Evaluation
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --skip-setup --non-interactive --exec \
             python -u cross_check_eval.py --net /data/logs/training/runs/unittests_train_pipeline_cpu/lightning_logs/version_2/checkpoints/last.nnue --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' \
-            --checkpoint /data/logs/training/runs/unittests_train_pipeline_cpu/lightning_logs/version_2/checkpoints/last.ckpt --features Full_Threats+PP_3Wide+QK4+K32Q2^
+            --checkpoint /data/logs/training/runs/unittests_train_pipeline_cpu/lightning_logs/version_2/checkpoints/last.ckpt

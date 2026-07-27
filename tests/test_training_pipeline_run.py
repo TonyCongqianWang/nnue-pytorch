@@ -25,7 +25,7 @@ def run_command(cmd_string):
 def main():
     DEFAULT_TEST_DIR_STR = "./logs/training/runs/unittests_train_pipeline"
     parser = argparse.ArgumentParser(description="Execute training and serialization pipeline.")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading (default 4)")
+    parser.add_argument("--num_workers", type=int, default=2, help="Number of workers for data loading (default 2)")
     parser.add_argument("--device", type=str, default='cpu', help="Compute device (integer x for cuda:x, 'mps' or 'cpu'; default: 'cpu')")
     parser.add_argument("--test-dir", type=str, default=DEFAULT_TEST_DIR_STR, help=f"Directory for test output (default: {DEFAULT_TEST_DIR_STR})")
     parser.add_argument("-y", "--yes", action="store_true", help="Automatically delete existing output directory without prompting")
@@ -75,15 +75,15 @@ def main():
     python_executable = shlex.quote(sys.executable)
     # --- 4. Define Pipeline Commands ---
     pipeline = [
-        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 512 --l1=1024 --features={args.features} --epoch-size 5000 --max_epochs=2 --swa-start-epoch=1 --default_root_dir \"{test_dir_str}\" {train_device_arg} {train_workers_arg}",
+        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 256 --l1=1024 --features={args.features} --epoch-size 2048 --max_epochs=2 --swa-start-epoch=1 --default_root_dir \"{test_dir_str}\" {train_device_arg} {train_workers_arg}",
 
         f"{python_executable} -c \"import torch; ckpt=torch.load('{test_dir_str}/lightning_logs/version_0/checkpoints/last.ckpt', map_location='cpu', weights_only=False); print('Checkpoint keys:', list(ckpt.keys())); assert 'epoch' in ckpt and 'global_step' in ckpt and 'state_dict' in ckpt\"",
 
         f"{python_executable} -u serialize.py \"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.ckpt \"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}",
 
-        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 1024 --l1=1024 --features={args.features} --epoch-size 5000 --max_epochs=2 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-model=\"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --validation-size=5000 {train_device_arg} {train_workers_arg}",
+        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 512 --l1=1024 --features={args.features} --epoch-size 2048 --max_epochs=2 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-model=\"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --validation-size=5000 {train_device_arg} {train_workers_arg}",
 
-        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 1024 --l1=1024 --features={args.features} --epoch-size 5000 --max_epochs=4 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-checkpoint=\"{test_dir_str}\"/lightning_logs/version_1/checkpoints/last.ckpt --validation-size=5000 {train_device_arg} {train_workers_arg}",
+        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 512 --l1=1024 --features={args.features} --epoch-size 2048 --max_epochs=4 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-checkpoint=\"{test_dir_str}\"/lightning_logs/version_1/checkpoints/last.ckpt --validation-size=5000 {train_device_arg} {train_workers_arg}",
 
         f"{python_executable} -u serialize.py \"{test_dir_str}\"/lightning_logs/version_2/checkpoints/last.ckpt \"{test_dir_str}\"/lightning_logs/version_2/checkpoints/last.pt --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}",
 

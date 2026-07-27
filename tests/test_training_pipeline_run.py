@@ -81,7 +81,7 @@ def main():
 
         f"{python_executable} -u serialize.py \"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.ckpt \"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}",
 
-        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 2048 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=2 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-model=\"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --validation-size=5000 {train_device_arg} {train_workers_arg}",
+        f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 2048 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=3 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-model=\"{test_dir_str}\"/lightning_logs/version_0/checkpoints/last.pt --validation-size=5000 {train_device_arg} {train_workers_arg}",
 
         f"{python_executable} -u train.py ./.pgo/small.binpack --batch-size 2048 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=4 --swa-start-epoch=2 --default_root_dir \"{test_dir_str}\" --resume-from-checkpoint=\"{test_dir_str}\"/lightning_logs/version_1/checkpoints/last.ckpt --validation-size=5000 {train_device_arg} {train_workers_arg}",
 

@@ -2569,7 +2569,7 @@ def get_default_feature_set_from_nnue_pytorch(nnue_pytorch_directory):
             features_init,
             exc_info=True,
         )
-    return "K32Q2^"
+    return "Full_Threats+PP_3Wide+QK4+K32Q2^"
 
 
 def parse_duration_hms_to_s(duration_str):

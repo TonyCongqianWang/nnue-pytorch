@@ -48,7 +48,7 @@ def add_feature_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--features",
         dest="features",
-        default=DEFAULT_FEATURES,
+        default="Full_Threats+PP_3Wide+QK4+K32Q2^",
         help="The feature set to use. Available: "
         + ", ".join(get_available_features())
         + ". Combine with +, e.g. Full_Threats+PP_3Wide+QK4+K32Q2^",

@@ -13,7 +13,7 @@ from model.modules import (
 from model.modules.feature_transformer.sparse_linear_functions import (
     SparseLinearFunction,
 )
-from model.modules.features import get_feature_cls
+from model.modules.features import DEFAULT_FEATURES, get_feature_cls
 from model.quantize import QuantizationManager
 
 
@@ -30,7 +30,7 @@ def run_bench():
     # 1) Instantiate Features FIRST to determine true input bounds
     config = ModelConfig()
     quantization = QuantizationManager(config.quantize_config)
-    feature_classes = get_feature_cls("HalfKAv2_hm^")
+    feature_classes = get_feature_cls(DEFAULT_FEATURES)
 
     double_ft = ComposedFeatureTransformer(
         feature_classes, STRIDE, num_psqt_buckets=8, quantization=quantization

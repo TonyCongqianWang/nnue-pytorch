@@ -18,6 +18,12 @@ KingBuckets = [
 ]
 # fmt: on
 
+# Inverse mapping: king bucket -> oriented king square
+InverseKingBuckets = [0] * 32
+for _sq, _bucket in enumerate(KingBuckets):
+    if _bucket >= 0:
+        InverseKingBuckets[_bucket] = _sq
+
 
 def _orient(is_white_pov: bool, sq: int, ksq: int) -> int:
     kfile = ksq % 8
@@ -113,17 +119,15 @@ class K32Q2(InputFeature):
             # Copy first 10 piece types (640 features)
             export[dst_offset : dst_offset + 640] = coalesced[src_offset : src_offset + 640]
 
-            # Merge own king (p_idx=10) and opponent king (p_idx=11) into single block
+            # Merge own king (p_idx=10) and opponent king (p_idx=11) into single block.
+            # The own king can only be on the one canonical oriented square for this bucket.
             own_king_src = src_offset + 10 * 64
             opp_king_src = src_offset + 11 * 64
             dst_king = dst_offset + 10 * 64
+            ksq = InverseKingBuckets[b // 2]
 
             export[dst_king : dst_king + 64] = coalesced[opp_king_src : opp_king_src + 64]
-
-            k_bucket = b // 2
-            for k in range(64):
-                if KingBuckets[k] == k_bucket:
-                    export[dst_king + k] = coalesced[own_king_src + k]
+            export[dst_king + ksq] = coalesced[own_king_src + ksq]
 
         return export
 
@@ -140,15 +144,18 @@ class K32Q2(InputFeature):
 
             expanded[dst_offset : dst_offset + 640] = export_weight[src_offset : src_offset + 640]
 
+            # Split merged king block back into p_idx 10 (own king) and 11 (opp king).
             src_king = src_offset + 10 * 64
-            k_bucket = b // 2
+            ksq = InverseKingBuckets[b // 2]
 
-            for k in range(64):
-                if KingBuckets[k] == k_bucket:
-                    expanded[dst_offset + 10 * 64 + k] = export_weight[src_king + k]
-                    expanded[dst_offset + 11 * 64 + k] = 0
-                else:
-                    expanded[dst_offset + 11 * 64 + k] = export_weight[src_king + k]
+            # Own king: only the one valid oriented square matters (rest stays zero)
+            expanded[dst_offset + 10 * 64 + ksq] = export_weight[src_king + ksq]
+
+            # Opponent king: all squares from merged, except ksq -> 0
+            expanded[dst_offset + 11 * 64 : dst_offset + 12 * 64] = export_weight[
+                src_king : src_king + 64
+            ]
+            expanded[dst_offset + 11 * 64 + ksq] = 0
 
         self.weight.data.copy_(expanded)
         self.zero_virtual_weights()

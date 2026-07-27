@@ -36,7 +36,7 @@ jobs:
         with:
           repository: TonyCongqianWang/Stockfish
           path: Stockfish
-          ref: b7160b0011ff62193839863cd2a3c9aca0b75011
+          ref: 30c552f6e07f79fb017c116d40626ffff29793a5
           persist-credentials: false
 
       - name: Compile Compatible Stockfish

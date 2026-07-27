@@ -52,9 +52,7 @@ def _k32q2_idx(is_white_pov: bool, king_sq: int, sq: int, p: chess.Piece, oppone
     """Feature index using 12 piece types (no king merging)."""
     p_idx = (p.piece_type - 1) * 2 + (p.color != is_white_pov)
     o_ksq = _orient(is_white_pov, king_sq, king_sq)
-    k_bucket = KingBuckets[o_ksq]
-    if k_bucket < 0:
-        k_bucket = 0
+    k_bucket = max(KingBuckets[o_ksq], 0)
     combined_bucket = k_bucket * 2 + (1 if opponent_has_queen else 0)
     return _orient(is_white_pov, sq, king_sq) + p_idx * 64 + combined_bucket * 768
 

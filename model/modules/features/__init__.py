@@ -10,15 +10,17 @@ from .halfka_v2_hm import HalfKav2Hm
 from .input_feature import InputFeature
 from .k32q2 import K32Q2
 from .pp_3wide import PP3Wide
+from .qk4 import QK4
 
 _FEATURE_COMPONENTS: dict[str, type[InputFeature]] = {
     "HalfKAv2_hm^": HalfKav2Hm,
     "K32Q2^": K32Q2,
     "Full_Threats": FullThreats,
     "PP_3Wide": PP3Wide,
+    "QK4": QK4,
 }
 
-DEFAULT_FEATURES = "Full_Threats+PP_3Wide+K32Q2^"
+DEFAULT_FEATURES = "Full_Threats+PP_3Wide+QK4+K32Q2^"
 
 
 def get_feature_cls(name: str) -> list[Callable[[int], InputFeature]]:
@@ -37,7 +39,7 @@ class FeatureConfig:
         tyro.conf.arg(
             help="The feature set to use. Available: "
             + ", ".join(get_available_features())
-            + ". Combine with +, e.g. Full_Threats+PP_3Wide+K32Q2^"
+            + ". Combine with +, e.g. Full_Threats+PP_3Wide+QK4+K32Q2^"
         ),
     ] = DEFAULT_FEATURES
 
@@ -49,12 +51,13 @@ def add_feature_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_FEATURES,
         help="The feature set to use. Available: "
         + ", ".join(get_available_features())
-        + ". Combine with +, e.g. Full_Threats+PP_3Wide+K32Q2^",
+        + ". Combine with +, e.g. Full_Threats+PP_3Wide+QK4+K32Q2^",
     )
 
 
 __all__ = [
     "K32Q2",
+    "QK4",
     "FeatureConfig",
     "FullThreats",
     "HalfKav2Hm",

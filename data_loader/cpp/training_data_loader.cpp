@@ -89,8 +89,8 @@ struct K32Q2 {
     static constexpr int NUM_PT              = 12;
     static constexpr int NUM_PLANES          = NUM_SQ * NUM_PT;
     static constexpr int NUM_BUCKETS         = 64;
-    static constexpr int INPUTS              = NUM_PLANES * NUM_BUCKETS + 6912;
-    static constexpr int MAX_ACTIVE_FEATURES = 34;
+    static constexpr int INPUTS              = NUM_PLANES * NUM_BUCKETS;
+    static constexpr int MAX_ACTIVE_FEATURES = 32;
 
     // clang-format off
     static constexpr int KingBuckets[64] = {
@@ -142,6 +142,28 @@ struct K32Q2Extractor: IFeatureExtractor {
                                              int*                     features,
                                              Color                    color) const override {
         return K32Q2::fill_features_sparse(e, features, color);
+    }
+};
+
+struct QK4 {
+    static constexpr std::string_view NAME = "QK4";
+    static constexpr int INPUTS              = 6912;
+    static constexpr int MAX_ACTIVE_FEATURES = 2;
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        // QK4 threat extraction
+        return {0, INPUTS};
+    }
+};
+
+struct QK4Extractor: IFeatureExtractor {
+    int inputs() const override { return QK4::INPUTS; }
+    int max_active_features() const override { return QK4::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             Color                    color) const override {
+        return QK4::fill_features_sparse(e, features, color);
     }
 };
 
@@ -498,6 +520,8 @@ static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view
         return std::make_unique<HalfKAv2_hmExtractor>();
     if (name == "K32Q2")
         return std::make_unique<K32Q2Extractor>();
+    if (name == "QK4")
+        return std::make_unique<QK4Extractor>();
     if (name == "Full_Threats")
         return std::make_unique<FullThreatsExtractor>();
     if (name == "PP_3Wide")

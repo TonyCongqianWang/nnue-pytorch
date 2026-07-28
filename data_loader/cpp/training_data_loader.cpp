@@ -542,7 +542,8 @@ std::shared_ptr<IFeatureExtractor> get_feature(std::string_view name) {
 
         if (!ext)
         {
-            std::cerr << "Unknown feature component: " << part << std::endl;
+            std::cerr << "FATAL DATA LOADER ERROR: Unknown feature component '" << part
+                      << "' in feature set '" << name << "'!" << std::endl;
             return nullptr;
         }
 
@@ -551,7 +552,10 @@ std::shared_ptr<IFeatureExtractor> get_feature(std::string_view name) {
     }
 
     if (components.empty())
+    {
+        std::cerr << "FATAL DATA LOADER ERROR: Empty feature set string '" << name << "'!" << std::endl;
         return nullptr;
+    }
 
     if (components.size() == 1)
         return std::shared_ptr<IFeatureExtractor>(std::move(components[0]));

@@ -79,8 +79,8 @@ def create_sparse_batch_stream(
         rank, world_size = _get_ddp_rank_and_world_size()
         ddp_config = DataloaderDDPConfig(rank=rank, world_size=world_size)
 
-    return c_lib.dll.create_sparse_batch_stream(
-        feature_set,
+    stream = c_lib.dll.create_sparse_batch_stream(
+        feature_set.encode("utf-8"),
         concurrency,
         len(filenames),
         _to_c_str_array(filenames),
@@ -89,6 +89,9 @@ def create_sparse_batch_stream(
         CDataloaderSkipConfig(config),
         CDataloaderDDPConfig(ddp_config),
     )
+    if not stream:
+        raise RuntimeError(f"FATAL: C++ data loader returned NULL stream for feature set '{feature_set}'. Check stderr for details.")
+    return stream
 
 
 def destroy_sparse_batch_stream(stream: ctypes.c_void_p):
@@ -103,7 +106,7 @@ def get_sparse_batch_from_fens(
     def to_c_int_array(data):
         return (ctypes.c_int * len(data))(*data)
 
-    return c_lib.dll.get_sparse_batch_from_fens(
+    res = c_lib.dll.get_sparse_batch_from_fens(
         feature_set.encode("utf-8"),
         len(fens),
         _to_c_str_array(fens),
@@ -111,6 +114,9 @@ def get_sparse_batch_from_fens(
         to_c_int_array(plies),
         to_c_int_array(results),
     )
+    if not res:
+        raise RuntimeError(f"FATAL: C++ data loader returned NULL batch for feature set '{feature_set}'. Check stderr for details.")
+    return res
 
 
 def fetch_next_sparse_batch(stream: ctypes.c_void_p) -> SparseBatchPtr:

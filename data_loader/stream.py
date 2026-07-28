@@ -79,8 +79,9 @@ def create_sparse_batch_stream(
         rank, world_size = _get_ddp_rank_and_world_size()
         ddp_config = DataloaderDDPConfig(rank=rank, world_size=world_size)
 
+    feature_set_bytes = feature_set if isinstance(feature_set, bytes) else feature_set.encode("utf-8")
     stream = c_lib.dll.create_sparse_batch_stream(
-        feature_set.encode("utf-8"),
+        feature_set_bytes,
         concurrency,
         len(filenames),
         _to_c_str_array(filenames),
@@ -99,15 +100,16 @@ def destroy_sparse_batch_stream(stream: ctypes.c_void_p):
 
 
 def get_sparse_batch_from_fens(
-    feature_set: str, fens, scores, plies, results
+    feature_set: str | bytes, fens, scores, plies, results
 ) -> SparseBatchPtr:
     assert len(fens) == len(scores) == len(plies) == len(results)
 
     def to_c_int_array(data):
         return (ctypes.c_int * len(data))(*data)
 
+    feature_set_bytes = feature_set if isinstance(feature_set, bytes) else feature_set.encode("utf-8")
     res = c_lib.dll.get_sparse_batch_from_fens(
-        feature_set.encode("utf-8"),
+        feature_set_bytes,
         len(fens),
         _to_c_str_array(fens),
         to_c_int_array(scores),

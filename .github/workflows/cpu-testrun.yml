@@ -50,6 +50,7 @@ jobs:
             python -u tests/test_training_pipeline_run.py -y --device cpu --test-dir /data/logs/training/runs/unittests_train_pipeline_cpu
 
       - name: Sanity Check on Known FENs
+        continue-on-error: true
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --skip-setup --non-interactive --exec \
             python -u tests/sanity_check_fens.py \

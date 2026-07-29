@@ -8,15 +8,15 @@ class QK4(InputFeature):
     HASH = 0x41514B34
     FEATURE_NAME = "QK4"
     INPUT_FEATURE_NAME = "QK4"
-    MAX_ACTIVE_FEATURES = 2
+    MAX_ACTIVE_FEATURES = 24
     EXPORT_WEIGHT_DTYPE = torch.int8
 
-    # 64 buckets (32 king x 2 queen) * 27 check ray directions * 4 protection states
+    # 64 buckets * 24 check ray directions * 4 contested states
     NUM_BUCKETS = 64
-    NUM_RAYS = 27
+    NUM_RAYS = 24
     NUM_STATES = 4
-    NUM_INPUTS = NUM_BUCKETS * NUM_RAYS * NUM_STATES  # 6,912
-    NUM_REAL_FEATURES = NUM_INPUTS  # 6,912
+    NUM_INPUTS = NUM_BUCKETS * NUM_RAYS * NUM_STATES  # 6,144
+    NUM_REAL_FEATURES = NUM_INPUTS  # 6,144
 
     def __init__(self, num_outputs: int):
         super().__init__()

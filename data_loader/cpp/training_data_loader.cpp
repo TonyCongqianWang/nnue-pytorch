@@ -148,13 +148,90 @@ struct K32Q2Extractor: IFeatureExtractor {
 
 struct QK4 {
     static constexpr std::string_view NAME = "QK4";
-    static constexpr int INPUTS              = 6912;
-    static constexpr int MAX_ACTIVE_FEATURES = 2;
+    static constexpr int INPUTS              = 6144;
+    static constexpr int MAX_ACTIVE_FEATURES = 24;
 
     static std::pair<int, int>
     fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
-        // QK4 threat extraction
-        return {0, INPUTS};
+        auto& pos = e.pos;
+        auto ksq = pos.kingSquare(color);
+        Color opp_color = (color == Color::White ? Color::Black : Color::White);
+        Bitboard queens = pos.piecesBB(Piece(PieceType::Queen, opp_color));
+        if (queens.isEmpty())
+            return {0, INPUTS};
+
+        // Oriented king square (vertically mirrored for black)
+        Square oriented_ksq = orient_flip_2(color, ksq, ksq);
+        int king_bucket = static_cast<int>(oriented_ksq);
+        std::cout << "PY QK4 active: perspective=" << (color == Color::White ? "WHITE" : "BLACK") << " ksq=" << int(ksq) << " oriented_ksq=" << int(oriented_ksq) << " queens=" << queens.bits() << std::endl;
+
+        const int RAY_DIRECTIONS[8][2] = {
+            {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+            {-1, -1}, {-1, 1}, {1, -1}, {1, 1}
+        };
+
+        const Bitboard occupied = pos.piecesBB();
+        int k = 0;
+
+        for (Square qsq : queens) {
+            // Find check threat squares (where the queen can move and deliver check)
+            Bitboard check_squares = (bb::attacks<PieceType::Rook>(qsq, occupied) |
+                                      bb::attacks<PieceType::Bishop>(qsq, occupied));
+            // Exclude squares occupied by opponent's own pieces
+            check_squares &= ~pos.piecesBB(opp_color);
+
+            for (Square check_sq : check_squares) {
+                // Is check_sq aligned with ksq?
+                int fd = check_sq.file() - ksq.file();
+                int rd = check_sq.rank() - ksq.rank();
+                if (fd == 0 || rd == 0 || fd == rd || fd == -rd) {
+                    // Is the line of sight clear to ksq?
+                    if ((bb::between(check_sq, ksq) & occupied).isEmpty()) {
+                        // Compute oriented check_sq
+                        Square oriented_check_sq = orient_flip_2(color, check_sq, ksq);
+                        int ofd = oriented_check_sq.file() - oriented_ksq.file();
+                        int ord = oriented_check_sq.rank() - oriented_ksq.rank();
+                        int sf = (ofd == 0) ? 0 : ((ofd > 0) ? 1 : -1);
+                        int sr = (ord == 0) ? 0 : ((ord > 0) ? 1 : -1);
+
+                        int dir_idx = -1;
+                        for (int i = 0; i < 8; ++i) {
+                            if (RAY_DIRECTIONS[i][0] == sf && RAY_DIRECTIONS[i][1] == sr) {
+                                dir_idx = i;
+                                break;
+                            }
+                        }
+
+                        if (dir_idx >= 0) {
+                            int dist = std::max(std::abs(ofd), std::abs(ord)) - 1;
+                            int ray = dir_idx * 3 + std::min(dist, 2);
+
+                            // Contested state logic (King Capture Rule)
+                            Bitboard opp_attackers = pos.attackers(check_sq, opp_color);
+                            bool protected_by_friendly = (opp_attackers & ~Bitboard::square(qsq)).any();
+
+                            Bitboard our_attackers = pos.attackers(check_sq, color);
+                            bool others_attack = (our_attackers & ~Bitboard::square(ksq)).any();
+                            bool king_attacks = our_attackers.isSet(ksq);
+
+                            bool can_be_taken = others_attack || (king_attacks && !protected_by_friendly);
+
+                            int state = 0;
+                            if (protected_by_friendly && !can_be_taken) state = 1;
+                            else if (protected_by_friendly && can_be_taken) state = 2;
+                            else if (!protected_by_friendly && can_be_taken) state = 3;
+
+                            int index = king_bucket * 96 + ray * 4 + state;
+                            std::cout << "  Check square: raw=" << int(check_sq) << " oriented=" << int(oriented_check_sq) << " ray=" << ray << " state=" << state << " idx=" << index << std::endl;
+                            if (k < MAX_ACTIVE_FEATURES) {
+                                features[k++] = index;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return {k, INPUTS};
     }
 };
 

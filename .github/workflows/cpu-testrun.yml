@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  STOCKFISH_SHA: 88bbb7f54c687460e69f76fd8a86a12f474b22b7
+  STOCKFISH_SHA: fa6d0bd649b525a22ded43fba8c347a43efaa6cf
 
 jobs:
   sanity-check:
@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: Stockfish/src/stockfish
-          key: stockfish-${{ env.STOCKFISH_SHA }}
+          key: stockfish0-${{ env.STOCKFISH_SHA }}
 
       - name: Checkout Stockfish
         if: steps.cache-stockfish.outputs.cache-hit != 'true'
@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: Stockfish/src/stockfish
-          key: stockfish-${{ env.STOCKFISH_SHA }}
+          key: stockfish1-${{ env.STOCKFISH_SHA }}
 
       - name: Checkout Stockfish Master
         if: steps.cache-stockfish.outputs.cache-hit != 'true'

@@ -196,6 +196,7 @@ def _generate_and_serialize(
     model.layer_stacks.coalesce_layer_stacks_inplace()
 
     writer = M.NNUEWriter(model, description=f"sanity_check_iter{iteration}", ft_compression="leb128")
+    os.makedirs(os.path.dirname(os.path.abspath(net_path)), exist_ok=True)
     with open(net_path, "wb") as f:
         f.write(writer.buf)
 

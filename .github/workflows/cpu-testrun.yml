@@ -39,7 +39,7 @@ jobs:
 
       - name: Cache Stockfish binary
         id: cache-stockfish
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e7586c87d51884323067160 # v4.2.2
         with:
           path: Stockfish/src/stockfish
           key: stockfish-${{ env.STOCKFISH_SHA }}
@@ -65,7 +65,7 @@ jobs:
             python -u tests/sanity_check_fens.py \
               --random \
               --random-nets 3 \
-              --net /data/sanity_random.nnue \
+              --net /data/logs/sanity_random.nnue \
               --engine ./Stockfish/src/stockfish \
               --device='cpu'
 
@@ -90,7 +90,15 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
+      - name: Cache Stockfish binary
+        id: cache-stockfish
+        uses: actions/cache@0c45773b623bea8c8e7586c87d51884323067160 # v4.2.2
+        with:
+          path: Stockfish/src/stockfish
+          key: stockfish-${{ env.STOCKFISH_SHA }}
+
       - name: Checkout Stockfish Master
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
@@ -99,6 +107,7 @@ jobs:
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
         run: |
           cd Stockfish/src
           make -j build

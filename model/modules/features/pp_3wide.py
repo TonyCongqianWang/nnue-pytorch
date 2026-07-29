@@ -49,7 +49,3 @@ class PP3Wide(InputFeature):
     def load_export_weights(self, export_weight: torch.Tensor) -> None:
         self.weight.data.copy_(export_weight)
 
-    def clip_weights(self, quantization) -> None:
-        self.weight.data.clamp_(
-            quantization.min_threat_weight, quantization.max_threat_weight
-        )

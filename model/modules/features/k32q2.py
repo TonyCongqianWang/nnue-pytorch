@@ -160,11 +160,6 @@ class K32Q2(InputFeature):
         self.weight.data.copy_(expanded)
         self.zero_virtual_weights()
 
-    def clip_weights(self, quantization) -> None:
-        _i8 = torch.iinfo(torch.int8)
-        min_w = -_i8.max / quantization.ft_quantized_one
-        max_w = _i8.max / quantization.ft_quantized_one
-        self.weight.data.clamp_(min_w, max_w)
 
     @staticmethod
     def k32q2_psqts() -> list[int]:

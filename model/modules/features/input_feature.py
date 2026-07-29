@@ -32,8 +32,6 @@ class InputFeature(nn.Module, ABC):
     @abstractmethod
     def load_export_weights(self, export_weight: torch.Tensor) -> None: ...
 
-    def clip_weights(self, quantization) -> None:
-        pass
 
     def reset_parameters(self):
         sigma = math.sqrt(1 / self.NUM_INPUTS)

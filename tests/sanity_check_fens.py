@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -30,17 +31,17 @@ import model as M
 KNOWN_FENS = [
     # 1. Starting position
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    # 2. Open Ruy-López, white king on e1 (rank-1, middle files)
+    # 2. Open Ruy-Lopez, white king on e1 (rank-1, middle files)
     "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
     # 3. After kingside castling, white king on g1 (rank-1, h-side)
     "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQ1RK1 w - - 0 7",
     # 4. After queenside castling, white king on c1 (rank-1, a-side)
     "2kr3r/ppp1qppp/2n2n2/3p4/3P4/2N1PN2/PPQ2PPP/2KR1B1R w - - 0 12",
-    # 5. Black to move — perspective flip
+    # 5. Black to move - perspective flip
     "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 4 4",
-    # 6. White king on h8-area (rank-8 region) — catches vertical bucket flip
+    # 6. White king on h8-area (rank-8 region) - catches vertical bucket flip
     "6k1/8/8/8/8/8/8/R5K1 w - - 0 1",
-    # 7. KQ vs K — exercises PSQT columns
+    # 7. KQ vs K - exercises PSQT columns
     "8/8/4k3/8/8/4K3/8/7Q w - - 0 1",
     # 8. Pawn-heavy middlegame
     "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
@@ -63,17 +64,28 @@ class SanityConfig:
     """Path to the Stockfish engine binary."""
 
     net: str
-    """Path to the serialized .nnue net file."""
+    """Path for the .nnue file.  When --random is set, this file is written by the
+    script and re-used across all random-net iterations."""
 
     checkpoint: str | None = None
-    """Optional .ckpt checkpoint.  When provided it is used for the Python-side
-    model evaluation instead of re-reading the .nnue file."""
+    """Optional .ckpt checkpoint.  Ignored when --random is set."""
 
     device: Literal["cuda", "mps", "cpu"] = "cpu"
     """Torch device for model evaluation."""
 
     max_error: int = DEFAULT_MAX_ERROR
     """Maximum allowed absolute error per FEN (internal units)."""
+
+    random: bool = False
+    """When set, generate weight configurations in-script instead of loading from
+    --net / --checkpoint.  The generated net is written to --net before each
+    iteration so the engine can load it."""
+
+    random_nets: int = 3
+    """Number of random-weight nets to generate and test.
+    Iteration 0 = positive saturation (slightly above max_ft_weight, then clipped).
+    Iteration 1 = negative saturation (slightly below min_ft_weight, then clipped).
+    Iterations 2..N-1 = uniform random in the same overshot range, different seeds."""
 
 
 @dataclass(frozen=True)
@@ -83,7 +95,6 @@ class CliConfig:
 
 
 # ─── Model loading ─────────────────────────────────────────────────────────────
-
 
 def _load_from_nnue(net_path: str, config: M.NNUELightningConfig) -> M.NNUEModel:
     with open(net_path, "rb") as f:
@@ -98,8 +109,98 @@ def _load_from_checkpoint(ckpt_path: str, config: M.NNUELightningConfig) -> M.NN
     return nnue.model
 
 
-# ─── Evaluation helpers ────────────────────────────────────────────────────────
+# ─── Random net generation ─────────────────────────────────────────────────────
 
+_OVERSHOOT = 1.5  # fill weights this many times outside the valid bound before clipping
+
+
+def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int) -> None:
+    """Fill all FT input feature weights then clip to the valid range.
+
+    When fill_value is None, weights are drawn from a uniform distribution in
+    [-_OVERSHOOT * max_ft_weight, +_OVERSHOOT * max_ft_weight].
+    When fill_value is not None, all weights are set to that constant.
+
+    After filling, model.clip_weights(include_input=True) is called so that the
+    result is always within the serializable i8 range.  Passing weights that are
+    slightly outside the bound intentionally exercises clip_weights correctness:
+    if the implementation is wrong, _safe_convert in NNUEWriter will raise.
+    """
+    rng = torch.Generator()
+    rng.manual_seed(seed)
+
+    q = model.quantization
+    ft_bound = q.max_ft_weight * _OVERSHOOT
+
+    with torch.no_grad():
+        for f in model.input.features:
+            if fill_value is not None:
+                f.weight.data.fill_(fill_value * _OVERSHOOT)
+                if hasattr(f, "virtual_weight"):
+                    f.virtual_weight.data.fill_(fill_value * _OVERSHOOT)
+            else:
+                f.weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
+                if hasattr(f, "virtual_weight"):
+                    f.virtual_weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
+
+        # FC layers: fill to their own valid range (slightly overshot) and clip
+        for i, ls in enumerate(
+            [model.layer_stacks.l1.linear, model.layer_stacks.l2.linear, model.layer_stacks.output.linear]
+        ):
+            hw = q.max_hidden_weight[i] * _OVERSHOOT
+            if fill_value is not None:
+                ls.weight.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
+            else:
+                ls.weight.data.uniform_(-hw, hw, generator=rng)
+
+    # clip_weights enforces all bounds.  If the clipping logic is wrong,
+    # NNUEWriter._safe_convert will raise RuntimeError and the test fails cleanly.
+    model.clip_weights(include_input=True)
+
+
+def _iter_label(i: int) -> str:
+    if i == 0:
+        return "positive saturation (+1.5 x max_ft, clipped to +max_ft)"
+    if i == 1:
+        return "negative saturation (-1.5 x max_ft, clipped to -max_ft)"
+    return f"uniform random (seed={i})"
+
+
+def _generate_and_serialize(
+    config: M.NNUELightningConfig,
+    lcfg: M.NNUELightningConfig,
+    net_path: str,
+    iteration: int,
+    device: str,
+) -> M.NNUEModel:
+    """Build a fresh NNUEModel, fill weights per the iteration strategy, serialize."""
+    nnue = M.NNUE(config=lcfg)
+    model = nnue.model
+    model.to(device)
+    model.eval()
+
+    if iteration == 0:
+        fill_value = 1.0   # positive saturation
+    elif iteration == 1:
+        fill_value = -1.0  # negative saturation
+    else:
+        fill_value = None  # uniform random
+
+    _fill_ft_weights(model, fill_value, seed=iteration)
+
+    # Coalesce virtual weights into real weights before serialization
+    model.input.coalesce()
+    model.layer_stacks.coalesce_layer_stacks_inplace()
+
+    writer = M.NNUEWriter(model, description=f"sanity_check_iter{iteration}")
+    with open(net_path, "wb") as f:
+        f.write(writer.buf)
+
+    # Reload from the written file so Python eval uses the exact quantized weights
+    return _load_from_nnue(net_path, lcfg)
+
+
+# ─── Evaluation helpers ────────────────────────────────────────────────────────
 
 def eval_model(model: M.NNUEModel, fens: list[str], device: str) -> list[float]:
     """Return per-FEN evaluations (internal units, side-to-move positive)
@@ -151,39 +252,31 @@ def eval_engine(engine_path: str, net_path: str, fens: list[str]) -> list[int]:
     return [int(v) for v in evals]
 
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Single-net test ──────────────────────────────────────────────────────────
 
-
-def main() -> None:
-    args = tyro.cli(CliConfig)
-    cfg = args.sanity_config
-    lcfg = args.nnue_lightning_config
-
-    if cfg.checkpoint:
-        model = _load_from_checkpoint(cfg.checkpoint, lcfg)
-    else:
-        model = _load_from_nnue(cfg.net, lcfg)
-    model.to(cfg.device)
-    model.eval()
-
-    # Filter positions the engine cannot evaluate (king in check)
-    fens = [f for f in KNOWN_FENS if not chess.Board(f).is_check()]
-
+def run_fen_check(
+    model: M.NNUEModel,
+    fens: list[str],
+    net_path: str,
+    engine_path: str,
+    max_error: int,
+    device: str,
+    label: str,
+) -> list[tuple[str, float, int, float]]:
+    """Run FEN check for one net.  Returns list of (fen, py, sf, err) failures."""
     W = 72
     print(f"\n{'='*W}")
-    print(
-        f"  FEN Sanity Check  -  {len(fens)} positions  "
-        f"(max allowed error: {cfg.max_error} internal units)"
-    )
+    print(f"  {label}")
+    print(f"  {len(fens)} FENs, max allowed error: {max_error} internal units")
     print(f"{'='*W}")
 
-    py_evals = eval_model(model, fens, cfg.device)
-    sf_evals = eval_engine(cfg.engine, cfg.net, fens)
+    py_evals = eval_model(model, fens, device)
+    sf_evals = eval_engine(engine_path, net_path, fens)
 
     failures: list[tuple[str, float, int, float]] = []
     for i, (fen, py, sf) in enumerate(zip(fens, py_evals, sf_evals)):
         err = abs(py - sf)
-        passed = err <= cfg.max_error
+        passed = err <= max_error
         tag = "PASS" if passed else "FAIL"
         print(f"[{tag}] #{i + 1:2d}  py={py:+8.1f}  sf={sf:+8d}  err={err:6.1f}")
         print(f"        {fen}")
@@ -191,23 +284,61 @@ def main() -> None:
             failures.append((fen, py, sf, err))
 
     print(f"{'='*W}")
+    return failures
 
-    if failures:
-        print(
-            f"\nFAILED: {len(failures)} FEN(s) exceeded "
-            f"the {cfg.max_error}-unit error threshold:\n"
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    args = tyro.cli(CliConfig)
+    cfg = args.sanity_config
+    lcfg = args.nnue_lightning_config
+
+    # Filter positions the engine cannot evaluate (king in check)
+    fens = [f for f in KNOWN_FENS if not chess.Board(f).is_check()]
+
+    all_failures: list[tuple[str, str, float, int, float]] = []  # (label, fen, py, sf, err)
+
+    if cfg.random:
+        n = max(cfg.random_nets, 1)
+        for i in range(n):
+            label = f"Random net #{i}: {_iter_label(i)}"
+            model = _generate_and_serialize(lcfg, lcfg, cfg.net, i, cfg.device)
+            model.to(cfg.device)
+            model.eval()
+            failures = run_fen_check(
+                model, fens, cfg.net, cfg.engine, cfg.max_error, cfg.device, label
+            )
+            all_failures.extend((label, *f) for f in failures)
+    else:
+        if cfg.checkpoint:
+            model = _load_from_checkpoint(cfg.checkpoint, lcfg)
+        else:
+            model = _load_from_nnue(cfg.net, lcfg)
+        model.to(cfg.device)
+        model.eval()
+        failures = run_fen_check(
+            model, fens, cfg.net, cfg.engine, cfg.max_error, cfg.device,
+            "Trained net"
         )
-        for fen, py, sf, err in failures:
-            print(f"    err={err:.1f}  py={py:+.1f}  sf={sf:+d}")
+        all_failures.extend(("Trained net", *f) for f in failures)
+
+    if all_failures:
+        print(f"\nFAILED: {len(all_failures)} FEN(s) exceeded "
+              f"the {cfg.max_error}-unit error threshold:\n")
+        for label, fen, py, sf, err in all_failures:
+            print(f"  [{label}]  err={err:.1f}  py={py:+.1f}  sf={sf:+d}")
             print(f"    {fen}\n")
         print(
             "Hint: large systematic errors (>=50 units) typically indicate an\n"
             "index-mapping bug such as a mirrored king bucket table, wrong\n"
-            "piece-type ordering, or a sign error in the orientation function."
+            "piece-type ordering, or a sign error in the orientation function.\n"
+            "Errors only on saturation nets may indicate an accumulator overflow."
         )
         sys.exit(1)
     else:
-        print(f"\nPASSED: all {len(fens)} FENs within {cfg.max_error} internal units\n")
+        total = len(fens) * (cfg.random_nets if cfg.random else 1)
+        print(f"\nPASSED: all {total} checks within {cfg.max_error} internal units\n")
         sys.exit(0)
 
 

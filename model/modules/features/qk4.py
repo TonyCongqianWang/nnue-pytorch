@@ -51,8 +51,3 @@ class QK4(InputFeature):
     def load_export_weights(self, export_weight: torch.Tensor) -> None:
         self.weight.data.copy_(export_weight)
 
-    def clip_weights(self, quantization) -> None:
-        _i8 = torch.iinfo(torch.int8)
-        min_w = -_i8.max / quantization.ft_quantized_one
-        max_w = _i8.max / quantization.ft_quantized_one
-        self.weight.data.clamp_(min_w, max_w)

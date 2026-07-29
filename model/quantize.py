@@ -14,6 +14,7 @@ class WeightClippingConfig(TypedDict):
     min_weight: float
     max_weight: float
     virtual_params: NotRequired[torch.Tensor]
+    col_end: NotRequired[int]
 
 def _safe_convert(value: torch.Tensor, target_dtype: torch.dtype):
     _info = torch.iinfo(target_dtype)
@@ -89,11 +90,11 @@ class QuantizationManager:
 
         hidden_q_max = config.weight_quantized_max_hidden
         self.max_hidden_weight = [hidden_q_max / scale for scale in self.weight_scale_hidden]
-        # Threat weights are treated separately. A bit hacky...
-        # Threat weights are quantized to int8 after scaling by ft_quantized_one
+        # Valid float range for all int8 FT weights (FullThreats, PP3Wide, QK4, K32Q2).
+        # After multiplying by ft_quantized_one the result must fit in [-127, 127].
         _i8 = torch.iinfo(torch.int8)
-        self.min_threat_weight = -_i8.max / config.ft_quantized_one  # -127/256
-        self.max_threat_weight = _i8.max / config.ft_quantized_one  # 127/256
+        self.min_ft_weight = -_i8.max / config.ft_quantized_one  # -127/256
+        self.max_ft_weight = _i8.max / config.ft_quantized_one   # +127/256
 
         self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.hidden_quantized_one
         self.sqr_crelu_correction_factor = config.hidden_quantized_one / config.inference_sqr_crelu_division_factor
@@ -171,6 +172,33 @@ class QuantizationManager:
                 "max_weight": self.max_hidden_weight[2],
             },
         ]
+
+    def generate_input_clipping_config(
+        self, model: "NNUEModel"
+    ) -> list[WeightClippingConfig]:
+        """Generate clipping configs for all input feature weights.
+
+        For K32Q2 (which has a virtual_weight factorization), the clip is applied
+        such that weight + expanded_virtual stays within [min_ft_weight, max_ft_weight],
+        mirroring how layer-stack virtual weights are handled.  Only the FT weight
+        columns [:, :L1] are clipped for K32Q2 — PSQT columns are on a different
+        quantization scale and must not be constrained here.
+
+        For all other features (FullThreats, PP3Wide, QK4) the full weight tensor is
+        clipped (matching legacy behaviour).
+        """
+        configs: list[WeightClippingConfig] = []
+        for f in model.input.features:
+            cfg: WeightClippingConfig = {
+                "params": [f.weight],
+                "min_weight": self.min_ft_weight,
+                "max_weight": self.max_ft_weight,
+            }
+            if hasattr(f, "virtual_weight"):
+                cfg["virtual_params"] = f.virtual_weight
+                cfg["col_end"] = model.L1
+            configs.append(cfg)
+        return configs
 
     def quantize_feature_transformer_weights(
         self,

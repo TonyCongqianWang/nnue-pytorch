@@ -184,7 +184,7 @@ def _generate_and_serialize(
         overshoot = 1.5   # 1.5 overshoot for testing
     else:
         fill_value = None  # uniform random
-        overshoot = 2.0 / total_nets * (iteration - 1) + 0.1 # mix of large and small values, testing clipping.
+        overshoot = 2.0 / total_nets * iteration + 0.1 # mix of large and small values, testing clipping.
 
     _fill_ft_weights(model, fill_value, seed=iteration, overshoot=overshoot)
 

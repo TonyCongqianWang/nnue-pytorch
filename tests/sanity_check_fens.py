@@ -82,9 +82,9 @@ class SanityConfig:
 
     random_nets: int = 3
     """Number of random-weight nets to generate and test.
-    Iteration 0 = positive saturation (slightly above max_ft_weight, then clipped).
-    Iteration 1 = negative saturation (slightly below min_ft_weight, then clipped).
-    Iterations 2..N-1 = uniform random in the same overshot range, different seeds."""
+    Iterations 0..N-2 = uniform random different seeds (increasingly larger range).
+    Iteration N-2 = positive saturation (slightly above max_ft_weight, then clipped).
+    Iteration N-1 = negative saturation (slightly below min_fst_weight, then clipped)."""
 
 
 @dataclass(frozen=True)
@@ -109,9 +109,6 @@ def _load_from_checkpoint(ckpt_path: str, config: M.NNUELightningConfig) -> M.NN
 
 
 # ─── Random net generation ─────────────────────────────────────────────────────
-
-_OVERSHOOT = 1.5  # fill weights this many times outside the valid bound before clipping
-
 
 def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, overshoot: float) -> None:
     """Fill all FT input feature weights then clip to the valid range.
@@ -179,15 +176,15 @@ def _generate_and_serialize(
     model.to(device)
     model.eval()
 
-    if iteration < total_nets - 2:
-        fill_value = None  # uniform random
-        overshoot = 0.08  # small values well within bounds
-    elif iteration == total_nets - 2:
+    if iteration == total_nets - 2:
         fill_value = 1.0   # positive saturation
         overshoot = 1.5   # 1.5 overshoot for testing
-    else:
+    elif iteration == total_nets - 1:
         fill_value = -1.0  # negative saturation
         overshoot = 1.5   # 1.5 overshoot for testing
+    else:
+        fill_value = None  # uniform random
+        overshoot = 2.0 / total_nets * (iteration - 1) + 0.1 # mix of large and small values, testing clipping.
 
     _fill_ft_weights(model, fill_value, seed=iteration, overshoot=overshoot)
 

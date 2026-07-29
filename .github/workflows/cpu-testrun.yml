@@ -64,7 +64,7 @@ jobs:
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
             python -u tests/sanity_check_fens.py \
               --random \
-              --random-nets 3 \
+              --random-nets 6 \
               --net /data/logs/sanity_random.nnue \
               --engine ./Stockfish/src/stockfish \
               --device='cpu'

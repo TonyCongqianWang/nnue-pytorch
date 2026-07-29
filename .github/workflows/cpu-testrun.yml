@@ -65,7 +65,7 @@ jobs:
             python -u tests/sanity_check_fens.py \
               --random \
               --random-nets 3 \
-              --net /tmp/sanity_random.nnue \
+              --net /data/sanity_random.nnue \
               --engine ./Stockfish/src/stockfish \
               --device='cpu'
 

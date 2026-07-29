@@ -113,11 +113,11 @@ def _load_from_checkpoint(ckpt_path: str, config: M.NNUELightningConfig) -> M.NN
 _OVERSHOOT = 1.5  # fill weights this many times outside the valid bound before clipping
 
 
-def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int) -> None:
+def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, overshoot: float) -> None:
     """Fill all FT input feature weights then clip to the valid range.
 
     When fill_value is None, weights are drawn from a uniform distribution in
-    [-_OVERSHOOT * max_ft_weight, +_OVERSHOOT * max_ft_weight].
+    [-overshoot * max_ft_weight, +overshoot * max_ft_weight].
     When fill_value is not None, all weights are set to that constant.
 
     After filling, model.clip_weights(include_input=True) is called so that the
@@ -129,14 +129,14 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int) ->
     rng.manual_seed(seed)
 
     q = model.quantization
-    ft_bound = q.max_ft_weight * _OVERSHOOT
+    ft_bound = q.max_ft_weight * overshoot
 
     with torch.no_grad():
         for f in model.input.features:
             if fill_value is not None:
-                f.weight.data.fill_(fill_value * _OVERSHOOT)
+                f.weight.data.fill_(fill_value * overshoot)
                 if hasattr(f, "virtual_weight"):
-                    f.virtual_weight.data.fill_(fill_value * _OVERSHOOT)
+                    f.virtual_weight.data.fill_(fill_value * overshoot)
             else:
                 f.weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
                 if hasattr(f, "virtual_weight"):
@@ -146,7 +146,7 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int) ->
         for i, ls in enumerate(
             [model.layer_stacks.l1.linear, model.layer_stacks.l2.linear, model.layer_stacks.output.linear]
         ):
-            hw = q.max_hidden_weight[i] * _OVERSHOOT
+            hw = q.max_hidden_weight[i] * overshoot
             if fill_value is not None:
                 ls.weight.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
             else:
@@ -157,12 +157,12 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int) ->
     model.clip_weights(include_input=True)
 
 
-def _iter_label(i: int) -> str:
-    if i == 0:
+def _iter_label(i: int, total_nets: int) -> str:
+    if i < total_nets - 2:
+        return f"uniform random (seed={i})"
+    if i == total_nets - 2:
         return "positive saturation (+1.5 x max_ft, clipped to +max_ft)"
-    if i == 1:
-        return "negative saturation (-1.5 x max_ft, clipped to -max_ft)"
-    return f"uniform random (seed={i})"
+    return "negative saturation (-1.5 x max_ft, clipped to -max_ft)"
 
 
 def _generate_and_serialize(
@@ -170,6 +170,7 @@ def _generate_and_serialize(
     lcfg: M.NNUELightningConfig,
     net_path: str,
     iteration: int,
+    total_nets: int,
     device: str,
 ) -> M.NNUEModel:
     """Build a fresh NNUEModel, fill weights per the iteration strategy, serialize."""
@@ -178,20 +179,23 @@ def _generate_and_serialize(
     model.to(device)
     model.eval()
 
-    if iteration == 0:
-        fill_value = 1.0   # positive saturation
-    elif iteration == 1:
-        fill_value = -1.0  # negative saturation
-    else:
+    if iteration < total_nets - 2:
         fill_value = None  # uniform random
+        overshoot = 0.08  # small values well within bounds
+    elif iteration == total_nets - 2:
+        fill_value = 1.0   # positive saturation
+        overshoot = 1.5   # 1.5 overshoot for testing
+    else:
+        fill_value = -1.0  # negative saturation
+        overshoot = 1.5   # 1.5 overshoot for testing
 
-    _fill_ft_weights(model, fill_value, seed=iteration)
+    _fill_ft_weights(model, fill_value, seed=iteration, overshoot=overshoot)
 
     # Coalesce virtual weights into real weights before serialization
     model.input.coalesce()
     model.layer_stacks.coalesce_layer_stacks_inplace()
 
-    writer = M.NNUEWriter(model, description=f"sanity_check_iter{iteration}")
+    writer = M.NNUEWriter(model, description=f"sanity_check_iter{iteration}", ft_compression="leb128")
     with open(net_path, "wb") as f:
         f.write(writer.buf)
 
@@ -301,8 +305,8 @@ def main() -> None:
     if cfg.random:
         n = max(cfg.random_nets, 1)
         for i in range(n):
-            label = f"Random net #{i}: {_iter_label(i)}"
-            model = _generate_and_serialize(lcfg, lcfg, cfg.net, i, cfg.device)
+            label = f"Random net #{i}: {_iter_label(i, n)}"
+            model = _generate_and_serialize(lcfg, lcfg, cfg.net, i, n, cfg.device)
             model.to(cfg.device)
             model.eval()
             failures = run_fen_check(

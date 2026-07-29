@@ -163,7 +163,6 @@ struct QK4 {
         // Oriented king square (vertically mirrored for black)
         Square oriented_ksq = orient_flip_2(color, ksq, ksq);
         int king_bucket = static_cast<int>(oriented_ksq);
-        std::cout << "PY QK4 active: perspective=" << (color == Color::White ? "WHITE" : "BLACK") << " ksq=" << int(ksq) << " oriented_ksq=" << int(oriented_ksq) << " queens=" << queens.bits() << std::endl;
 
         const int RAY_DIRECTIONS[8][2] = {
             {-1, 0}, {1, 0}, {0, -1}, {0, 1},
@@ -222,7 +221,6 @@ struct QK4 {
                             else if (!protected_by_friendly && can_be_taken) state = 3;
 
                             int index = king_bucket * 96 + ray * 4 + state;
-                            std::cout << "  Check square: raw=" << int(check_sq) << " oriented=" << int(oriented_check_sq) << " ray=" << ray << " state=" << state << " idx=" << index << std::endl;
                             if (k < MAX_ACTIVE_FEATURES) {
                                 features[k++] = index;
                             }

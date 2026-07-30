@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  STOCKFISH_SHA: fa6d0bd649b525a22ded43fba8c347a43efaa6cf
+  STOCKFISH_SHA: 942ddac380e50e80e7cf9664f8e9de3fd1659fec
 
 jobs:
   sanity-check:

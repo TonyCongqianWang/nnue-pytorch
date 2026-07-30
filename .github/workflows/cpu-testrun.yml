@@ -9,7 +9,66 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  STOCKFISH_SHA: 7bc16447fb5928aebe567a17b1648b365b82b915
+
 jobs:
+  sanity-check:
+    # Fast standalone job: generates random nets, clips, serializes, compares
+    # Python model vs engine eval on a handful of FENs.  Runs in parallel with
+    # the training pipeline so it delivers early feedback without blocking it.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and load CPU Docker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile.CPU
+          push: false
+          load: true
+          tags: nnue-pytorch:cpu
+          cache-from: type=gha,scope=cpu-cache
+          cache-to: type=gha,mode=max,scope=cpu-cache
+
+      - name: Cache Stockfish binary
+        id: cache-stockfish
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: Stockfish/src/stockfish
+          key: stockfish0-${{ env.STOCKFISH_SHA }}
+
+      - name: Checkout Stockfish
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: TonyCongqianWang/Stockfish
+          path: Stockfish
+          ref: ${{ env.STOCKFISH_SHA }}
+          persist-credentials: false
+
+      - name: Compile Compatible Stockfish
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
+        run: |
+          cd Stockfish/src
+          make -j build
+
+      - name: Sanity Check on Known FENs (random nets)
+        run: |
+          ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
+            python -u tests/sanity_check_fens.py \
+              --random \
+              --random-nets 6 \
+              --net /data/logs/sanity_random.nnue \
+              --engine ./Stockfish/src/stockfish \
+              --device='cpu'
+
   train-and-cross-check:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
@@ -31,15 +90,24 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
+      - name: Cache Stockfish binary
+        id: cache-stockfish
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: Stockfish/src/stockfish
+          key: stockfish1-${{ env.STOCKFISH_SHA }}
+
       - name: Checkout Stockfish Master
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: TonyCongqianWang/Stockfish
           path: Stockfish
-          ref: f4bcd40409f94bd397a083c5d6243bac6dcc6d85
+          ref: ${{ env.STOCKFISH_SHA }}
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
+        if: steps.cache-stockfish.outputs.cache-hit != 'true'
         run: |
           cd Stockfish/src
           make -j build

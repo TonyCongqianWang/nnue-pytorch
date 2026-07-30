@@ -142,9 +142,10 @@ class NNUEWriter:
         ]
         for layer in layers:
             layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features // model.num_ls_buckets
-            layer_hash ^= prev_hash >> 1
+            layer_hash = (layer_hash + layer.out_features // model.num_ls_buckets) & 0xFFFFFFFF
+            layer_hash ^= (prev_hash >> 1)
             layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+            layer_hash &= 0xFFFFFFFF
             if layer.out_features // model.num_ls_buckets != 1:
                 # Clipped ReLU hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF

@@ -38,6 +38,7 @@ struct SparseBatchStreamDeleter {
 // -----------------------------------------------------------------------------
 
 struct CliConfig {
+    std::string          feature_set;
     DataloaderSkipConfig skip_config;
     DataloaderDDPConfig  ddp_config;
     int                  batch_size;
@@ -45,6 +46,7 @@ struct CliConfig {
 };
 
 const CliConfig default_cli_config = {
+    .feature_set = "Full_Threats+PP_3Wide+QK4+K32Q2",
     .skip_config = {
         .filtered                = true,
         .random_fen_skipping     = 10,
@@ -131,7 +133,10 @@ CliConfig build_config_from_map(const std::map<std::string, std::string>& m) {
         return (lower_s == "1" || lower_s == "true");
     };
 
+    std::string feat_set = (m.find("feature_set") != m.end()) ? m.at("feature_set") : default_cli_config.feature_set;
+
     return {
+        .feature_set = feat_set,
         .skip_config = {
             .filtered             = parse_bool(m.at("filtered")),
             .random_fen_skipping  = std::stoi(m.at("random_fen_skipping")),
@@ -240,7 +245,7 @@ void run_report(int concurrency, size_t iteration_count, size_t max_plies, int f
     std::cout << "Initializing stream (Threads: " << concurrency << ", Iterations: " << iteration_count << ")..." << std::endl;
 
     std::unique_ptr<SparseBatchStream, SparseBatchStreamDeleter> stream(
-        create_sparse_batch_stream("Full_Threats+PP_3Wide+HalfKAv2_hm", concurrency, file_count, files,
+        create_sparse_batch_stream(cli_config.feature_set.c_str(), concurrency, file_count, files,
             batch_size, cyclic, skip_config, ddp_config));
 
     DistributionReport report(max_plies);
@@ -339,7 +344,7 @@ void run_bench(int concurrency, size_t iteration_count, int do_cache_files, int 
     }
 
     std::unique_ptr<SparseBatchStream, SparseBatchStreamDeleter> stream(
-        create_sparse_batch_stream("Full_Threats+PP_3Wide+HalfKAv2_hm", concurrency, file_count, files,
+        create_sparse_batch_stream(cli_config.feature_set.c_str(), concurrency, file_count, files,
             batch_size, cyclic, skip_config, ddp_config));
 
     size_t warmup_iterations = 5;

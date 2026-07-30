@@ -107,9 +107,6 @@ class ComposedFeatureTransformer(nn.Module):
             f.load_export_weights(export_weight[offset : offset + n])
             offset += n
 
-    def clip_weights(self, quantization) -> None:
-        for f in self.features:
-            f.clip_weights(quantization)
 
     def forward(
         self,

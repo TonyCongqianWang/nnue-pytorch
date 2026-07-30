@@ -82,6 +82,167 @@ struct HalfKAv2_hmExtractor: IFeatureExtractor {
     }
 };
 
+struct K32Q2 {
+    static constexpr std::string_view NAME = "K32Q2";
+
+    static constexpr int NUM_SQ              = 64;
+    static constexpr int NUM_PT              = 12;
+    static constexpr int NUM_PLANES          = NUM_SQ * NUM_PT;
+    static constexpr int NUM_BUCKETS         = 64;
+    static constexpr int INPUTS              = NUM_PLANES * NUM_BUCKETS;
+    static constexpr int MAX_ACTIVE_FEATURES = 32;
+
+    // clang-format off
+    static constexpr int KingBuckets[64] = {
+      -1, -1, -1, -1, 31, 30, 29, 28,
+      -1, -1, -1, -1, 27, 26, 25, 24,
+      -1, -1, -1, -1, 23, 22, 21, 20,
+      -1, -1, -1, -1, 19, 18, 17, 16,
+      -1, -1, -1, -1, 15, 14, 13, 12,
+      -1, -1, -1, -1, 11, 10, 9, 8,
+      -1, -1, -1, -1, 7, 6, 5, 4,
+      -1, -1, -1, -1, 3, 2, 1, 0
+    };
+    // clang-format on
+
+    static int feature_index(Color color, Square ksq, Square sq, Piece p, bool opponent_has_queen) {
+        Square o_ksq = orient_flip_2(color, ksq, ksq);
+        auto   p_idx = static_cast<int>(p.type()) * 2 + (p.color() != color);
+        int    k_bucket = KingBuckets[static_cast<int>(o_ksq)];
+        if (k_bucket < 0) k_bucket = 0;
+        int    combined_bucket = k_bucket * 2 + (opponent_has_queen ? 1 : 0);
+        return static_cast<int>(orient_flip_2(color, sq, ksq)) + p_idx * NUM_SQ
+             + combined_bucket * NUM_PLANES;
+    }
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        auto& pos    = e.pos;
+        auto  pieces = pos.piecesBB();
+        auto  ksq    = pos.kingSquare(color);
+
+        Color opp_color = (color == Color::White ? Color::Black : Color::White);
+        bool opponent_has_queen = !pos.piecesBB(Piece(PieceType::Queen, opp_color)).isEmpty();
+
+        int j = 0;
+        for (Square sq : pieces)
+        {
+            auto p      = pos.pieceAt(sq);
+            features[j] = feature_index(color, ksq, sq, p, opponent_has_queen);
+            ++j;
+        }
+        return {j, INPUTS};
+    }
+};
+
+struct K32Q2Extractor: IFeatureExtractor {
+    int inputs() const override { return K32Q2::INPUTS; }
+    int max_active_features() const override { return K32Q2::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             Color                    color) const override {
+        return K32Q2::fill_features_sparse(e, features, color);
+    }
+};
+
+
+struct QK4 {
+    static constexpr std::string_view NAME = "QK4";
+    static constexpr int INPUTS              = 6144;
+    static constexpr int MAX_ACTIVE_FEATURES = 24;
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        auto& pos = e.pos;
+        auto ksq = pos.kingSquare(color);
+        Color opp_color = (color == Color::White ? Color::Black : Color::White);
+        Bitboard queens = pos.piecesBB(Piece(PieceType::Queen, opp_color));
+        if (queens.isEmpty())
+            return {0, INPUTS};
+
+        // Oriented king square (vertically mirrored for black)
+        Square oriented_ksq = orient_flip_2(color, ksq, ksq);
+        int king_bucket = static_cast<int>(oriented_ksq);
+
+        const int RAY_DIRECTIONS[8][2] = {
+            {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+            {-1, -1}, {-1, 1}, {1, -1}, {1, 1}
+        };
+
+        const Bitboard occupied = pos.piecesBB();
+        int k = 0;
+
+        for (Square qsq : queens) {
+            // Find check threat squares (where the queen can move and deliver check)
+            Bitboard check_squares = (bb::attacks<PieceType::Rook>(qsq, occupied) |
+                                      bb::attacks<PieceType::Bishop>(qsq, occupied));
+            // Exclude squares occupied by opponent's own pieces
+            check_squares &= ~pos.piecesBB(opp_color);
+
+            for (Square check_sq : check_squares) {
+                // Is check_sq aligned with ksq?
+                int fd = check_sq.file() - ksq.file();
+                int rd = check_sq.rank() - ksq.rank();
+                if (fd == 0 || rd == 0 || fd == rd || fd == -rd) {
+                    // Is the line of sight clear to ksq?
+                    if ((bb::between(check_sq, ksq) & occupied).isEmpty()) {
+                        // Compute oriented check_sq
+                        Square oriented_check_sq = orient_flip_2(color, check_sq, ksq);
+                        int ofd = oriented_check_sq.file() - oriented_ksq.file();
+                        int ord = oriented_check_sq.rank() - oriented_ksq.rank();
+                        int sf = (ofd == 0) ? 0 : ((ofd > 0) ? 1 : -1);
+                        int sr = (ord == 0) ? 0 : ((ord > 0) ? 1 : -1);
+
+                        int dir_idx = -1;
+                        for (int i = 0; i < 8; ++i) {
+                            if (RAY_DIRECTIONS[i][0] == sf && RAY_DIRECTIONS[i][1] == sr) {
+                                dir_idx = i;
+                                break;
+                            }
+                        }
+
+                        if (dir_idx >= 0) {
+                            int dist = std::max(std::abs(ofd), std::abs(ord)) - 1;
+                            int ray = dir_idx * 3 + std::min(dist, 2);
+
+                            // Contested state logic (King Capture Rule)
+                            Bitboard opp_attackers = pos.attackers(check_sq, opp_color);
+                            bool protected_by_friendly = (opp_attackers & ~Bitboard::square(qsq)).any();
+
+                            Bitboard our_attackers = pos.attackers(check_sq, color);
+                            bool others_attack = (our_attackers & ~Bitboard::square(ksq)).any();
+                            bool king_attacks = our_attackers.isSet(ksq);
+
+                            bool can_be_taken = others_attack || (king_attacks && !protected_by_friendly);
+
+                            int state = 0;
+                            if (protected_by_friendly && !can_be_taken) state = 1;
+                            else if (protected_by_friendly && can_be_taken) state = 2;
+                            else if (!protected_by_friendly && can_be_taken) state = 3;
+
+                            int index = king_bucket * 96 + ray * 4 + state;
+                            if (k < MAX_ACTIVE_FEATURES) {
+                                features[k++] = index;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return {k, INPUTS};
+    }
+};
+
+struct QK4Extractor: IFeatureExtractor {
+    int inputs() const override { return QK4::INPUTS; }
+    int max_active_features() const override { return QK4::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             Color                    color) const override {
+        return QK4::fill_features_sparse(e, features, color);
+    }
+};
+
 // Pawn attackers no longer target pawns; those relationships are represented by PP_3Wide.
 constexpr int numvalidtargets[6] = {4, 10, 8, 8, 10, 0};
 
@@ -433,6 +594,10 @@ struct ComposedFeatureExtractor: IFeatureExtractor {
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
     if (name == "HalfKAv2_hm")
         return std::make_unique<HalfKAv2_hmExtractor>();
+    if (name == "K32Q2")
+        return std::make_unique<K32Q2Extractor>();
+    if (name == "QK4")
+        return std::make_unique<QK4Extractor>();
     if (name == "Full_Threats")
         return std::make_unique<FullThreatsExtractor>();
     if (name == "PP_3Wide")
@@ -452,7 +617,8 @@ std::shared_ptr<IFeatureExtractor> get_feature(std::string_view name) {
 
         if (!ext)
         {
-            std::cerr << "Unknown feature component: " << part << std::endl;
+            std::cerr << "FATAL DATA LOADER ERROR: Unknown feature component '" << part
+                      << "' in feature set '" << name << "'!" << std::endl;
             return nullptr;
         }
 
@@ -461,7 +627,10 @@ std::shared_ptr<IFeatureExtractor> get_feature(std::string_view name) {
     }
 
     if (components.empty())
+    {
+        std::cerr << "FATAL DATA LOADER ERROR: Empty feature set string '" << name << "'!" << std::endl;
         return nullptr;
+    }
 
     if (components.size() == 1)
         return std::shared_ptr<IFeatureExtractor>(std::move(components[0]));

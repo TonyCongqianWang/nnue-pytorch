@@ -34,8 +34,46 @@ class NNUEModel(nn.Module):
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
+        self.input_clipping = self.quantization.generate_input_clipping_config(self)
 
         self.input.init_weights()
+
+
+    @staticmethod
+    @torch.no_grad()
+    def _apply_weight_clipping(config) -> None:
+        """Apply one clipping config list to its tensors.
+
+        Supports an optional 'col_end' key to restrict clipping to a column slice
+        (used to exclude PSQT columns from FT weight clipping for K32Q2).
+        Supports 'virtual_params' to clip weight such that weight + expanded_virtual
+        stays within [min_weight, max_weight], mirroring layer-stack factorized clipping.
+        """
+        for group in config:
+            if "min_weight" not in group and "max_weight" not in group:
+                continue
+            min_w = group["min_weight"]
+            max_w = group["max_weight"]
+            col_end = group.get("col_end", None)
+
+            for p in group["params"]:
+                p_data = p.data
+                # Restrict to the column slice that should be clipped (e.g. FT-only for K32Q2)
+                target = p_data[:, :col_end] if col_end is not None else p_data
+
+                if "virtual_params" in group:
+                    virtual_params = group["virtual_params"]
+                    xs = p_data.shape[0] // virtual_params.shape[0]
+                    ys = p_data.shape[1] // virtual_params.shape[1]
+                    expanded_virtual = virtual_params.repeat(xs, ys)
+                    # Take the same column slice from the expanded virtual weight
+                    ev = expanded_virtual[:, :col_end] if col_end is not None else expanded_virtual
+                    # Clip weight so that weight + ev stays in [min_w, max_w]
+                    eff_min = target.new_full(target.shape, min_w) - ev
+                    eff_max = target.new_full(target.shape, max_w) - ev
+                    target.clamp_(eff_min, eff_max)
+                else:
+                    target.clamp_(min_w, max_w)
 
 
     @torch.no_grad()
@@ -45,30 +83,8 @@ class NNUEModel(nn.Module):
         by the quantization scheme.
         """
         if include_input:
-            self.input.clip_weights(self.quantization)
-
-        for group in self.weight_clipping:
-            for p in group["params"]:
-                if "min_weight" in group or "max_weight" in group:
-                    p_data_fp32 = p.data
-                    min_weight = group["min_weight"]
-                    max_weight = group["max_weight"]
-                    if "virtual_params" in group:
-                        virtual_params = group["virtual_params"]
-                        xs = p_data_fp32.shape[0] // virtual_params.shape[0]
-                        ys = p_data_fp32.shape[1] // virtual_params.shape[1]
-                        expanded_virtual_layer = virtual_params.repeat(xs, ys)
-                        if min_weight is not None:
-                            min_weight = (
-                                p_data_fp32.new_full(p_data_fp32.shape, min_weight)
-                                - expanded_virtual_layer
-                            )
-                        if max_weight is not None:
-                            max_weight = (
-                                p_data_fp32.new_full(p_data_fp32.shape, max_weight)
-                                - expanded_virtual_layer
-                            )
-                    p_data_fp32.clamp_(min_weight, max_weight)
+            self._apply_weight_clipping(self.input_clipping)
+        self._apply_weight_clipping(self.weight_clipping)
 
 
     @torch.no_grad()

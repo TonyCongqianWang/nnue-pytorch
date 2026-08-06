@@ -4,12 +4,14 @@ from typing import Annotated
 import tyro
 
 
-# 3 layer fully connected network
+# Residual network config
 @dataclass(kw_only=True)
 class LayerStacksConfig:
-    L1: Annotated[int, tyro.conf.arg(name="l1")] = 1024
+    L1: Annotated[int, tyro.conf.arg(name="l1")] = 1536
     """Size of first hidden layer."""
-    L2: Annotated[int, tyro.conf.arg(name="l2")] = 32
-    """Size of second hidden layer."""
-    L3: Annotated[int, tyro.conf.arg(name="l3")] = 32
-    """Size of third hidden layer."""
+    residual_dim: Annotated[int, tyro.conf.arg(name="residual-dim")] = 32
+    """Size of the residual skip path."""
+    expanded_dim: Annotated[int, tyro.conf.arg(name="expanded-dim")] = 64
+    """Expanded dimension of inverted bottleneck blocks."""
+    num_blocks: Annotated[int, tyro.conf.arg(name="num-blocks")] = 2
+    """Number of inverted bottleneck blocks."""

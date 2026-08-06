@@ -9,7 +9,7 @@ from .optimizers import OptimizerConfig
 from .quantize import QuantizationConfig
 
 
-# 3 layer fully connected network
+# Residual Network Configuration
 @dataclass(kw_only=True)
 class ModelConfig(LayerStacksConfig):
     @staticmethod
@@ -21,17 +21,31 @@ class ModelConfig(LayerStacksConfig):
             default=ModelConfig.L1,
         )
         parser.add_argument(
-            "--l2",
-            dest="L2",
+            "--residual-dim",
+            dest="residual_dim",
             type=int,
-            default=ModelConfig.L2,
+            default=ModelConfig.residual_dim,
+        )
+        parser.add_argument(
+            "--expanded-dim",
+            dest="expanded_dim",
+            type=int,
+            default=ModelConfig.expanded_dim,
+        )
+        parser.add_argument(
+            "--num-blocks",
+            dest="num_blocks",
+            type=int,
+            default=ModelConfig.num_blocks,
         )
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
         config = ModelConfig()
         config.L1 = args.L1
-        config.L2 = args.L2
+        config.residual_dim = args.residual_dim
+        config.expanded_dim = args.expanded_dim
+        config.num_blocks = args.num_blocks
         return config
 
     # Not omitting prefix on purpose.

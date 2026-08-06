@@ -94,6 +94,8 @@ class QuantizationManager:
         _i8 = torch.iinfo(torch.int8)
         self.min_threat_weight = -_i8.max / config.ft_quantized_one  # -127/256
         self.max_threat_weight = _i8.max / config.ft_quantized_one  # 127/256
+        _i16 = torch.iinfo(torch.int16)
+        self.max_skip_activation = _i16.max / self.hidden_quantized_one
 
         self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.hidden_quantized_one
         self.sqr_crelu_correction_factor = config.hidden_quantized_one / config.inference_sqr_crelu_division_factor
@@ -103,17 +105,26 @@ class QuantizationManager:
         self.weight_scales_dict = {
             "ft_weight" : self.ft_quantized_one,
             "ft_bias" : self.ft_quantized_one,
-            "ft_psqt_weight" : self.nnue2score * self.weight_scale_out,
-            "ls_l1_weight" : self.weight_scale_hidden[0],
-            "ls_l1_bias" : self.weight_scale_hidden[0] * self.hidden_quantized_one,
-            "ls_l2_weight" : self.weight_scale_hidden[1],
-            "ls_l2_bias" : self.weight_scale_hidden[1] * self.hidden_quantized_one,
-            "ls_output_weight" : self.weight_scale_hidden[2],
-            "ls_output_bias" : self.weight_scale_hidden[2] * self.hidden_quantized_one,
+            "ft_psqt_weight" : self.ft_quantized_one, # skip path scale matches ft_weight
+            "ls_l1_to_skip_a_weight" : self.weight_scale_hidden[0],
+            "ls_l1_to_skip_a_bias" : self.weight_scale_hidden[0] * self.hidden_quantized_one,
+            "ls_l1_to_skip_b_weight" : self.weight_scale_hidden[0],
+            "ls_l1_to_skip_b_bias" : self.weight_scale_hidden[0] * self.hidden_quantized_one,
         }
+        for i in range(8):
+            self.weight_scales_dict[f"block_{i}_up_weight"] = self.weight_scale_hidden[0]
+            self.weight_scales_dict[f"block_{i}_up_bias_crelu"] = self.weight_scale_hidden[0] * self.hidden_quantized_one
+            self.weight_scales_dict[f"block_{i}_up_bias_sqr"] = self.weight_scale_hidden[0] * self.hidden_quantized_one
+            self.weight_scales_dict[f"block_{i}_down_weight"] = self.weight_scale_hidden[1]
+            self.weight_scales_dict[f"block_{i}_down_bias"] = self.weight_scale_hidden[1] * self.hidden_quantized_one
+            self.weight_scales_dict[f"block_{i}_final_weight"] = self.weight_scale_hidden[2]
+            self.weight_scales_dict[f"block_{i}_final_bias"] = self.weight_scale_hidden[2] * self.hidden_quantized_one
 
     def clip_ft_act(self, preact):
         return torch.clamp(preact, 0.0, self.max_ft_activation)
+
+    def clip_res_act(self, preact):
+        return torch.clamp(preact, -self.quantization.max_skip_activation, self.quantization.max_skip_activation)
 
     def clip_ls_act(self, preact):
         return torch.clamp(preact, 0, self.max_hidden_activation)
@@ -127,7 +138,6 @@ class QuantizationManager:
         return _fake_quantize_acts(preact, act_scale)
 
     def fake_quantize_skip_act(self, preact):
-        # currently no separate quantization necessary, but might be necessary in the future if quant schemes change.
         return preact
 
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
@@ -153,42 +163,61 @@ class QuantizationManager:
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        return [
+        configs = [
             {
-                "params": [model.layer_stacks.l1.linear.weight],
+                "params": [model.layer_stacks.l1_to_skip_a.linear.weight],
                 "min_weight": -self.max_hidden_weight[0],
                 "max_weight": self.max_hidden_weight[0],
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
+                "virtual_params": model.layer_stacks.l1_to_skip_a.factorized_linear.weight,
             },
             {
-                "params": [model.layer_stacks.l2.linear.weight],
-                "min_weight": -self.max_hidden_weight[1],
-                "max_weight": self.max_hidden_weight[1],
-            },
-            {
-                "params": [model.layer_stacks.output.linear.weight],
-                "min_weight": -self.max_hidden_weight[2],
-                "max_weight": self.max_hidden_weight[2],
-            },
+                "params": [model.layer_stacks.l1_to_skip_b.linear.weight],
+                "min_weight": -self.max_hidden_weight[0],
+                "max_weight": self.max_hidden_weight[0],
+                "virtual_params": model.layer_stacks.l1_to_skip_b.factorized_linear.weight,
+            }
         ]
+
+        for i, block in enumerate(model.layer_stacks.blocks):
+            configs.append({
+                "params": [block.fc_up.linear.weight],
+                "min_weight": -self.max_hidden_weight[0],
+                "max_weight": self.max_hidden_weight[0],
+            })
+            max_bias = self.max_hidden_weight[0] * self.hidden_quantized_one
+            configs.append({
+                "params": [block.bias_crelu, block.bias_sqr],
+                "min_weight": -max_bias,
+                "max_weight": max_bias,
+            })
+            if not block.is_final:
+                configs.append({
+                    "params": [block.fc_down.linear.weight],
+                    "min_weight": -self.max_hidden_weight[1],
+                    "max_weight": self.max_hidden_weight[1],
+                })
+            else:
+                configs.append({
+                    "params": [block.fc_final.linear.weight],
+                    "min_weight": -self.max_hidden_weight[2],
+                    "max_weight": self.max_hidden_weight[2],
+                })
+
+        return configs
 
     def quantize_feature_transformer_weights(
         self,
         weight: torch.Tensor,
-        psqt_weight: torch.Tensor,
         f_weight_export_dtype: torch.dtype = torch.int16,
         callback: Callable | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         weight = weight.mul(self.weight_scales_dict["ft_weight"])
         weight = _safe_convert(weight, f_weight_export_dtype)
-        psqt_weight = psqt_weight.mul(self.weight_scales_dict["ft_psqt_weight"])
-        psqt_weight = _safe_convert(psqt_weight, torch.int32)
 
         if callback is not None:
             callback("ft_weight", weight)
-            callback("psqt_weight", psqt_weight)
 
-        return weight, psqt_weight
+        return weight
 
     def quantize_feature_transformer_bias(
         self,
@@ -202,18 +231,6 @@ class QuantizationManager:
             callback("ft_bias", bias)
 
         return bias
-
-    def dequantize_feature_transformer(
-        self,
-        bias: torch.Tensor,
-        weight: torch.Tensor,
-        psqt_weight: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bias = bias.divide(self.weight_scales_dict["ft_bias"])
-        weight = weight.divide(self.weight_scales_dict["ft_weight"])
-        psqt_weight = psqt_weight.divide(self.weight_scales_dict["ft_psqt_weight"])
-
-        return bias, weight, psqt_weight
 
     def quantize_fc_layer(
         self,

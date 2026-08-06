@@ -124,6 +124,19 @@ class NNUE(nn.Module):
         dense_wd = optimizer_config.dense_weight_decay
         factorized_wd = optimizer_config.factorized_weight_decay
 
+        block_weights = []
+        block_biases = []
+        for block in self.model.layer_stacks.blocks:
+            block_weights.extend(_get_parameters([block.fc_up], get_biases=False))
+            block_biases.append(block.bias_crelu)
+            block_biases.append(block.bias_sqr)
+            if not block.is_final:
+                block_weights.extend(_get_parameters([block.fc_down], get_biases=False))
+                block_biases.extend(_get_parameters([block.fc_down], get_biases=True))
+            else:
+                block_weights.extend(_get_parameters([block.fc_final], get_biases=False))
+                block_biases.extend(_get_parameters([block.fc_final], get_biases=True))
+
         train_params = [
             # Feature Transformer
             {
@@ -136,45 +149,50 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Dense Layer Stacks
+            # Factorized L1 to skip layer
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.weight],
+                "params": [
+                    self.model.layer_stacks.l1_to_skip_a.factorized_linear.weight,
+                    self.model.layer_stacks.l1_to_skip_b.factorized_linear.weight,
+                ],
                 "lr": LRs[2],
                 "weight_decay": factorized_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.bias],
+                "params": [
+                    self.model.layer_stacks.l1_to_skip_a.factorized_linear.bias,
+                    self.model.layer_stacks.l1_to_skip_b.factorized_linear.bias,
+                ],
                 "lr": LRs[3],
                 "weight_decay": 0.0,
             },
+            # Base L1 to skip layer
             {
-                "params": [self.model.layer_stacks.l1.linear.weight],
+                "params": [
+                    self.model.layer_stacks.l1_to_skip_a.linear.weight,
+                    self.model.layer_stacks.l1_to_skip_b.linear.weight,
+                ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.linear.bias],
+                "params": [
+                    self.model.layer_stacks.l1_to_skip_a.linear.bias,
+                    self.model.layer_stacks.l1_to_skip_b.linear.bias,
+                ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
+            # Block weights
             {
-                "params": [self.model.layer_stacks.l2.linear.weight],
+                "params": block_weights,
                 "lr": LRs[6],
                 "weight_decay": dense_wd,
             },
+            # Block biases
             {
-                "params": [self.model.layer_stacks.l2.linear.bias],
+                "params": block_biases,
                 "lr": LRs[7],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.weight],
-                "lr": LRs[8],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.bias],
-                "lr": LRs[9],
                 "weight_decay": 0.0,
             },
         ]

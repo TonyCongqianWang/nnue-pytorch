@@ -14,13 +14,15 @@ class StackedLinear(nn.Module):
         count: int,
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,
+        bias: bool = True,
     ):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.count = count
-        self.linear = nn.Linear(in_features, out_features * count)
+        self.use_bias = bias
+        self.linear = nn.Linear(in_features, out_features * count, bias=bias)
 
         self.quantization = quantization
         self.layer_key = layer_key
@@ -30,19 +32,20 @@ class StackedLinear(nn.Module):
     @torch.no_grad()
     def _init_uniformly(self) -> None:
         init_weight = self.linear.weight[0 : self.out_features, :]
-        init_bias = self.linear.bias[0 : self.out_features]
-
         self.linear.weight.copy_(init_weight.repeat(self.count, 1))
-        self.linear.bias.copy_(init_bias.repeat(self.count))
+        if self.use_bias:
+            init_bias = self.linear.bias[0 : self.out_features]
+            self.linear.bias.copy_(init_bias.repeat(self.count))
 
     def forward(self, x: torch.Tensor, ls_indices: torch.Tensor, fake_quantize_weights: bool=False) -> torch.Tensor:
         weight = self.linear.weight
-        bias = self.linear.bias
+        bias = self.linear.bias if self.use_bias else None
         if fake_quantize_weights:
             if self.quantization is None or self.layer_key is None:
                 raise RuntimeError("self.quantization and self.layer_key are required to use fake quantize weights.")
             weight = self.quantization.fake_quantize_weights(weight, f"{self.layer_key}_weight")
-            bias = self.quantization.fake_quantize_weights(bias, f"{self.layer_key}_bias")
+            if self.use_bias:
+                bias = self.quantization.fake_quantize_weights(bias, f"{self.layer_key}_bias")
 
         stacked_output = F.linear(x, weight, bias)
 
@@ -67,13 +70,14 @@ class StackedLinear(nn.Module):
 
     @torch.no_grad()
     def at_index(self, index: int) -> nn.Linear:
-        layer = nn.Linear(self.in_features, self.out_features)
+        layer = nn.Linear(self.in_features, self.out_features, bias=self.use_bias)
 
         begin = index * self.out_features
         end = (index + 1) * self.out_features
 
         layer.weight.copy_(self.linear.weight[begin:end, :])
-        layer.bias.copy_(self.linear.bias[begin:end])
+        if self.use_bias:
+            layer.bias.copy_(self.linear.bias[begin:end])
 
         return layer
 

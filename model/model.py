@@ -18,8 +18,9 @@ class NNUEModel(nn.Module):
 
         feature_cls = get_feature_cls(feature_name)
         self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
+        self.residual_dim = config.residual_dim
+        self.expanded_dim = config.expanded_dim
+        self.num_blocks = config.num_blocks
 
         self.quantize_config = config.quantize_config
         self.quantization = QuantizationManager(config.quantize_config)
@@ -27,7 +28,7 @@ class NNUEModel(nn.Module):
         self.num_psqt_buckets = num_psqt_buckets
         self.num_ls_buckets = num_ls_buckets
 
-        self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.num_psqt_buckets, self.quantization)
+        self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.residual_dim, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
@@ -116,7 +117,7 @@ class NNUEModel(nn.Module):
     ):
         psqt_indices, layer_stack_indices = self.calculate_buckets(piece_count)
 
-        l0_, wpsqt, bpsqt = self.forward_ft(
+        l0_, residual_l0 = self.forward_ft(
             us,
             them,
             white_indices,
@@ -125,9 +126,6 @@ class NNUEModel(nn.Module):
             fake_quantize_acts,
             fake_quantize_weights,
         )
-        # The PSQT values are averaged over perspectives. "Their" perspective
-        # has a negative influence (us-0.5 is 0.5 for white and -0.5 for black,
-        # which does both the averaging and sign flip for black to move)
-        x = self.layer_stacks(l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights) + (wpsqt - bpsqt) * (us - 0.5)
+        x = self.layer_stacks(l0_, residual_l0, layer_stack_indices, fake_quantize_acts, fake_quantize_weights)
 
         return x

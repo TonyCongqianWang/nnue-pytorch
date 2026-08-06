@@ -12,6 +12,7 @@ from torch import nn
 
 from ..config import ModelConfig
 from ..model import NNUEModel
+from ..quantize import _safe_convert
 
 
 def ascii_hist(name, x, bins=7):
@@ -30,6 +31,7 @@ def ascii_hist(name, x, bins=7):
         bar = "#" * int(n * 1.0 * width / nmax)
         xi = f"{xi: <8.4g}".ljust(10)
         print(f"{xi}| {bar}")
+
 
 def get_histogram_callback(hist_title: str, verbose: bool):
     if not verbose:
@@ -61,6 +63,7 @@ def get_histogram_callback(hist_title: str, verbose: bool):
         print("-" * 15)
 
     return histogram_callback
+
 
 @njit
 def encode_leb_128_array(arr: npt.NDArray) -> list:
@@ -96,7 +99,7 @@ def decode_leb_128_array(arr: bytes, n: int) -> npt.NDArray:
 
 # hardcoded for now
 VERSION = 0x6A448AFA
-DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
+DEFAULT_DESCRIPTION = "Network trained with the Inverted Bottleneck ResNet nnue-pytorch trainer."
 
 
 class NNUEWriter:
@@ -121,12 +124,64 @@ class NNUEWriter:
         self.write_header(model, fc_hash, description)
         self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
         self.write_feature_transformer(model, ft_compression)
+
         layer_stacks = model.layer_stacks
-        for bucket, (l1, l2, output) in enumerate(layer_stacks.get_coalesced_layer_stacks()):
+        for bucket in range(model.num_ls_buckets):
+            layers_dict = layer_stacks.get_coalesced_layers_for_bucket(bucket)
             self.int32(fc_hash)  # FC layers hash
-            self.write_fc_layer(model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}")
-            self.write_fc_layer(model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}")
-            self.write_fc_layer(model, output, layer_stacks.output.layer_key, f"bucket {bucket}")
+
+            # 1. Write l1_to_skip_a and l1_to_skip_b layers
+            self.write_fc_layer(
+                model,
+                layers_dict["l1_to_skip_a"],
+                "ls_l1_to_skip_a",
+                f"bucket {bucket} a",
+            )
+            self.write_fc_layer(
+                model,
+                layers_dict["l1_to_skip_b"],
+                "ls_l1_to_skip_b",
+                f"bucket {bucket} b",
+            )
+
+            # 2. Write blocks
+            for i, b_data in enumerate(layers_dict["blocks"]):
+                # Write fc_up biases: crelu first, then sqr
+                self.write_fc_bias(
+                    model,
+                    b_data["bias_crelu"],
+                    f"block_{i}_up_bias_crelu",
+                    f"bucket {bucket} block {i} bias_crelu",
+                )
+                self.write_fc_bias(
+                    model,
+                    b_data["bias_sqr"],
+                    f"block_{i}_up_bias_sqr",
+                    f"bucket {bucket} block {i} bias_sqr",
+                )
+
+                # Write fc_up weights (bias-free layer)
+                self.write_fc_weight(
+                    model,
+                    b_data["fc_up"].weight.data,
+                    f"block_{i}_up",
+                    f"bucket {bucket} block {i} up",
+                )
+
+                if "fc_down" in b_data:
+                    self.write_fc_layer(
+                        model,
+                        b_data["fc_down"],
+                        f"block_{i}_down",
+                        f"bucket {bucket} block {i} down",
+                    )
+                else:
+                    self.write_fc_layer(
+                        model,
+                        b_data["fc_final"],
+                        f"block_{i}_final",
+                        f"bucket {bucket} block {i} final",
+                    )
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -134,26 +189,58 @@ class NNUEWriter:
         prev_hash = 0xEC42E90D
         prev_hash ^= model.L1 * 2
 
-        # Fully connected layers
-        layers = [
-            model.layer_stacks.l1.linear,
-            model.layer_stacks.l2.linear,
-            model.layer_stacks.output.linear,
-        ]
-        for layer in layers:
+        # 1. l1_to_skip_a hash
+        layer_hash = 0xCC03DAE4
+        layer_hash += model.residual_dim // 2
+        layer_hash ^= prev_hash >> 1
+        layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+        layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
+        prev_hash = layer_hash
+
+        # 2. l1_to_skip_b hash
+        layer_hash = 0xCC03DAE4
+        layer_hash += model.residual_dim // 2
+        layer_hash ^= prev_hash >> 1
+        layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+        layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
+        prev_hash = layer_hash
+
+        # 2. Block hashes
+        for i in range(model.num_blocks):
+            is_final = i == model.num_blocks - 1
+            # fc_up
             layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features // model.num_ls_buckets
+            layer_hash += model.expanded_dim
             layer_hash ^= prev_hash >> 1
             layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
-            if layer.out_features // model.num_ls_buckets != 1:
-                # Clipped ReLU hash
-                layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
+            layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
-        return layer_hash
 
-    def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
+            if not is_final:
+                # fc_down
+                layer_hash = 0xCC03DAE4
+                layer_hash += model.residual_dim
+                layer_hash ^= prev_hash >> 1
+                layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+                layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
+                prev_hash = layer_hash
+            else:
+                # fc_final
+                layer_hash = 0xCC03DAE4
+                layer_hash += 1
+                layer_hash ^= prev_hash >> 1
+                layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+                prev_hash = layer_hash
+
+        return prev_hash
+
+    def write_header(
+        self, model: NNUEModel, fc_hash: int, description: str
+    ) -> None:
         self.int32(VERSION)  # version
-        self.int32(fc_hash ^ model.feature_hash ^ (model.L1 * 2))  # halfkp network hash
+        self.int32(
+            fc_hash ^ model.feature_hash ^ (model.L1 * 2)
+        )  # halfkp network hash
         encoded_description = description.encode("utf-8")
         self.int32(len(encoded_description))  # Network definition
         self.buf.extend(encoded_description)
@@ -173,19 +260,22 @@ class NNUEWriter:
         else:
             raise ValueError("Invalid compression method.")
 
-    def write_feature_transformer(self, model: NNUEModel, ft_compression: str) -> None:
+    def write_feature_transformer(
+        self, model: NNUEModel, ft_compression: str
+    ) -> None:
         layer = model.input
 
-        bias = layer.bias.data[: model.L1]
+        # biases for both L1 and skip path
+        bias = layer.bias.data
 
-        # Get export weights (coalesced + remapped 12→11 piece types)
+        # Get export weights
         export_weight = layer.get_export_weights()
         weight = export_weight[:, : model.L1]
-        psqt_weight = export_weight[:, model.L1 :]
+        residual_weight = export_weight[:, model.L1 :]
 
         # biases are exported as i16s
         biases = model.quantization.quantize_feature_transformer_bias(
-            bias, get_histogram_callback("", self.verbose)
+            bias, get_histogram_callback("ft_bias", self.verbose)
         )
 
         self.write_tensor(biases, ft_compression)
@@ -196,19 +286,33 @@ class NNUEWriter:
             n = f.NUM_REAL_FEATURES
             f_export_dtype = f.EXPORT_WEIGHT_DTYPE
 
-            ft_histogram_callback = get_histogram_callback(f.FEATURE_NAME, self.verbose)
-            segment_weight = weight[offset : offset + n]
-            segment_psqt_weight = psqt_weight[offset : offset + n]
-            segment_weight, segment_psqt_weight = model.quantization.quantize_feature_transformer_weights(
-                segment_weight, segment_psqt_weight, f_export_dtype, ft_histogram_callback
+            ft_histogram_callback = get_histogram_callback(
+                f.FEATURE_NAME, self.verbose
             )
-            # compression is only useful for types larger than 1 byte
-            segment_compression = ft_compression if f_export_dtype != torch.int8 else "none"
+            segment_weight = weight[offset : offset + n]
+            segment_residual_weight = residual_weight[offset : offset + n]
+
+            # Quantize weights (both use ft_weight scale factor)
+            segment_weight = (
+                model.quantization.quantize_feature_transformer_weights(
+                    segment_weight, f_export_dtype, ft_histogram_callback
+                )
+            )
+            segment_residual_weight = (
+                model.quantization.quantize_feature_transformer_weights(
+                    segment_residual_weight,
+                    f_export_dtype,
+                    ft_histogram_callback,
+                )
+            )
+
+            segment_compression = (
+                ft_compression if f_export_dtype != torch.int8 else "none"
+            )
             offset += n
 
             self.write_tensor(segment_weight, segment_compression)
-            self.write_tensor(segment_psqt_weight, ft_compression)
-
+            self.write_tensor(segment_residual_weight, segment_compression)
 
     def write_fc_layer(
         self,
@@ -240,6 +344,50 @@ class NNUEWriter:
         # Weights stored as [outputs][inputs], so we can flatten
         self.write_tensor(weight, "none")
 
+    def write_fc_bias(
+        self,
+        model: NNUEModel,
+        bias: torch.Tensor,
+        bias_key: str,
+        desc: str,
+    ) -> None:
+        quantized_bias = _safe_convert(
+            bias.mul(model.quantization.weight_scales_dict[bias_key]),
+            torch.int32,
+        )
+        callback = get_histogram_callback(desc, self.verbose)
+        if callback is not None:
+            callback(bias_key, quantized_bias)
+        self.write_tensor(quantized_bias, "none")
+
+    def write_fc_weight(
+        self,
+        model: NNUEModel,
+        weight: torch.Tensor,
+        layer_key: str,
+        desc: str,
+    ) -> None:
+        weight_key = f"{layer_key}_weight"
+        quantized_weight = _safe_convert(
+            weight.mul(model.quantization.weight_scales_dict[weight_key]),
+            torch.int8,
+        )
+        callback = get_histogram_callback(desc, self.verbose)
+        if callback is not None:
+            callback(weight_key, quantized_weight)
+
+        # Pad to 32 elements by spec
+        num_input = quantized_weight.shape[1]
+        if num_input % 32 != 0:
+            num_input += 32 - (num_input % 32)
+            new_w = torch.zeros(
+                quantized_weight.shape[0], num_input, dtype=torch.int8
+            )
+            new_w[:, : quantized_weight.shape[1]] = quantized_weight
+            quantized_weight = new_w
+
+        self.write_tensor(quantized_weight, "none")
+
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v))
 
@@ -263,31 +411,91 @@ class NNUEReader:
         )  # Feature transformer hash
         self.model.zero_virtual_weights()
 
-        self.read_feature_transformer(self.model.input, self.model.num_psqt_buckets)
+        self.read_feature_transformer(self.model.input, self.model.residual_dim)
 
-        layers = [
-            self.model.layer_stacks.l1,
-            self.model.layer_stacks.l2,
-            self.model.layer_stacks.output,
-        ]
         num_ls_buckets = self.model.num_ls_buckets
-        l_w_slices = [
-            torch.chunk(layer.linear.weight.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
-        l_b_slices = [
-            torch.chunk(layer.linear.bias.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
-
         for b in range(num_ls_buckets):
             self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                self.read_fc_layer(
-                    l_w_slices[layer_idx][b],
-                    l_b_slices[layer_idx][b],
-                    layers[layer_idx].layer_key,
+            layers_dict = self.model.layer_stacks.get_coalesced_layers_for_bucket(
+                b
+            )
+
+            # 1. Read l1_to_skip_a and l1_to_skip_b layers
+            self.read_fc_layer(
+                layers_dict["l1_to_skip_a"].weight.data,
+                layers_dict["l1_to_skip_a"].bias.data,
+                "ls_l1_to_skip_a",
+            )
+            a_out = self.model.layer_stacks.l1_to_skip_a.out_features
+            self.model.layer_stacks.l1_to_skip_a.linear.weight.data[
+                b * a_out : (b + 1) * a_out
+            ].copy_(layers_dict["l1_to_skip_a"].weight.data)
+            self.model.layer_stacks.l1_to_skip_a.linear.bias.data[
+                b * a_out : (b + 1) * a_out
+            ].copy_(layers_dict["l1_to_skip_a"].bias.data)
+
+            self.read_fc_layer(
+                layers_dict["l1_to_skip_b"].weight.data,
+                layers_dict["l1_to_skip_b"].bias.data,
+                "ls_l1_to_skip_b",
+            )
+            b_out = self.model.layer_stacks.l1_to_skip_b.out_features
+            self.model.layer_stacks.l1_to_skip_b.linear.weight.data[
+                b * b_out : (b + 1) * b_out
+            ].copy_(layers_dict["l1_to_skip_b"].weight.data)
+            self.model.layer_stacks.l1_to_skip_b.linear.bias.data[
+                b * b_out : (b + 1) * b_out
+            ].copy_(layers_dict["l1_to_skip_b"].bias.data)
+
+            # 2. Read blocks
+            for i, b_data in enumerate(layers_dict["blocks"]):
+                crelu_bias = self.read_fc_bias(
+                    f"block_{i}_up_bias_crelu", b_data["bias_crelu"].shape
                 )
+                sqr_bias = self.read_fc_bias(
+                    f"block_{i}_up_bias_sqr", b_data["bias_sqr"].shape
+                )
+
+                block = self.model.layer_stacks.blocks[i]
+                block.bias_crelu.data.reshape(
+                    num_ls_buckets, block.expanded_dim
+                )[b].copy_(crelu_bias)
+                block.bias_sqr.data.reshape(
+                    num_ls_buckets, block.expanded_dim
+                )[b].copy_(sqr_bias)
+
+                self.read_fc_weight(b_data["fc_up"].weight.data, f"block_{i}_up")
+                up_out = block.fc_up.out_features
+                block.fc_up.linear.weight.data[
+                    b * up_out : (b + 1) * up_out
+                ].copy_(b_data["fc_up"].weight.data)
+
+                if "fc_down" in b_data:
+                    self.read_fc_layer(
+                        b_data["fc_down"].weight.data,
+                        b_data["fc_down"].bias.data,
+                        f"block_{i}_down",
+                    )
+                    down_out = block.fc_down.out_features
+                    block.fc_down.linear.weight.data[
+                        b * down_out : (b + 1) * down_out
+                    ].copy_(b_data["fc_down"].weight.data)
+                    block.fc_down.linear.bias.data[
+                        b * down_out : (b + 1) * down_out
+                    ].copy_(b_data["fc_down"].bias.data)
+                else:
+                    self.read_fc_layer(
+                        b_data["fc_final"].weight.data,
+                        b_data["fc_final"].bias.data,
+                        f"block_{i}_final",
+                    )
+                    final_out = block.fc_final.out_features
+                    block.fc_final.linear.weight.data[
+                        b * final_out : (b + 1) * final_out
+                    ].copy_(b_data["fc_final"].weight.data)
+                    block.fc_final.linear.bias.data[
+                        b * final_out : (b + 1) * final_out
+                    ].copy_(b_data["fc_final"].bias.data)
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
@@ -305,7 +513,7 @@ class NNUEReader:
 
         res = torch.tensor(
             decode_leb_128_array(d, reduce(operator.mul, shape, 1)),
-            dtype=torch.float32
+            dtype=torch.float32,
         )
         res = res.reshape(shape)
         return res
@@ -337,36 +545,44 @@ class NNUEReader:
         else:
             raise ValueError("Invalid compression method.")
 
-    def read_feature_transformer(self, layer, num_psqt_buckets: int) -> None:
+    def read_feature_transformer(self, layer, residual_dim: int) -> None:
         num_outputs = layer.num_outputs
-        L1 = num_outputs - num_psqt_buckets
+        L1 = num_outputs - residual_dim
 
-        bias = self.tensor(np.int16, [L1])
+        bias = self.tensor(np.int16, [L1 + residual_dim])
         segments = []
-        segments_psqt = []
+        segments_residual = []
 
         for feature in layer.features:
-            dtype = np.int8 if feature.EXPORT_WEIGHT_DTYPE == torch.int8 else np.int16
+            dtype = (
+                np.int8
+                if feature.EXPORT_WEIGHT_DTYPE == torch.int8
+                else np.int16
+            )
             s = self.tensor(dtype, [feature.NUM_REAL_FEATURES, L1])
             segments.append(s)
-            s_psqt = self.tensor(np.int32, [feature.NUM_REAL_FEATURES, num_psqt_buckets])
-            segments_psqt.append(s_psqt)
+            s_residual = self.tensor(
+                dtype, [feature.NUM_REAL_FEATURES, residual_dim]
+            )
+            segments_residual.append(s_residual)
 
         weight = torch.cat(segments, dim=0)
-        psqt_weight = torch.cat(segments_psqt, dim=0)
+        residual_weight = torch.cat(segments_residual, dim=0)
 
-        bias, weight, psqt_weight = (
-            self.model.quantization.dequantize_feature_transformer(
-                bias, weight, psqt_weight
-            )
-        )
+        # Dequantize FT parameters
+        bias = bias.divide(
+            self.model.quantization.weight_scales_dict["ft_bias"]
+        ).to(torch.float32)
+        weight = weight.divide(
+            self.model.quantization.weight_scales_dict["ft_weight"]
+        ).to(torch.float32)
+        residual_weight = residual_weight.divide(
+            self.model.quantization.weight_scales_dict["ft_weight"]
+        ).to(torch.float32)
 
-        # Combine weight and psqt_weight into export format, then expand
-        layer.bias.data = torch.cat([
-            bias.to(torch.float32),
-            torch.zeros(num_psqt_buckets, dtype=torch.float32)
-        ])
-        export_weight = torch.cat([weight.to(torch.float32), psqt_weight.to(torch.float32)], dim=1)
+        # Load weights back
+        layer.bias.data.copy_(bias)
+        export_weight = torch.cat([weight, residual_weight], dim=1)
         layer.load_export_weights(export_weight)
 
     def read_fc_layer(
@@ -377,7 +593,10 @@ class NNUEReader:
     ) -> None:
         # FC inputs are padded to 32 elements by spec.
         non_padded_shape = layer_weight_t.shape
-        padded_shape = (non_padded_shape[0], ((non_padded_shape[1] + 31) // 32) * 32)
+        padded_shape = (
+            non_padded_shape[0],
+            ((non_padded_shape[1] + 31) // 32) * 32,
+        )
 
         bias = self.tensor(np.int32, layer_bias_t.shape)
         weight = self.tensor(np.int8, padded_shape)
@@ -388,9 +607,34 @@ class NNUEReader:
 
         layer_bias = bias.to(torch.float32)
         # Strip padding.
-        layer_weight = weight[: non_padded_shape[0], : non_padded_shape[1]].to(torch.float32)
+        layer_weight = weight[
+            : non_padded_shape[0], : non_padded_shape[1]
+        ].to(torch.float32)
 
         layer_bias_t.data.copy_(layer_bias)
+        layer_weight_t.data.copy_(layer_weight)
+
+    def read_fc_bias(self, bias_key: str, shape) -> torch.Tensor:
+        bias = self.tensor(np.int32, shape)
+        bias = bias.divide(self.model.quantization.weight_scales_dict[bias_key])
+        return bias.to(torch.float32)
+
+    def read_fc_weight(
+        self, layer_weight_t: torch.Tensor, layer_key: str
+    ) -> None:
+        non_padded_shape = layer_weight_t.shape
+        padded_shape = (
+            non_padded_shape[0],
+            ((non_padded_shape[1] + 31) // 32) * 32,
+        )
+        weight = self.tensor(np.int8, padded_shape)
+        weight_key = f"{layer_key}_weight"
+        weight = weight.divide(
+            self.model.quantization.weight_scales_dict[weight_key]
+        )
+        layer_weight = weight[
+            : non_padded_shape[0], : non_padded_shape[1]
+        ].to(torch.float32)
         layer_weight_t.data.copy_(layer_weight)
 
     def read_int32(self, expected: int | None = None) -> int:

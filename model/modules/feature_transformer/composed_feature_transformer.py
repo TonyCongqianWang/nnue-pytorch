@@ -15,15 +15,15 @@ class ComposedFeatureTransformer(nn.Module):
     bias and delegates everything else to the underlying features.
     """
 
-    def __init__(self, feature_classes: list[Callable[[int], InputFeature]], l1_size: int, num_psqt_buckets:int, quantization: QuantizationManager):
+    def __init__(self, feature_classes: list[Callable[[int], InputFeature]], l1_size: int, residual_dim: int, quantization: QuantizationManager):
         super().__init__()
 
         if not l1_size % 2 == 0:
             raise ValueError(f"l1_size must be even, got {l1_size}.")
 
         self.l1_size = l1_size
-        self.num_psqt_buckets = num_psqt_buckets
-        self.num_outputs = l1_size + num_psqt_buckets
+        self.residual_dim = residual_dim
+        self.num_outputs = l1_size + residual_dim
 
         features = [fc(self.num_outputs) for fc in feature_classes]
         self.features = nn.ModuleList(features)
@@ -64,13 +64,13 @@ class ComposedFeatureTransformer(nn.Module):
     ):
         merged = torch.cat([f.merged_weight() for f in self.features], dim=0)
         b = self.bias[:self.l1_size]
+        pb = self.bias[self.l1_size:]
         if fake_quantize_weights:
             w  = self.quantization.fake_quantize_weights(merged[:, :self.l1_size], "ft_weight")
-            pw = self.quantization.fake_quantize_weights(merged[:, self.l1_size:], "ft_psqt_weight")
+            pw = self.quantization.fake_quantize_weights(merged[:, self.l1_size:], "ft_weight")
             merged = torch.cat([w, pw], dim=1)
             b = self.quantization.fake_quantize_weights(b, "ft_bias")
-        # Technically unnecessary to zero bias, but it makes it clearer that the PSQT part of the bias is not used.
-        pb = torch.zeros_like(self.bias[self.l1_size:], dtype=b.dtype)
+            pb = self.quantization.fake_quantize_weights(pb, "ft_bias")
         bias = torch.cat([b, pb], dim=0)
 
         return merged, bias
@@ -87,13 +87,13 @@ class ComposedFeatureTransformer(nn.Module):
 
     @torch.no_grad()
     def init_weights(self) -> None:
-        num_psqt_buckets = self.num_psqt_buckets
+        residual_dim = self.residual_dim
         for f in self.features:
-            f.init_weights(num_psqt_buckets, self.quantization.nnue2score)
+            f.init_weights(residual_dim, self.quantization.nnue2score)
 
-        L1 = self.num_outputs - num_psqt_buckets
-        for i in range(num_psqt_buckets):
-            self.bias[L1 + i] = 0.0
+        L1 = self.num_outputs - residual_dim
+        # Initialize skip path biases using Truncated Normal
+        torch.nn.init.trunc_normal_(self.bias[L1:], mean=0.0, std=0.02)
 
     @torch.no_grad()
     def get_export_weights(self) -> torch.Tensor:
@@ -120,14 +120,14 @@ class ComposedFeatureTransformer(nn.Module):
         psqt_indices: torch.Tensor,
         fake_quantize_acts: bool,
         fake_quantize_weights: bool,
-        backend: str = "auto",
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        backend: str = "torch",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         merged, bias = self.merged_weight_and_bias(
             fake_quantize_weights
         )
         ft_max_act = self.quantization.max_ft_activation
 
-        l0_, wpsqt, bpsqt = double_feature_transform(
+        l0_, residual_l0 = double_feature_transform(
             us,
             them,
             white_indices,
@@ -148,4 +148,4 @@ class ComposedFeatureTransformer(nn.Module):
         # not equal 1.0 will lead to diverging discrete grids
         l0_ = l0_ * self.quantization.l0_correction_factor
 
-        return l0_, wpsqt, bpsqt
+        return l0_, residual_l0

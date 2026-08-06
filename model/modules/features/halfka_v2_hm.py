@@ -78,27 +78,16 @@ class HalfKav2Hm(InputFeature):
         self.virtual_weight.zero_()
 
     @torch.no_grad()
-    def init_weights(self, num_psqt_buckets: int, nnue2score: float) -> None:
-        """Initialize virtual weights to zero and set PSQT columns."""
+    def init_weights(self, residual_dim: int, nnue2score: float) -> None:
+        """Initialize virtual weights to zero and set residual columns using Truncated Normal."""
         self.zero_virtual_weights()
 
-        scale = 1.0 / nnue2score
-        L1 = self.num_outputs - num_psqt_buckets
+        L1 = self.num_outputs - residual_dim
+        # Initialize standard L1 weights uniformly
+        self.weight[:, :L1].uniform_(-0.01, 0.01)
 
-        initial_values = self.halfka_psqts()
-        assert len(initial_values) == self.NUM_INPUTS
-
-        new_weights = (
-            torch.tensor(
-                initial_values,
-                device=self.weight.device,
-                dtype=self.weight.dtype,
-            )
-            * scale
-        )
-
-        for i in range(num_psqt_buckets):
-            self.weight[:, L1 + i] = new_weights
+        # Initialize residual skip-path weights using Truncated Normal
+        torch.nn.init.trunc_normal_(self.weight[:, L1:], mean=0.0, std=0.02)
 
     @torch.no_grad()
     def get_export_weights(self) -> torch.Tensor:

@@ -541,7 +541,7 @@ def eval_ft(model: NNUEModel, batch: Iterable[torch.Tensor], device_str: str) ->
             piece_count,
         ) = batch_tuple
         psqt_indices, _  = model.calculate_buckets(piece_count)
-        l0_, wpsqt, bpsqt = model.forward_ft(
+        l0_, residual_l0 = model.forward_ft(
             us,
             them,
             white_indices,
@@ -550,14 +550,14 @@ def eval_ft(model: NNUEModel, batch: Iterable[torch.Tensor], device_str: str) ->
             fake_quantize_acts=True,
             fake_quantize_weights=True,
         )
-        _, _ = wpsqt, bpsqt
+        _, _ = residual_l0, None
         return l0_
 
 @torch.no_grad()
 def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     permutation = list(perm)
 
-    l1_size = model.layer_stacks.l1.linear.in_features
+    l1_size = model.layer_stacks.l1_to_skip.linear.in_features
     if l1_size != len(permutation) * 2:
         raise ValueError(
             f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
@@ -573,7 +573,7 @@ def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     for f in model.input.features:
         f.weight.copy_(f.weight[:, ft_permutation])
     model.input.bias.copy_(model.input.bias[ft_permutation])
-    model.layer_stacks.l1.linear.weight.copy_(model.layer_stacks.l1.linear.weight[
+    model.layer_stacks.l1_to_skip.linear.weight.copy_(model.layer_stacks.l1_to_skip.linear.weight[
         :, permutation
     ])
 

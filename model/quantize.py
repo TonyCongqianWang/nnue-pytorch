@@ -58,20 +58,21 @@ def _fake_quantize_weights(value, weight_scale):
 @dataclass
 class QuantizationConfig:
     nnue2score: float = 600.0
-    weight_scale_l1: float = 128.0
-    weight_scale_block_up: float = 256.0
-    weight_scale_block_down: float = 128.0
-    weight_scale_out: float = 16.0
+    score_scale: float = 16.0
+    weight_scale_l1: float = 64.0
+    weight_scale_block_up: float = 128.0
+    weight_scale_block_down: float = 64.0
+    weight_scale_out: float = 128.0
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
     ft_quantized_max: float = 255.0 # limited to 255 for safe squaring within i16
     expanded_quantized_one: float = 128.0
     expanded_quantized_max: float = 127.0 # i8 max
-    res_quantized_one: float = 256.0
+    res_quantized_one: float = 128.0
     res_quantized_max: float = 32767.0 # i16 max
 
     # used to calculate correction factors
-    inference_l0_division_factor: float = 256.0
+    inference_l0_division_factor: float = 512.0
     inference_l1_division_factor: float = 128.0
     inference_sqr_crelu_division_factor: float = 128.0
 
@@ -80,6 +81,7 @@ class QuantizationManager:
     def __init__(self, config: QuantizationConfig):
         self.config = config
         self.nnue2score = config.nnue2score
+        self.score_scale = config.score_scale
         self.weight_scale_l1 = config.weight_scale_l1
         self.weight_scale_block_up = config.weight_scale_block_up
         self.weight_scale_block_down = config.weight_scale_block_down
@@ -104,11 +106,11 @@ class QuantizationManager:
         self.weight_scales_dict = {
             "ft_weight" : self.ft_quantized_one,
             "ft_bias" : self.ft_quantized_one,
-            "ft_psqt_weight" : self.nnue2score * self.weight_scale_out,
+            "ft_psqt_weight" : self.nnue2score * self.score_scale,
             "ls_l1_weight" : config.weight_scale_l1,
             "ls_l1_bias" : l1_out_scale,
-            "ls_output_weight" : config.weight_scale_out,
-            "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
+            "ls_output_weight" : config.score_scale,
+            "ls_output_bias" : config.score_scale * config.res_quantized_one,
         }
 
     def get_weight_scale(self, key: str) -> float:
@@ -155,7 +157,7 @@ class QuantizationManager:
         return preact
 
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
-        multiplier_int = int(self.config.nnue2score * self.config.weight_scale_out)
+        multiplier_int = int(self.config.nnue2score * self.config.score_scale)
         denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_out)
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)
@@ -180,7 +182,7 @@ class QuantizationManager:
         max_l1_w = self.weight_quantized_max_hidden / self.config.weight_scale_l1
         max_up_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_up
         max_down_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_down
-        max_out_w = self.weight_quantized_max_hidden / self.config.weight_scale_out
+        max_out_w = self.weight_quantized_max_hidden / self.config.score_scale
 
         configs: list[WeightClippingConfig] = [
             {

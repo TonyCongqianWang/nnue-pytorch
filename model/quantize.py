@@ -266,8 +266,8 @@ class QuantizationManager:
         weight_key = f"{layer_key}_weight"
         bias_key = f"{layer_key}_bias"
 
-        bias = _safe_convert(bias.mul(self.weight_scales_dict[bias_key]), torch.int32)
-        weight = _safe_convert(weight.mul(self.weight_scales_dict[weight_key]), torch.int8)
+        bias = _safe_convert(bias.mul(self.get_weight_scale(bias_key)), torch.int32)
+        weight = _safe_convert(weight.mul(self.get_weight_scale(weight_key)), torch.int8)
 
         if callback is not None:
             callback(bias_key, bias)
@@ -284,8 +284,8 @@ class QuantizationManager:
         weight_key = f"{layer_key}_weight"
         bias_key = f"{layer_key}_bias"
 
-        bias = bias.divide(self.weight_scales_dict[bias_key])
-        weight = weight.divide(self.weight_scales_dict[weight_key])
+        bias = bias.divide(self.get_weight_scale(bias_key))
+        weight = weight.divide(self.get_weight_scale(weight_key))
 
         return bias, weight
 
@@ -296,7 +296,7 @@ class QuantizationManager:
         callback: Callable | None = None,
     ) -> torch.Tensor:
         bias_key = f"{layer_key}_bias"
-        bias = _safe_convert(bias.mul(self.weight_scales_dict[bias_key]), torch.int32)
+        bias = _safe_convert(bias.mul(self.get_weight_scale(bias_key)), torch.int32)
 
         if callback is not None:
             callback(bias_key, bias)
@@ -309,5 +309,5 @@ class QuantizationManager:
         layer_key: str,
     ) -> torch.Tensor:
         bias_key = f"{layer_key}_bias"
-        return bias.divide(self.weight_scales_dict[bias_key])
+        return bias.divide(self.get_weight_scale(bias_key))
 

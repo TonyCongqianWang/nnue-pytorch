@@ -12,15 +12,21 @@ from .features import (
     get_available_features,
     get_feature_cls,
 )
+from .inverted_bottleneck_block import (
+    FinalInvertedBottleneckBlock,
+    InvertedBottleneckBlock,
+)
 from .layer_stacks import LayerStacks
 
 __all__ = [
     "ComposedFeatureTransformer",
     "DualActivation",
     "FeatureConfig",
+    "FinalInvertedBottleneckBlock",
     "FullThreats",
     "HalfKav2Hm",
     "InputFeature",
+    "InvertedBottleneckBlock",
     "LayerStacks",
     "LayerStacksConfig",
     "add_feature_args",

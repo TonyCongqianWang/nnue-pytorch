@@ -139,45 +139,41 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
                 if hasattr(f, "virtual_weight"):
                     f.virtual_weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
 
-        # 1. l1_to_skip_a and l1_to_skip_b layers
-        hw = q.max_hidden_weight[0] * overshoot
+        # 1. Layer Stacks weights initialization
+        hw_l1 = (q.weight_quantized_max_hidden / q.weight_scale_l1) * overshoot
+        hw_up = (q.weight_quantized_max_hidden / q.weight_scale_block_up) * overshoot
+        hw_down = (q.weight_quantized_max_hidden / q.weight_scale_block_down) * overshoot
+        hw_out = (q.weight_quantized_max_hidden / q.weight_scale_out) * overshoot
+
         if fill_value is not None:
-            model.layer_stacks.l1_to_skip_a.linear.weight.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
-            model.layer_stacks.l1_to_skip_a.linear.bias.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
-            model.layer_stacks.l1_to_skip_b.linear.weight.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
-            model.layer_stacks.l1_to_skip_b.linear.bias.data.fill_(fill_value * hw / abs(fill_value) if fill_value != 0 else 0.0)
+            fill_val = fill_value * hw_l1 / abs(fill_value) if fill_value != 0 else 0.0
+            model.layer_stacks.l1.linear.weight.data.fill_(fill_val)
+            model.layer_stacks.l1.linear.bias.data.fill_(fill_val)
+            for block in model.layer_stacks.blocks:
+                block.up.linear.weight.data.fill_(fill_val)
+                block.up.linear.bias.data.fill_(fill_val)
+                block.act.sqr_bias.data.fill_(fill_val)
+                block.down.linear.weight.data.fill_(fill_val)
+                block.down.linear.bias.data.fill_(fill_val)
+            model.layer_stacks.final_block.up.linear.weight.data.fill_(fill_val)
+            model.layer_stacks.final_block.up.linear.bias.data.fill_(fill_val)
+            model.layer_stacks.final_block.act.sqr_bias.data.fill_(fill_val)
+            model.layer_stacks.final_block.output.linear.weight.data.fill_(fill_val)
+            model.layer_stacks.final_block.output.linear.bias.data.fill_(fill_val)
         else:
-            model.layer_stacks.l1_to_skip_a.linear.weight.data.uniform_(-hw, hw, generator=rng)
-            model.layer_stacks.l1_to_skip_a.linear.bias.data.uniform_(-hw, hw, generator=rng)
-            model.layer_stacks.l1_to_skip_b.linear.weight.data.uniform_(-hw, hw, generator=rng)
-            model.layer_stacks.l1_to_skip_b.linear.bias.data.uniform_(-hw, hw, generator=rng)
-
-        # 2. Block layers
-        for block in model.layer_stacks.blocks:
-            hw_up = q.max_hidden_weight[0] * overshoot
-            hw_down = q.max_hidden_weight[1] * overshoot
-            hw_final = q.max_hidden_weight[2] * overshoot
-
-            if fill_value is not None:
-                block.fc_up.linear.weight.data.fill_(fill_value * hw_up / abs(fill_value) if fill_value != 0 else 0.0)
-                block.bias_crelu.data.fill_(fill_value * hw_up)
-                block.bias_sqr.data.fill_(fill_value * hw_up)
-                if not block.is_final:
-                    block.fc_down.linear.weight.data.fill_(fill_value * hw_down / abs(fill_value) if fill_value != 0 else 0.0)
-                    block.fc_down.linear.bias.data.fill_(fill_value * hw_down / abs(fill_value) if fill_value != 0 else 0.0)
-                else:
-                    block.fc_final.linear.weight.data.fill_(fill_value * hw_final / abs(fill_value) if fill_value != 0 else 0.0)
-                    block.fc_final.linear.bias.data.fill_(fill_value * hw_final / abs(fill_value) if fill_value != 0 else 0.0)
-            else:
-                block.fc_up.linear.weight.data.uniform_(-hw_up, hw_up, generator=rng)
-                block.bias_crelu.data.uniform_(-hw_up, hw_up, generator=rng)
-                block.bias_sqr.data.uniform_(-hw_up, hw_up, generator=rng)
-                if not block.is_final:
-                    block.fc_down.linear.weight.data.uniform_(-hw_down, hw_down, generator=rng)
-                    block.fc_down.linear.bias.data.uniform_(-hw_down, hw_down, generator=rng)
-                else:
-                    block.fc_final.linear.weight.data.uniform_(-hw_final, hw_final, generator=rng)
-                    block.fc_final.linear.bias.data.uniform_(-hw_final, hw_final, generator=rng)
+            model.layer_stacks.l1.linear.weight.data.uniform_(-hw_l1, hw_l1, generator=rng)
+            model.layer_stacks.l1.linear.bias.data.uniform_(-hw_l1, hw_l1, generator=rng)
+            for block in model.layer_stacks.blocks:
+                block.up.linear.weight.data.uniform_(-hw_up, hw_up, generator=rng)
+                block.up.linear.bias.data.uniform_(-hw_up, hw_up, generator=rng)
+                block.act.sqr_bias.data.uniform_(-hw_up, hw_up, generator=rng)
+                block.down.linear.weight.data.uniform_(-hw_down, hw_down, generator=rng)
+                block.down.linear.bias.data.uniform_(-hw_down, hw_down, generator=rng)
+            model.layer_stacks.final_block.up.linear.weight.data.uniform_(-hw_up, hw_up, generator=rng)
+            model.layer_stacks.final_block.up.linear.bias.data.uniform_(-hw_up, hw_up, generator=rng)
+            model.layer_stacks.final_block.act.sqr_bias.data.uniform_(-hw_up, hw_up, generator=rng)
+            model.layer_stacks.final_block.output.linear.weight.data.uniform_(-hw_out, hw_out, generator=rng)
+            model.layer_stacks.final_block.output.linear.bias.data.uniform_(-hw_out, hw_out, generator=rng)
 
     # clip_weights enforces all bounds.  If the clipping logic is wrong,
     # NNUEWriter._safe_convert will raise RuntimeError and the test fails cleanly.

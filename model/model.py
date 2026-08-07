@@ -18,8 +18,9 @@ class NNUEModel(nn.Module):
 
         feature_cls = get_feature_cls(feature_name)
         self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
+        self.res_dim = config.res_dim
+        self.expanded_dim = config.expanded_dim
+        self.num_blocks = config.num_blocks
 
         self.quantize_config = config.quantize_config
         self.quantization = QuantizationManager(config.quantize_config)

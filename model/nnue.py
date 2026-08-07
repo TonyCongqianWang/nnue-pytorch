@@ -136,7 +136,7 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Dense Layer Stacks
+            # Dense Layer Stacks - l1
             {
                 "params": [self.model.layer_stacks.l1.factorized_linear.weight],
                 "lr": LRs[2],
@@ -153,37 +153,63 @@ class NNUE(nn.Module):
                 "weight_decay": dense_wd,
             },
             {
-                "params": [
-                    self.model.layer_stacks.l1.linear.bias,
-                    self.model.layer_stacks.act1.sqr_bias,
-                ],
+                "params": [self.model.layer_stacks.l1.linear.bias],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
+        ]
+
+        # Intermediate blocks
+        for block in self.model.layer_stacks.blocks:
+            train_params.extend([
+                {
+                    "params": [block.up.linear.weight],
+                    "lr": LRs[6],
+                    "weight_decay": dense_wd,
+                },
+                {
+                    "params": [block.up.linear.bias, block.act.sqr_bias],
+                    "lr": LRs[7],
+                    "weight_decay": 0.0,
+                },
+                {
+                    "params": [block.down.linear.weight],
+                    "lr": LRs[6],
+                    "weight_decay": dense_wd,
+                },
+                {
+                    "params": [block.down.linear.bias],
+                    "lr": LRs[7],
+                    "weight_decay": 0.0,
+                },
+            ])
+
+        # Final block components & output
+        train_params.extend([
             {
-                "params": [self.model.layer_stacks.l2.linear.weight],
+                "params": [self.model.layer_stacks.final_block.up.linear.weight],
                 "lr": LRs[6],
                 "weight_decay": dense_wd,
             },
             {
                 "params": [
-                    self.model.layer_stacks.l2.linear.bias,
-                    self.model.layer_stacks.act2.sqr_bias,
+                    self.model.layer_stacks.final_block.up.linear.bias,
+                    self.model.layer_stacks.final_block.act.sqr_bias,
                 ],
                 "lr": LRs[7],
                 "weight_decay": 0.0,
             },
             {
-                "params": [self.model.layer_stacks.output.linear.weight],
+                "params": [self.model.layer_stacks.final_block.output.linear.weight],
                 "lr": LRs[8],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.output.linear.bias],
+                "params": [self.model.layer_stacks.final_block.output.linear.bias],
                 "lr": LRs[9],
                 "weight_decay": 0.0,
             },
-        ]
+        ])
 
         return self.optimizer_wrapper.configure_optimizers(train_params)
 

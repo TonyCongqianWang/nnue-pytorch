@@ -153,7 +153,10 @@ class NNUE(nn.Module):
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.linear.bias],
+                "params": [
+                    self.model.layer_stacks.l1.linear.bias,
+                    self.model.layer_stacks.act1.sqr_bias,
+                ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
@@ -163,7 +166,10 @@ class NNUE(nn.Module):
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l2.linear.bias],
+                "params": [
+                    self.model.layer_stacks.l2.linear.bias,
+                    self.model.layer_stacks.act2.sqr_bias,
+                ],
                 "lr": LRs[7],
                 "weight_decay": 0.0,
             },

@@ -71,7 +71,8 @@ class QuantizationConfig:
     res_quantized_max: float = 32767.0 # i16 max
 
     # used to calculate correction factors
-    inference_l0_division_factor: float = 512.0
+    inference_l0_division_factor: float = 256.0
+    inference_l1_division_factor: float = 128.0
     inference_sqr_crelu_division_factor: float = 128.0
 
 
@@ -93,6 +94,8 @@ class QuantizationManager:
         self.max_threat_weight = _i8.max / config.ft_quantized_one  # 127/256
 
         self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.res_quantized_one
+        l1_out_scale = config.weight_scale_l1 * (config.ft_quantized_one ** 2 / config.inference_l0_division_factor)
+        self.l1_correction_factor = l1_out_scale / (config.inference_l1_division_factor * self.res_quantized_one)
         self.sqr_crelu_correction_factor = config.expanded_quantized_one / config.inference_sqr_crelu_division_factor
         self.max_ft_activation = config.ft_quantized_max / config.ft_quantized_one
         self.max_expanded_activation = config.expanded_quantized_max / config.expanded_quantized_one
@@ -103,7 +106,7 @@ class QuantizationManager:
             "ft_bias" : self.ft_quantized_one,
             "ft_psqt_weight" : self.nnue2score * self.weight_scale_out,
             "ls_l1_weight" : config.weight_scale_l1,
-            "ls_l1_bias" : config.weight_scale_l1 * config.res_quantized_one * self.l0_correction_factor,
+            "ls_l1_bias" : l1_out_scale,
             "ls_output_weight" : config.weight_scale_out,
             "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
         }
@@ -134,7 +137,7 @@ class QuantizationManager:
         return self.clip_expanded_act(preact)
 
     def fake_quantize_ft_act(self, preact):
-        act_scale = self.config.expanded_quantized_one
+        act_scale = self.config.ft_quantized_one
         return _fake_quantize_acts(preact, act_scale)
 
     def fake_quantize_expanded_act(self, preact):
@@ -310,4 +313,3 @@ class QuantizationManager:
     ) -> torch.Tensor:
         bias_key = f"{layer_key}_bias"
         return bias.divide(self.get_weight_scale(bias_key))
-

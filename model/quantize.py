@@ -153,7 +153,7 @@ class QuantizationManager:
 
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
         multiplier_int = int(self.config.nnue2score * self.config.weight_scale_out)
-        denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_block_down)
+        denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_out)
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)
 

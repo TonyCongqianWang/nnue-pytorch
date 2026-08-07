@@ -26,14 +26,14 @@ class DualActivation(nn.Module):
     ) -> torch.Tensor:
         sqr_act = torch.pow(x + self.sqr_bias, 2.0)
         if fake_quantize_acts:
-            sqr_act = self.quantization.fake_quantize_ls_act(sqr_act)
+            sqr_act = self.quantization.fake_quantize_expanded_act(sqr_act)
 
         sqr_act = sqr_act * self.quantization.sqr_crelu_correction_factor
 
         linear_act = x
         if fake_quantize_acts:
-            linear_act = self.quantization.fake_quantize_ls_act(linear_act)
+            linear_act = self.quantization.fake_quantize_expanded_act(linear_act)
 
         out = torch.cat([sqr_act, linear_act], dim=1)
-        out = self.quantization.clip_ls_act(out)
+        out = self.quantization.clip_expanded_act(out)
         return out

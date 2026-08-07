@@ -103,7 +103,7 @@ class QuantizationManager:
             "ft_bias" : self.ft_quantized_one,
             "ft_psqt_weight" : self.nnue2score * self.weight_scale_out,
             "ls_l1_weight" : config.weight_scale_l1,
-            "ls_l1_bias" : config.weight_scale_l1 * config.res_quantized_one,
+            "ls_l1_bias" : config.weight_scale_l1 * config.res_quantized_one * self.l0_correction_factor,
             "ls_output_weight" : config.weight_scale_out,
             "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
         }

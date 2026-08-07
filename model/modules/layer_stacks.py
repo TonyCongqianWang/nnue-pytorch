@@ -55,12 +55,7 @@ class LayerStacks(nn.Module):
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights)
-
-        # Extract short-path skip connection before quantization
-        l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-
-        res_stream = l1c_
+        res_stream = self.l1(x, ls_indices, fake_quantize_weights)
 
         # Process intermediate blocks
         for block in self.blocks:
@@ -88,10 +83,7 @@ class LayerStacks(nn.Module):
             fake_quantize_weights=fake_quantize_weights,
         )
 
-        if fake_quantize_acts:
-            l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
-
-        l3x_ = l3c_ + l1x_out
+        l3x_ = l3c_
         if fake_quantize_acts:
             l3x_ = self.quantization.fake_quantize_output(l3x_)
 

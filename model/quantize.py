@@ -117,11 +117,11 @@ class QuantizationManager:
         if key.endswith("_up_weight"):
             return self.config.weight_scale_block_up
         if key.endswith("_up_bias"):
-            return self.config.weight_scale_block_up * self.config.expanded_quantized_one
+            return self.config.weight_scale_block_up * self.config.res_quantized_one
         if key.endswith("_down_weight"):
             return self.config.weight_scale_block_down
         if key.endswith("_down_bias"):
-            return self.config.weight_scale_block_down * self.config.res_quantized_one
+            return self.config.weight_scale_block_down * self.config.expanded_quantized_one
         raise KeyError(f"Unknown quantization key: {key}")
 
     def clip_ft_act(self, preact):

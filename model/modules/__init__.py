@@ -1,4 +1,5 @@
 from .config import LayerStacksConfig
+from .dual_activation import DualActivation
 from .feature_transformer import (
     ComposedFeatureTransformer,
 )
@@ -15,6 +16,7 @@ from .layer_stacks import LayerStacks
 
 __all__ = [
     "ComposedFeatureTransformer",
+    "DualActivation",
     "FeatureConfig",
     "FullThreats",
     "HalfKav2Hm",
@@ -25,3 +27,4 @@ __all__ = [
     "get_available_features",
     "get_feature_cls",
 ]
+

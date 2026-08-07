@@ -55,6 +55,8 @@ class InvertedBottleneckBlock(nn.Module):
         down_out = self.down(
             act_out, ls_indices, fake_quantize_weights=fake_quantize_weights
         )
+        if fake_quantize_acts:
+            down_out = self.quantization.fake_quantize_res_act(down_out)
         return down_out
 
 

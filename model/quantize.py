@@ -7,7 +7,7 @@ import torch
 if TYPE_CHECKING:
     from .model import NNUEModel
 
-FAKE_QUANTIZE_EPS = 1e-5
+FAKE_QUANTIZE_EPS = 1e-2
 
 class WeightClippingConfig(TypedDict):
     params: list[torch.Tensor]
@@ -109,8 +109,8 @@ class QuantizationManager:
             "ft_psqt_weight" : self.nnue2score * self.score_scale,
             "ls_l1_weight" : config.weight_scale_l1,
             "ls_l1_bias" : l1_out_scale,
-            "ls_output_weight" : config.score_scale,
-            "ls_output_bias" : config.score_scale * config.res_quantized_one,
+            "ls_output_weight" : config.weight_scale_out,
+            "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
         }
 
     def get_weight_scale(self, key: str) -> float:
@@ -182,7 +182,7 @@ class QuantizationManager:
         max_l1_w = self.weight_quantized_max_hidden / self.config.weight_scale_l1
         max_up_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_up
         max_down_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_down
-        max_out_w = self.weight_quantized_max_hidden / self.config.score_scale
+        max_out_w = self.weight_quantized_max_hidden / self.config.weight_scale_out
 
         configs: list[WeightClippingConfig] = [
             {

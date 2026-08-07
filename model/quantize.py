@@ -71,7 +71,7 @@ class QuantizationConfig:
     res_quantized_max: float = 32767.0 # i16 max
 
     # used to calculate correction factors
-    inference_l0_division_factor: float = 256.0
+    inference_l0_division_factor: float = 512.0
     inference_sqr_crelu_division_factor: float = 128.0
 
 

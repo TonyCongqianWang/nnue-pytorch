@@ -13,18 +13,31 @@ class DualActivation(nn.Module):
     both activation branches can have independent biases.
     """
 
-    def __init__(self, num_features: int, quantization: QuantizationManager):
+    def __init__(
+        self,
+        num_features: int,
+        quantization: QuantizationManager,
+        layer_key: str | None = None,
+    ):
         super().__init__()
         self.num_features = num_features
         self.quantization = quantization
+        self.layer_key = layer_key
         self.sqr_bias = nn.Parameter(torch.zeros(num_features))
 
     def forward(
         self,
         x: torch.Tensor,
         fake_quantize_acts: bool = True,
+        fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
-        sqr_act = torch.pow(x + self.sqr_bias, 2.0)
+        sqr_bias = self.sqr_bias
+        if fake_quantize_weights and self.layer_key is not None:
+            sqr_bias = self.quantization.fake_quantize_weights(
+                sqr_bias, f"{self.layer_key}_bias"
+            )
+
+        sqr_act = torch.pow(x + sqr_bias, 2.0)
         if fake_quantize_acts:
             sqr_act = self.quantization.fake_quantize_expanded_act(sqr_act)
 

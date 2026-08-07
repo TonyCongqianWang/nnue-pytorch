@@ -66,14 +66,14 @@ class QuantizationConfig:
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
     ft_quantized_max: float = 255.0 # limited to 255 for safe squaring within i16
-    expanded_quantized_one: float = 128.0
-    expanded_quantized_max: float = 127.0 # i8 max
     res_quantized_one: float = 128.0
     res_quantized_max: float = 32767.0 # i16 max
+    expanded_quantized_one: float = 128.0
+    expanded_quantized_max: float = 127.0 # i8 max
 
     # used to calculate correction factors
     inference_l0_division_factor: float = 512.0
-    inference_l1_division_factor: float = 128.0
+    inference_l1_division_factor: float = 64.0
     inference_sqr_crelu_division_factor: float = 128.0
 
 

@@ -247,3 +247,26 @@ class QuantizationManager:
         weight = weight.divide(self.weight_scales_dict[weight_key])
 
         return bias, weight
+
+    def quantize_bias(
+        self,
+        bias: torch.Tensor,
+        layer_key: str,
+        callback: Callable | None = None,
+    ) -> torch.Tensor:
+        bias_key = f"{layer_key}_bias"
+        bias = _safe_convert(bias.mul(self.weight_scales_dict[bias_key]), torch.int32)
+
+        if callback is not None:
+            callback(bias_key, bias)
+
+        return bias
+
+    def dequantize_bias(
+        self,
+        bias: torch.Tensor,
+        layer_key: str,
+    ) -> torch.Tensor:
+        bias_key = f"{layer_key}_bias"
+        return bias.divide(self.weight_scales_dict[bias_key])
+

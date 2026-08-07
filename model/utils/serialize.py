@@ -125,7 +125,9 @@ class NNUEWriter:
         for bucket, (l1, l2, output) in enumerate(layer_stacks.get_coalesced_layer_stacks()):
             self.int32(fc_hash)  # FC layers hash
             self.write_fc_layer(model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}")
+            self.write_dual_act_bias(model, layer_stacks.act1.sqr_bias, layer_stacks.l1.layer_key, f"bucket {bucket} act1_sqr_bias")
             self.write_fc_layer(model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}")
+            self.write_dual_act_bias(model, layer_stacks.act2.sqr_bias, layer_stacks.l2.layer_key, f"bucket {bucket} act2_sqr_bias")
             self.write_fc_layer(model, output, layer_stacks.output.layer_key, f"bucket {bucket}")
 
     @staticmethod
@@ -240,6 +242,21 @@ class NNUEWriter:
         # Weights stored as [outputs][inputs], so we can flatten
         self.write_tensor(weight, "none")
 
+    def write_dual_act_bias(
+        self,
+        model: NNUEModel,
+        sqr_bias: torch.Tensor,
+        layer_key: str | None,
+        desc: str,
+    ) -> None:
+        if layer_key is None:
+            raise RuntimeError("layer_key required for quantization.")
+
+        bias = model.quantization.quantize_bias(
+            sqr_bias, layer_key, get_histogram_callback(desc, self.verbose)
+        )
+        self.write_tensor(bias, "none")
+
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v))
 
@@ -282,12 +299,23 @@ class NNUEReader:
 
         for b in range(num_ls_buckets):
             self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                self.read_fc_layer(
-                    l_w_slices[layer_idx][b],
-                    l_b_slices[layer_idx][b],
-                    layers[layer_idx].layer_key,
-                )
+            self.read_fc_layer(
+                l_w_slices[0][b],
+                l_b_slices[0][b],
+                layers[0].layer_key,
+            )
+            self.read_dual_act_bias(self.model.layer_stacks.act1.sqr_bias, layers[0].layer_key)
+            self.read_fc_layer(
+                l_w_slices[1][b],
+                l_b_slices[1][b],
+                layers[1].layer_key,
+            )
+            self.read_dual_act_bias(self.model.layer_stacks.act2.sqr_bias, layers[1].layer_key)
+            self.read_fc_layer(
+                l_w_slices[2][b],
+                l_b_slices[2][b],
+                layers[2].layer_key,
+            )
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
@@ -392,6 +420,15 @@ class NNUEReader:
 
         layer_bias_t.data.copy_(layer_bias)
         layer_weight_t.data.copy_(layer_weight)
+
+    def read_dual_act_bias(
+        self,
+        sqr_bias_t: torch.Tensor,
+        layer_key: str,
+    ) -> None:
+        bias = self.tensor(np.int32, sqr_bias_t.shape)
+        bias = self.model.quantization.dequantize_bias(bias, layer_key)
+        sqr_bias_t.data.copy_(bias.to(torch.float32))
 
     def read_int32(self, expected: int | None = None) -> int:
         v = struct.unpack("<I", self.f.read(4))[0]

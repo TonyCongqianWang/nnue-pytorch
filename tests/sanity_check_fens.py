@@ -139,27 +139,32 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
                 if hasattr(f, "virtual_weight"):
                     f.virtual_weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
 
-        # 1. Layer Stacks weights initialization
-        hw_l1 = (q.weight_quantized_max_hidden / q.weight_scale_l1) * overshoot
-        hw_up = (q.weight_quantized_max_hidden / q.weight_scale_block_up) * overshoot
-        hw_down = (q.weight_quantized_max_hidden / q.weight_scale_block_down) * overshoot
-        hw_out = (q.weight_quantized_max_hidden / q.weight_scale_out) * overshoot
+        # Layer Stacks weight bounds
+        max_l1 = q.weight_quantized_max_hidden / q.weight_scale_l1
+        max_up = q.weight_quantized_max_hidden / q.weight_scale_block_up
+        max_down = q.weight_quantized_max_hidden / q.weight_scale_block_down
+        max_out = q.weight_quantized_max_hidden / q.weight_scale_out
+
+        hw_l1 = max_l1 * overshoot
+        hw_up = max_up * overshoot
+        hw_down = max_down * overshoot
+        hw_out = max_out * overshoot
 
         if fill_value is not None:
-            fill_val = fill_value * hw_l1 / abs(fill_value) if fill_value != 0 else 0.0
-            model.layer_stacks.l1.linear.weight.data.fill_(fill_val)
-            model.layer_stacks.l1.linear.bias.data.fill_(fill_val)
+            sign = 1.0 if fill_value > 0 else -1.0
+            model.layer_stacks.l1.linear.weight.data.fill_(sign * max_l1)
+            model.layer_stacks.l1.linear.bias.data.fill_(sign * max_l1)
             for block in model.layer_stacks.blocks:
-                block.up.linear.weight.data.fill_(fill_val)
-                block.up.linear.bias.data.fill_(fill_val)
-                block.act.sqr_bias.data.fill_(fill_val)
-                block.down.linear.weight.data.fill_(fill_val)
-                block.down.linear.bias.data.fill_(fill_val)
-            model.layer_stacks.final_block.up.linear.weight.data.fill_(fill_val)
-            model.layer_stacks.final_block.up.linear.bias.data.fill_(fill_val)
-            model.layer_stacks.final_block.act.sqr_bias.data.fill_(fill_val)
-            model.layer_stacks.final_block.output.linear.weight.data.fill_(fill_val)
-            model.layer_stacks.final_block.output.linear.bias.data.fill_(fill_val)
+                block.up.linear.weight.data.fill_(sign * max_up)
+                block.up.linear.bias.data.fill_(sign * max_up)
+                block.act.sqr_bias.data.fill_(sign * max_up)
+                block.down.linear.weight.data.fill_(sign * max_down)
+                block.down.linear.bias.data.fill_(sign * max_down)
+            model.layer_stacks.final_block.up.linear.weight.data.fill_(sign * max_up)
+            model.layer_stacks.final_block.up.linear.bias.data.fill_(sign * max_up)
+            model.layer_stacks.final_block.act.sqr_bias.data.fill_(sign * max_up)
+            model.layer_stacks.final_block.output.linear.weight.data.fill_(sign * max_out)
+            model.layer_stacks.final_block.output.linear.bias.data.fill_(sign * max_out)
         else:
             model.layer_stacks.l1.linear.weight.data.uniform_(-hw_l1, hw_l1, generator=rng)
             model.layer_stacks.l1.linear.bias.data.uniform_(-hw_l1, hw_l1, generator=rng)

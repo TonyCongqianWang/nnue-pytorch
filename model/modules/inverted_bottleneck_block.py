@@ -34,7 +34,7 @@ class InvertedBottleneckBlock(nn.Module):
         self.up = StackedLinear(
             res_dim, expanded_dim, count, quantization, f"{layer_prefix}_up"
         )
-        self.act = DualActivation(expanded_dim, quantization)
+        self.act = DualActivation(expanded_dim, quantization, f"{layer_prefix}_up")
         self.down = StackedLinear(
             2 * expanded_dim, res_dim, count, quantization, f"{layer_prefix}_down"
         )
@@ -47,7 +47,11 @@ class InvertedBottleneckBlock(nn.Module):
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
         up_out = self.up(x, ls_indices, fake_quantize_weights=fake_quantize_weights)
-        act_out = self.act(up_out, fake_quantize_acts=fake_quantize_acts)
+        act_out = self.act(
+            up_out,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+        )
         down_out = self.down(
             act_out, ls_indices, fake_quantize_weights=fake_quantize_weights
         )
@@ -82,7 +86,7 @@ class FinalInvertedBottleneckBlock(nn.Module):
         self.up = StackedLinear(
             res_dim, expanded_dim, count, quantization, f"{layer_prefix}_up"
         )
-        self.act = DualActivation(expanded_dim, quantization)
+        self.act = DualActivation(expanded_dim, quantization, f"{layer_prefix}_up")
         self.output = StackedLinear(
             res_dim + 2 * expanded_dim,
             1,
@@ -102,7 +106,11 @@ class FinalInvertedBottleneckBlock(nn.Module):
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
         up_out = self.up(res_stream, ls_indices, fake_quantize_weights=fake_quantize_weights)
-        act_out = self.act(up_out, fake_quantize_acts=fake_quantize_acts)
+        act_out = self.act(
+            up_out,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+        )
 
         fused_input = torch.cat([res_stream, act_out], dim=1)
         l3c_ = self.output(fused_input, ls_indices, fake_quantize_weights=fake_quantize_weights)

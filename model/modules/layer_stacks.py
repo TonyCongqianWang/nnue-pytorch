@@ -55,7 +55,7 @@ class LayerStacks(nn.Module):
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
-        res_stream = self.l1(x, ls_indices, fake_quantize_weights)
+        res_stream = self.l1(x, ls_indices, fake_quantize_weights) * self.quantization.l1_correction_factor
 
         # Process intermediate blocks
         for block in self.blocks:

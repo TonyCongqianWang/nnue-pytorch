@@ -7,7 +7,7 @@ import torch
 if TYPE_CHECKING:
     from .model import NNUEModel
 
-FAKE_QUANTIZE_EPS = 1e-2
+FAKE_QUANTIZE_EPS = 1e-8
 
 class WeightClippingConfig(TypedDict):
     params: list[torch.Tensor]
@@ -139,7 +139,12 @@ class QuantizationManager:
         return self.clip_expanded_act(preact)
 
     def fake_quantize_ft_act(self, preact):
-        act_scale = self.config.ft_quantized_one
+        # DO NOT USE `ft_quantized_one` here!
+        # `ft_quantized_one` is for weights and preactivation.
+        # Preactivations are sum of weights so no need to quantize.
+        # Activations are already scaled by `self.config.inference_l0_division_factor`.
+        # Thus here we need `res_quantized_one`
+        act_scale = self.config.res_quantized_one
         return _fake_quantize_acts(preact, act_scale)
 
     def fake_quantize_expanded_act(self, preact):

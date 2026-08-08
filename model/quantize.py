@@ -7,7 +7,7 @@ import torch
 if TYPE_CHECKING:
     from .model import NNUEModel
 
-FAKE_QUANTIZE_EPS = 1e-5
+FAKE_QUANTIZE_EPS = 1e-8
 
 class WeightClippingConfig(TypedDict):
     params: list[torch.Tensor]
@@ -58,18 +58,22 @@ def _fake_quantize_weights(value, weight_scale):
 @dataclass
 class QuantizationConfig:
     nnue2score: float = 600.0
-    weight_scale_l1: float = 128.0
-    weight_scale_l2: float = 64.0
-    weight_scale_l_out: float = 128
-    weight_scale_out: float = 16.0
+    score_scale: float = 16.0
+    weight_scale_l1: float = 64.0
+    weight_scale_block_up: float = 128.0
+    weight_scale_block_down: float = 64.0
+    weight_scale_out: float = 128.0
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
     ft_quantized_max: float = 255.0 # limited to 255 for safe squaring within i16
-    hidden_quantized_one: float = 128.0
-    hidden_quantized_max: float = 127.0 # i8 max
+    res_quantized_one: float = 128.0
+    res_quantized_max: float = 32767.0 # i16 max
+    expanded_quantized_one: float = 128.0
+    expanded_quantized_max: float = 127.0 # i8 max
 
     # used to calculate correction factors
     inference_l0_division_factor: float = 512.0
+    inference_l1_division_factor: float = 64.0
     inference_sqr_crelu_division_factor: float = 128.0
 
 
@@ -77,62 +81,89 @@ class QuantizationManager:
     def __init__(self, config: QuantizationConfig):
         self.config = config
         self.nnue2score = config.nnue2score
-        self.weight_scale_hidden = [
-            config.weight_scale_l1,
-            config.weight_scale_l2,
-            config.weight_scale_l_out,
-        ]
+        self.score_scale = config.score_scale
+        self.weight_scale_l1 = config.weight_scale_l1
+        self.weight_scale_block_up = config.weight_scale_block_up
+        self.weight_scale_block_down = config.weight_scale_block_down
         self.weight_scale_out = config.weight_scale_out
         self.weight_quantized_max_hidden = config.weight_quantized_max_hidden
-        self.hidden_quantized_one = config.hidden_quantized_one
+        self.expanded_quantized_one = config.expanded_quantized_one
+        self.res_quantized_one = config.res_quantized_one
         self.ft_quantized_one = config.ft_quantized_one
 
-        hidden_q_max = config.weight_quantized_max_hidden
-        self.max_hidden_weight = [hidden_q_max / scale for scale in self.weight_scale_hidden]
-        # Threat weights are treated separately. A bit hacky...
-        # Threat weights are quantized to int8 after scaling by ft_quantized_one
         _i8 = torch.iinfo(torch.int8)
         self.min_threat_weight = -_i8.max / config.ft_quantized_one  # -127/256
         self.max_threat_weight = _i8.max / config.ft_quantized_one  # 127/256
 
-        self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.hidden_quantized_one
-        self.sqr_crelu_correction_factor = config.hidden_quantized_one / config.inference_sqr_crelu_division_factor
+        self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.res_quantized_one
+        l1_out_scale = config.weight_scale_l1 * (config.ft_quantized_one ** 2 / config.inference_l0_division_factor)
+        self.l1_correction_factor = l1_out_scale / (config.inference_l1_division_factor * self.res_quantized_one)
+        self.sqr_crelu_correction_factor = config.expanded_quantized_one / config.inference_sqr_crelu_division_factor
         self.max_ft_activation = config.ft_quantized_max / config.ft_quantized_one
-        self.max_hidden_activation = config.hidden_quantized_max / config.hidden_quantized_one
+        self.max_expanded_activation = config.expanded_quantized_max / config.expanded_quantized_one
+        self.max_res_activation = config.res_quantized_max / config.res_quantized_one
 
         self.weight_scales_dict = {
             "ft_weight" : self.ft_quantized_one,
             "ft_bias" : self.ft_quantized_one,
-            "ft_psqt_weight" : self.nnue2score * self.weight_scale_out,
-            "ls_l1_weight" : self.weight_scale_hidden[0],
-            "ls_l1_bias" : self.weight_scale_hidden[0] * self.hidden_quantized_one,
-            "ls_l2_weight" : self.weight_scale_hidden[1],
-            "ls_l2_bias" : self.weight_scale_hidden[1] * self.hidden_quantized_one,
-            "ls_output_weight" : self.weight_scale_hidden[2],
-            "ls_output_bias" : self.weight_scale_hidden[2] * self.hidden_quantized_one,
+            "ft_psqt_weight" : self.nnue2score * self.score_scale,
+            "ls_l1_weight" : config.weight_scale_l1,
+            "ls_l1_bias" : l1_out_scale,
+            "ls_output_weight" : config.weight_scale_out,
+            "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
         }
+
+    def get_weight_scale(self, key: str) -> float:
+        if key in self.weight_scales_dict:
+            return self.weight_scales_dict[key]
+        if key.endswith("_up_weight"):
+            return self.config.weight_scale_block_up
+        if key.endswith("_up_bias"):
+            return self.config.weight_scale_block_up * self.config.res_quantized_one
+        if key.endswith("_down_weight"):
+            return self.config.weight_scale_block_down
+        if key.endswith("_down_bias"):
+            return self.config.weight_scale_block_down * self.config.expanded_quantized_one
+        raise KeyError(f"Unknown quantization key: {key}")
 
     def clip_ft_act(self, preact):
         return torch.clamp(preact, 0.0, self.max_ft_activation)
 
+    def clip_expanded_act(self, preact):
+        return torch.clamp(preact, 0.0, self.max_expanded_activation)
+
+    def clip_res_act(self, preact):
+        return torch.clamp(preact, -self.max_res_activation, self.max_res_activation)
+
     def clip_ls_act(self, preact):
-        return torch.clamp(preact, 0, self.max_hidden_activation)
+        return self.clip_expanded_act(preact)
 
     def fake_quantize_ft_act(self, preact):
-        act_scale = self.config.hidden_quantized_one
+        # DO NOT USE `ft_quantized_one` here!
+        # `ft_quantized_one` is for weights and preactivation.
+        # Preactivations are sum of weights so no need to quantize.
+        # Activations are already scaled by `self.config.inference_l0_division_factor`.
+        # Thus here we need `res_quantized_one`
+        act_scale = self.config.res_quantized_one
+        return _fake_quantize_acts(preact, act_scale)
+
+    def fake_quantize_expanded_act(self, preact):
+        act_scale = self.config.expanded_quantized_one
+        return _fake_quantize_acts(preact, act_scale)
+
+    def fake_quantize_res_act(self, preact):
+        act_scale = self.config.res_quantized_one
         return _fake_quantize_acts(preact, act_scale)
 
     def fake_quantize_ls_act(self, preact):
-        act_scale = self.config.hidden_quantized_one
-        return _fake_quantize_acts(preact, act_scale)
+        return self.fake_quantize_expanded_act(preact)
 
     def fake_quantize_skip_act(self, preact):
-        # currently no separate quantization necessary, but might be necessary in the future if quant schemes change.
         return preact
 
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
-        multiplier_int = int(self.config.nnue2score * self.config.weight_scale_out)
-        denominator_int = int(self.config.hidden_quantized_one * self.config.weight_scale_l_out * 2.0)
+        multiplier_int = int(self.config.nnue2score * self.config.score_scale)
+        denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_out)
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)
 
@@ -147,30 +178,50 @@ class QuantizationManager:
         return quantized_out.detach() + (preact - preact.detach())
 
     def fake_quantize_weights(self, tensor: torch.Tensor, key: str):
-        weight_scale = self.weight_scales_dict[key]
+        weight_scale = self.get_weight_scale(key)
         return _fake_quantize_weights(tensor, weight_scale)
 
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        return [
+        max_l1_w = self.weight_quantized_max_hidden / self.config.weight_scale_l1
+        max_up_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_up
+        max_down_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_down
+        max_out_w = self.weight_quantized_max_hidden / self.config.weight_scale_out
+
+        configs: list[WeightClippingConfig] = [
             {
                 "params": [model.layer_stacks.l1.linear.weight],
-                "min_weight": -self.max_hidden_weight[0],
-                "max_weight": self.max_hidden_weight[0],
+                "min_weight": -max_l1_w,
+                "max_weight": max_l1_w,
                 "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-            },
-            {
-                "params": [model.layer_stacks.l2.linear.weight],
-                "min_weight": -self.max_hidden_weight[1],
-                "max_weight": self.max_hidden_weight[1],
-            },
-            {
-                "params": [model.layer_stacks.output.linear.weight],
-                "min_weight": -self.max_hidden_weight[2],
-                "max_weight": self.max_hidden_weight[2],
-            },
+            }
         ]
+
+        for block in model.layer_stacks.blocks:
+            configs.append({
+                "params": [block.up.linear.weight],
+                "min_weight": -max_up_w,
+                "max_weight": max_up_w,
+            })
+            configs.append({
+                "params": [block.down.linear.weight],
+                "min_weight": -max_down_w,
+                "max_weight": max_down_w,
+            })
+
+        configs.append({
+            "params": [model.layer_stacks.final_block.up.linear.weight],
+            "min_weight": -max_up_w,
+            "max_weight": max_up_w,
+        })
+        configs.append({
+            "params": [model.layer_stacks.final_block.output.linear.weight],
+            "min_weight": -max_out_w,
+            "max_weight": max_out_w,
+        })
+
+        return configs
 
     def quantize_feature_transformer_weights(
         self,
@@ -225,8 +276,8 @@ class QuantizationManager:
         weight_key = f"{layer_key}_weight"
         bias_key = f"{layer_key}_bias"
 
-        bias = _safe_convert(bias.mul(self.weight_scales_dict[bias_key]), torch.int32)
-        weight = _safe_convert(weight.mul(self.weight_scales_dict[weight_key]), torch.int8)
+        bias = _safe_convert(bias.mul(self.get_weight_scale(bias_key)), torch.int32)
+        weight = _safe_convert(weight.mul(self.get_weight_scale(weight_key)), torch.int8)
 
         if callback is not None:
             callback(bias_key, bias)
@@ -243,7 +294,29 @@ class QuantizationManager:
         weight_key = f"{layer_key}_weight"
         bias_key = f"{layer_key}_bias"
 
-        bias = bias.divide(self.weight_scales_dict[bias_key])
-        weight = weight.divide(self.weight_scales_dict[weight_key])
+        bias = bias.divide(self.get_weight_scale(bias_key))
+        weight = weight.divide(self.get_weight_scale(weight_key))
 
         return bias, weight
+
+    def quantize_bias(
+        self,
+        bias: torch.Tensor,
+        layer_key: str,
+        callback: Callable | None = None,
+    ) -> torch.Tensor:
+        bias_key = f"{layer_key}_bias"
+        bias = _safe_convert(bias.mul(self.get_weight_scale(bias_key)), torch.int32)
+
+        if callback is not None:
+            callback(bias_key, bias)
+
+        return bias
+
+    def dequantize_bias(
+        self,
+        bias: torch.Tensor,
+        layer_key: str,
+    ) -> torch.Tensor:
+        bias_key = f"{layer_key}_bias"
+        return bias.divide(self.get_weight_scale(bias_key))

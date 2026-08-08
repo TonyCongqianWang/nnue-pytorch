@@ -9,7 +9,7 @@ from .inverted_bottleneck_block import (
     FinalInvertedBottleneckBlock,
     InvertedBottleneckBlock,
 )
-from .stacked_linear import FactorizedStackedLinear, StackedLinear
+from .stacked_linear import FactorizedStackedLinear
 
 
 class LayerStacks(nn.Module):

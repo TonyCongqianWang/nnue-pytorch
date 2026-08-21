@@ -139,12 +139,16 @@ class QuantizationManager:
         return self.clip_expanded_act(preact)
 
     def fake_quantize_ft_act(self, preact):
-        # DO NOT USE `ft_quantized_one` here!
-        # `ft_quantized_one` is for weights and preactivation.
-        # Preactivations are sum of weights so no need to quantize.
-        # Activations are already scaled by `self.config.inference_l0_division_factor`.
-        # Thus here we need `res_quantized_one`
-        act_scale = self.config.res_quantized_one
+        # DO NOT USE `ft_quantized_one` here directly!
+        # `ft_quantized_one` is the weight/preactivation quantization scale.
+        # The pairwise FT activation has scale ft_quantized_one^2 before the
+        # inference division by inference_l0_division_factor. After that
+        # division the natural activation grid is:
+        #     ft_quantized_one^2 / inference_l0_division_factor
+        # For the current defaults this equals res_quantized_one (128), but
+        # using the explicit formula keeps the code correct if those constants
+        # are changed independently.
+        act_scale = self.config.ft_quantized_one ** 2 / self.config.inference_l0_division_factor
         return _fake_quantize_acts(preact, act_scale)
 
     def fake_quantize_expanded_act(self, preact):

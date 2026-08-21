@@ -89,16 +89,25 @@ class FinalInvertedBottleneckBlock(nn.Module):
             res_dim, expanded_dim, count, quantization, f"{layer_prefix}_up"
         )
         self.act = DualActivation(expanded_dim, quantization, f"{layer_prefix}_up")
-        self.output = StackedLinear(
-            res_dim + 2 * expanded_dim,
+        self.output_res = StackedLinear(
+            res_dim,
             1,
             count,
             quantization,
-            "ls_output",
+            "ls_output_res",
+            bias=True,
+        )
+        self.output_act = StackedLinear(
+            2 * expanded_dim,
+            1,
+            count,
+            quantization,
+            "ls_output_act",
+            bias=False,
         )
 
         with torch.no_grad():
-            self.output.linear.bias.zero_()
+            self.output_res.linear.bias.zero_()
 
     def forward(
         self,
@@ -114,6 +123,7 @@ class FinalInvertedBottleneckBlock(nn.Module):
             fake_quantize_weights=fake_quantize_weights,
         )
 
-        fused_input = torch.cat([res_stream, act_out], dim=1)
-        l3c_ = self.output(fused_input, ls_indices, fake_quantize_weights=fake_quantize_weights)
-        return l3c_
+        res_out = self.output_res(res_stream, ls_indices, fake_quantize_weights=fake_quantize_weights)
+        act_out = self.output_act(act_out, ls_indices, fake_quantize_weights=fake_quantize_weights)
+
+        return res_out + act_out

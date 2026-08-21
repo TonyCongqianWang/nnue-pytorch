@@ -50,6 +50,7 @@ class PP3Wide(InputFeature):
         self.weight.data.copy_(export_weight)
 
     def clip_weights(self, quantization) -> None:
-        self.weight.data.clamp_(
+        num_ft = self.num_outputs - 8
+        self.weight.data[:, :num_ft].clamp_(
             quantization.min_threat_weight, quantization.max_threat_weight
         )

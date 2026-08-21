@@ -129,42 +129,50 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
     ft_bound = q.max_threat_weight * overshoot
 
     with torch.no_grad():
+        L1 = model.L1
+        psqt_bound = (100.0 / q.nnue2score) * overshoot
         for f in model.input.features:
             if fill_value is not None:
-                f.weight.data.fill_(fill_value * overshoot)
+                f.weight.data[:, :L1].fill_(fill_value * ft_bound)
+                f.weight.data[:, L1:].fill_(fill_value * psqt_bound)
                 if hasattr(f, "virtual_weight"):
-                    f.virtual_weight.data.fill_(fill_value * overshoot)
+                    f.virtual_weight.data[:, :L1].fill_(fill_value * ft_bound)
+                    f.virtual_weight.data[:, L1:].fill_(fill_value * psqt_bound)
             else:
-                f.weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
+                f.weight.data[:, :L1].uniform_(-ft_bound, ft_bound, generator=rng)
+                f.weight.data[:, L1:].uniform_(-psqt_bound, psqt_bound, generator=rng)
                 if hasattr(f, "virtual_weight"):
-                    f.virtual_weight.data.uniform_(-ft_bound, ft_bound, generator=rng)
+                    f.virtual_weight.data[:, :L1].uniform_(-ft_bound, ft_bound, generator=rng)
+                    f.virtual_weight.data[:, L1:].uniform_(-psqt_bound, psqt_bound, generator=rng)
 
         # Layer Stacks weight bounds
         max_l1 = q.weight_quantized_max_hidden / q.weight_scale_l1
         max_up = q.weight_quantized_max_hidden / q.weight_scale_block_up
         max_down = q.weight_quantized_max_hidden / q.weight_scale_block_down
-        max_out = q.weight_quantized_max_hidden / q.weight_scale_out
+        max_out_res = q.weight_quantized_max_hidden / q.weight_scale_out_res
+        max_out_act = q.weight_quantized_max_hidden / q.weight_scale_out_act
 
         hw_l1 = max_l1 * overshoot
         hw_up = max_up * overshoot
         hw_down = max_down * overshoot
-        hw_out = max_out * overshoot
+        hw_out_res = max_out_res * overshoot
+        hw_out_act = max_out_act * overshoot
 
         if fill_value is not None:
-            sign = 1.0 if fill_value > 0 else -1.0
-            model.layer_stacks.l1.linear.weight.data.fill_(sign * max_l1)
-            model.layer_stacks.l1.linear.bias.data.fill_(sign * max_l1)
+            model.layer_stacks.l1.linear.weight.data.fill_(fill_value * hw_l1)
+            model.layer_stacks.l1.linear.bias.data.fill_(fill_value * hw_l1)
             for block in model.layer_stacks.blocks:
-                block.up.linear.weight.data.fill_(sign * max_up)
-                block.up.linear.bias.data.fill_(sign * max_up)
-                block.act.sqr_bias.data.fill_(sign * max_up)
-                block.down.linear.weight.data.fill_(sign * max_down)
-                block.down.linear.bias.data.fill_(sign * max_down)
-            model.layer_stacks.final_block.up.linear.weight.data.fill_(sign * max_up)
-            model.layer_stacks.final_block.up.linear.bias.data.fill_(sign * max_up)
-            model.layer_stacks.final_block.act.sqr_bias.data.fill_(sign * max_up)
-            model.layer_stacks.final_block.output.linear.weight.data.fill_(sign * max_out)
-            model.layer_stacks.final_block.output.linear.bias.data.fill_(sign * max_out)
+                block.up.linear.weight.data.fill_(fill_value * hw_up)
+                block.up.linear.bias.data.fill_(fill_value * hw_up)
+                block.act.sqr_bias.data.fill_(fill_value * hw_up)
+                block.down.linear.weight.data.fill_(fill_value * hw_down)
+                block.down.linear.bias.data.fill_(fill_value * hw_down)
+            model.layer_stacks.final_block.up.linear.weight.data.fill_(fill_value * hw_up)
+            model.layer_stacks.final_block.up.linear.bias.data.fill_(fill_value * hw_up)
+            model.layer_stacks.final_block.act.sqr_bias.data.fill_(fill_value * hw_up)
+            model.layer_stacks.final_block.output_res.linear.weight.data.fill_(fill_value * hw_out_res)
+            model.layer_stacks.final_block.output_res.linear.bias.data.fill_(fill_value * hw_out_res)
+            model.layer_stacks.final_block.output_act.linear.weight.data.fill_(fill_value * hw_out_act)
         else:
             model.layer_stacks.l1.linear.weight.data.uniform_(-hw_l1, hw_l1, generator=rng)
             model.layer_stacks.l1.linear.bias.data.uniform_(-hw_l1, hw_l1, generator=rng)
@@ -177,8 +185,9 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
             model.layer_stacks.final_block.up.linear.weight.data.uniform_(-hw_up, hw_up, generator=rng)
             model.layer_stacks.final_block.up.linear.bias.data.uniform_(-hw_up, hw_up, generator=rng)
             model.layer_stacks.final_block.act.sqr_bias.data.uniform_(-hw_up, hw_up, generator=rng)
-            model.layer_stacks.final_block.output.linear.weight.data.uniform_(-hw_out, hw_out, generator=rng)
-            model.layer_stacks.final_block.output.linear.bias.data.uniform_(-hw_out, hw_out, generator=rng)
+            model.layer_stacks.final_block.output_res.linear.weight.data.uniform_(-hw_out_res, hw_out_res, generator=rng)
+            model.layer_stacks.final_block.output_res.linear.bias.data.uniform_(-hw_out_res, hw_out_res, generator=rng)
+            model.layer_stacks.final_block.output_act.linear.weight.data.uniform_(-hw_out_act, hw_out_act, generator=rng)
 
     # clip_weights enforces all bounds.  If the clipping logic is wrong,
     # NNUEWriter._safe_convert will raise RuntimeError and the test fails cleanly.

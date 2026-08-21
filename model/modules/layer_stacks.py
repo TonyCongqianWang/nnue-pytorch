@@ -106,5 +106,5 @@ class LayerStacks(nn.Module):
             bucket_layers = [self.l1.at_index(i)]
             for block in self.blocks:
                 bucket_layers.extend([block.up.at_index(i), block.down.at_index(i)])
-            bucket_layers.extend([self.final_block.up.at_index(i), self.final_block.output.at_index(i)])
+            bucket_layers.extend([self.final_block.up.at_index(i), self.final_block.output_res.at_index(i), self.final_block.output_act.at_index(i)])
             yield bucket_layers

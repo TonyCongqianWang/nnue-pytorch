@@ -52,6 +52,8 @@ class FullThreats(InputFeature):
 
     def clip_weights(self, quantization) -> None:
         """Clamp threat weights to quantization-safe range."""
-        self.weight.data.clamp_(
+        # Only the L1 feature weights are int8 (scale 256). PSQT columns are int32 (scale 9600).
+        num_ft = self.num_outputs - 8
+        self.weight.data[:, :num_ft].clamp_(
             quantization.min_threat_weight, quantization.max_threat_weight
         )

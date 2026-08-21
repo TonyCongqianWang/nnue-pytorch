@@ -62,6 +62,8 @@ class QuantizationConfig:
     weight_scale_l1: float = 64.0
     weight_scale_block_up: float = 128.0
     weight_scale_block_down: float = 64.0
+    weight_scale_out_res: float = 1024.0
+    weight_scale_out_act: float = 128.0
     weight_scale_out: float = 128.0
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
@@ -85,6 +87,8 @@ class QuantizationManager:
         self.weight_scale_l1 = config.weight_scale_l1
         self.weight_scale_block_up = config.weight_scale_block_up
         self.weight_scale_block_down = config.weight_scale_block_down
+        self.weight_scale_out_res = config.weight_scale_out_res
+        self.weight_scale_out_act = config.weight_scale_out_act
         self.weight_scale_out = config.weight_scale_out
         self.weight_quantized_max_hidden = config.weight_quantized_max_hidden
         self.expanded_quantized_one = config.expanded_quantized_one
@@ -109,8 +113,10 @@ class QuantizationManager:
             "ft_psqt_weight" : self.nnue2score * self.score_scale,
             "ls_l1_weight" : config.weight_scale_l1,
             "ls_l1_bias" : l1_out_scale,
-            "ls_output_weight" : config.weight_scale_out,
-            "ls_output_bias" : config.weight_scale_out * config.res_quantized_one,
+            "ls_output_res_weight" : config.weight_scale_out_res,
+            "ls_output_res_bias" : config.weight_scale_out_res * config.res_quantized_one,
+            "ls_output_act_weight" : config.weight_scale_out_act,
+            "ls_output_act_bias" : config.weight_scale_out_act * config.expanded_quantized_one,
         }
 
     def get_weight_scale(self, key: str) -> float:
@@ -167,7 +173,7 @@ class QuantizationManager:
 
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
         multiplier_int = int(self.config.nnue2score * self.config.score_scale)
-        denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_out)
+        denominator_int = int(self.config.res_quantized_one * self.config.weight_scale_out_res)
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)
 
@@ -177,11 +183,28 @@ class QuantizationManager:
             rounding_mode='trunc'
         )
 
-        quantized_out = output_value_int.to(preact.dtype) / float(multiplier_int)
+        pos_val_int = torch.div(output_value_int, int(self.config.score_scale), rounding_mode='trunc')
+        quantized_out = pos_val_int.to(preact.dtype) / float(self.config.nnue2score)
 
         return quantized_out.detach() + (preact - preact.detach())
 
-    def fake_quantize_weights(self, tensor: torch.Tensor, key: str):
+    def fake_quantize_psqt(
+        self, wpsqt: torch.Tensor, bpsqt: torch.Tensor, us: torch.Tensor
+    ) -> torch.Tensor:
+        scale = self.config.nnue2score * self.config.score_scale
+        w_int = torch.round(wpsqt * scale).to(torch.int64)
+        b_int = torch.round(bpsqt * scale).to(torch.int64)
+
+        diff = torch.where(us > 0.5, w_int - b_int, b_int - w_int)
+        psqt_halved = torch.div(diff, 2, rounding_mode='trunc')
+        psqt_val = torch.div(psqt_halved, int(self.config.score_scale), rounding_mode='trunc')
+
+        quantized_psqt = psqt_val.to(wpsqt.dtype) / float(self.config.nnue2score)
+        cont_psqt = (wpsqt - bpsqt) * (us - 0.5)
+
+        return quantized_psqt.detach() + (cont_psqt - cont_psqt.detach())
+
+    def fake_quantize_weights(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
         weight_scale = self.get_weight_scale(key)
         return _fake_quantize_weights(tensor, weight_scale)
 
@@ -191,7 +214,8 @@ class QuantizationManager:
         max_l1_w = self.weight_quantized_max_hidden / self.config.weight_scale_l1
         max_up_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_up
         max_down_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_down
-        max_out_w = self.weight_quantized_max_hidden / self.config.weight_scale_out
+        max_out_res_w = self.weight_quantized_max_hidden / self.config.weight_scale_out_res
+        max_out_act_w = self.weight_quantized_max_hidden / self.config.weight_scale_out_act
 
         configs: list[WeightClippingConfig] = [
             {
@@ -220,9 +244,14 @@ class QuantizationManager:
             "max_weight": max_up_w,
         })
         configs.append({
-            "params": [model.layer_stacks.final_block.output.linear.weight],
-            "min_weight": -max_out_w,
-            "max_weight": max_out_w,
+            "params": [model.layer_stacks.final_block.output_res.linear.weight],
+            "min_weight": -max_out_res_w,
+            "max_weight": max_out_res_w,
+        })
+        configs.append({
+            "params": [model.layer_stacks.final_block.output_act.linear.weight],
+            "min_weight": -max_out_act_w,
+            "max_weight": max_out_act_w,
         })
 
         return configs

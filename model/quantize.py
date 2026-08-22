@@ -59,10 +59,10 @@ def _fake_quantize_weights(value, weight_scale):
 class QuantizationConfig:
     nnue2score: float = 600.0
     score_scale: float = 16.0
-    weight_scale_l1: float = 64.0
+    weight_scale_l1: float = 256.0
     weight_scale_block_up: float = 256.0
     weight_scale_block_down: float = 64.0
-    weight_scale_out_res: float = 1024.0
+    weight_scale_out_res: float = 256.0
     weight_scale_out_act: float = 128.0
     weight_scale_out: float = 128.0
     weight_quantized_max_hidden: float = 127.0 # i8 max
@@ -75,7 +75,7 @@ class QuantizationConfig:
 
     # used to calculate correction factors
     inference_l0_division_factor: float = 512.0
-    inference_l1_division_factor: float = 64.0
+    inference_l1_division_factor: float = 256.0
     inference_sqr_crelu_division_factor: float = 128.0
 
 

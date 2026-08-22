@@ -12,6 +12,6 @@ class LayerStacksConfig:
     """Dimension of residual stream."""
     expanded_dim: Annotated[int, tyro.conf.arg(name="expanded-dim")] = 64
     """Expanded dimension inside bottleneck blocks."""
-    num_blocks: Annotated[int, tyro.conf.arg(name="num-blocks")] = 2
+    num_blocks: Annotated[int, tyro.conf.arg(name="num-blocks")] = 3
     """Number of inverted bottleneck blocks."""
 

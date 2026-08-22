@@ -57,7 +57,7 @@ def double_feature_transform(
             if not all_cuda:
                 raise RuntimeError("Sparse backend requested, but not all tensors/parameters are on CUDA.")
 
-        assert l1_size % 2 == 0
+        assert l1_size % 4 == 0
 
         wp = SparseLinearFunction.apply(white_indices, weight, bias, backend=impl)
         bp = SparseLinearFunction.apply(black_indices, weight, bias, backend=impl)
@@ -73,8 +73,8 @@ def double_feature_transform(
         # do not fake quantize sum of (quantized) weights
         l0_ = torch.clamp(l0_, 0.0, max_ft_activation)
 
-        l0_s = torch.split(l0_, l1_size // 2, dim=1)
-        l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
+        l0_s = torch.split(l0_, l1_size // 4, dim=1)
+        l0_s1 = [l0_s[0] * l0_s[1], l0_s[4] * l0_s[5], l0_s[2] * l0_s[7], l0_s[6] * l0_s[3]]
         l0_ = torch.cat(l0_s1, dim=1)
 
         return l0_, wpsqt, bpsqt

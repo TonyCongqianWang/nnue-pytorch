@@ -20,7 +20,7 @@ class FusedDoubleFtFunction(autograd.Function):
         ctx.max_ft_activation = float(max_ft_activation)
         ctx.l1_size = int(l1_size)
 
-        assert l1_size % 2 == 0
+        assert l1_size % 4 == 0
 
         assert us.is_cuda and them.is_cuda
         assert white_indices.is_cuda and black_indices.is_cuda and psqt_indices.is_cuda
@@ -46,12 +46,12 @@ class FusedDoubleFtFunction(autograd.Function):
 
         batch_size = white_indices.shape[0]
         max_active_features = white_indices.shape[1]
-        l1_half = l1_size // 2
+        l1_quarter = l1_size // 4
 
         l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
         wpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
         bpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
-        clamped_out = torch.empty(batch_size, 4, l1_half, dtype=torch.float32, device=us.device)
+        clamped_out = torch.empty(batch_size, 8, l1_quarter, dtype=torch.float32, device=us.device)
 
         output_size = bias.shape[0]
         kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size)

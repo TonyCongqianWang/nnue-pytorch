@@ -60,7 +60,7 @@ class QuantizationConfig:
     nnue2score: float = 600.0
     score_scale: float = 16.0
     weight_scale_l1: float = 64.0
-    weight_scale_block_up: float = 128.0
+    weight_scale_block_up: float = 256.0
     weight_scale_block_down: float = 64.0
     weight_scale_out_res: float = 1024.0
     weight_scale_out_act: float = 128.0

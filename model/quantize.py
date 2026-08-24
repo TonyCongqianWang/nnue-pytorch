@@ -60,6 +60,7 @@ class QuantizationConfig:
     nnue2score: float = 600.0
     score_scale: float = 16.0
     weight_scale_l1: float = 256.0
+    weight_scale_psqt: float = 256.0
     weight_scale_block_up: float = 256.0
     weight_scale_block_down: float = 128.0
     weight_scale_out_res: float = 1024.0
@@ -67,6 +68,7 @@ class QuantizationConfig:
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
     ft_quantized_max: float = 255.0 # limited to 255 for safe squaring within i16
+    ft_psqt_quantized_one: float = 1024.0
     res_quantized_one: float = 128.0
     res_quantized_max: float = 32767.0 # i16 max
     expanded_quantized_one: float = 128.0
@@ -77,6 +79,18 @@ class QuantizationConfig:
     inference_l1_division_factor: float = 256.0
     inference_sqr_crelu_division_factor: float = 128.0
 
+    def __post_init__(self):
+        import math
+        l1_out_scale = self.res_quantized_one * self.weight_scale_l1
+        psqt_product_scale = self.ft_psqt_quantized_one * self.weight_scale_psqt
+        ratio = psqt_product_scale / l1_out_scale
+        shift = math.log2(ratio)
+        if not math.isclose(shift, round(shift), abs_tol=1e-5) or round(shift) < 0 or round(shift) > 16:
+            raise ValueError(
+                f"PSQT product scale ({psqt_product_scale}) must be a power-of-2 multiple 2^shift "
+                f"(with shift in [0, 16]) of L1 out scale ({l1_out_scale}), got ratio {ratio}."
+            )
+
 
 class QuantizationManager:
     def __init__(self, config: QuantizationConfig):
@@ -84,6 +98,7 @@ class QuantizationManager:
         self.nnue2score = config.nnue2score
         self.score_scale = config.score_scale
         self.weight_scale_l1 = config.weight_scale_l1
+        self.weight_scale_psqt = config.weight_scale_psqt
         self.weight_scale_block_up = config.weight_scale_block_up
         self.weight_scale_block_down = config.weight_scale_block_down
         self.weight_scale_out_res = config.weight_scale_out_res
@@ -92,6 +107,7 @@ class QuantizationManager:
         self.expanded_quantized_one = config.expanded_quantized_one
         self.res_quantized_one = config.res_quantized_one
         self.ft_quantized_one = config.ft_quantized_one
+        self.ft_psqt_quantized_one = config.ft_psqt_quantized_one
 
         _i8 = torch.iinfo(torch.int8)
         self.min_threat_weight = -_i8.max / config.ft_quantized_one  # -127/256
@@ -100,17 +116,25 @@ class QuantizationManager:
         self.l0_correction_factor = config.ft_quantized_one ** 2 / config.inference_l0_division_factor / self.res_quantized_one
         l1_out_scale = config.weight_scale_l1 * (config.ft_quantized_one ** 2 / config.inference_l0_division_factor)
         self.l1_correction_factor = l1_out_scale / (config.inference_l1_division_factor * self.res_quantized_one)
+
+        import math
+        psqt_shift_flt = math.log2((config.ft_psqt_quantized_one * config.weight_scale_psqt) / (self.res_quantized_one * config.weight_scale_l1))
+        self.psqt_shift = int(round(psqt_shift_flt))
+        self.psqt_act_scale = config.ft_psqt_quantized_one / (2 ** self.psqt_shift)
+
         self.sqr_crelu_correction_factor = config.expanded_quantized_one / config.inference_sqr_crelu_division_factor
         self.max_ft_activation = config.ft_quantized_max / config.ft_quantized_one
         self.max_expanded_activation = config.expanded_quantized_max / config.expanded_quantized_one
         self.max_res_activation = config.res_quantized_max / config.res_quantized_one
+        self.max_psqt_activation = config.res_quantized_max / self.psqt_act_scale
 
         self.weight_scales_dict = {
             "ft_weight" : self.ft_quantized_one,
             "ft_bias" : self.ft_quantized_one,
-            "ft_psqt_weight" : self.nnue2score * self.score_scale,
+            "ft_psqt_weight" : self.ft_psqt_quantized_one,
             "ls_l1_weight" : config.weight_scale_l1,
             "ls_l1_bias" : l1_out_scale,
+            "ls_psqt_weight" : config.weight_scale_psqt,
             "ls_output_res_weight" : config.weight_scale_out_res,
             "ls_output_res_bias" : config.weight_scale_out_res * config.res_quantized_one,
             "ls_output_act_weight" : config.weight_scale_out_act,
@@ -139,8 +163,14 @@ class QuantizationManager:
     def clip_res_act(self, preact):
         return torch.clamp(preact, -self.max_res_activation, self.max_res_activation)
 
+    def clip_psqt_act(self, preact):
+        return torch.clamp(preact, -self.max_psqt_activation, self.max_psqt_activation)
+
     def clip_ls_act(self, preact):
         return self.clip_expanded_act(preact)
+
+    def fake_quantize_psqt_act(self, preact):
+        return _fake_quantize_acts(preact, self.psqt_act_scale)
 
     def fake_quantize_ft_act(self, preact):
         # DO NOT USE `ft_quantized_one` here directly!
@@ -210,6 +240,7 @@ class QuantizationManager:
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
         max_l1_w = self.weight_quantized_max_hidden / self.config.weight_scale_l1
+        max_psqt_w = self.weight_quantized_max_hidden / self.config.weight_scale_psqt
         max_up_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_up
         max_down_w = self.weight_quantized_max_hidden / self.config.weight_scale_block_down
         max_out_res_w = self.weight_quantized_max_hidden / self.config.weight_scale_out_res
@@ -221,7 +252,12 @@ class QuantizationManager:
                 "min_weight": -max_l1_w,
                 "max_weight": max_l1_w,
                 "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-            }
+            },
+            {
+                "params": [model.layer_stacks.psqt_linear.linear.weight],
+                "min_weight": -max_psqt_w,
+                "max_weight": max_psqt_w,
+            },
         ]
 
         for block in model.layer_stacks.blocks:
@@ -351,3 +387,25 @@ class QuantizationManager:
     ) -> torch.Tensor:
         bias_key = f"{layer_key}_bias"
         return bias.divide(self.get_weight_scale(bias_key))
+
+    def quantize_weight(
+        self,
+        weight: torch.Tensor,
+        layer_key: str,
+        callback: Callable | None = None,
+    ) -> torch.Tensor:
+        weight_key = f"{layer_key}_weight" if not layer_key.endswith("_weight") else layer_key
+        weight = _safe_convert(weight.mul(self.get_weight_scale(weight_key)), torch.int8)
+
+        if callback is not None:
+            callback(weight_key, weight)
+
+        return weight
+
+    def dequantize_weight(
+        self,
+        weight: torch.Tensor,
+        layer_key: str,
+    ) -> torch.Tensor:
+        weight_key = f"{layer_key}_weight" if not layer_key.endswith("_weight") else layer_key
+        return weight.divide(self.get_weight_scale(weight_key))

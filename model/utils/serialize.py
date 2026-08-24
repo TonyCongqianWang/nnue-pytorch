@@ -126,6 +126,8 @@ class NNUEWriter:
             self.int32(fc_hash)  # FC layers hash
             l1_linear = layer_stacks.l1.at_index(b)
             self.write_fc_layer(model, l1_linear, layer_stacks.l1.layer_key, f"bucket {b} l1")
+            psqt_linear = layer_stacks.psqt_linear.at_index(b)
+            self.write_psqt_layer(model, psqt_linear, layer_stacks.psqt_linear.layer_key, f"bucket {b} psqt")
 
             for i, block in enumerate(layer_stacks.blocks):
                 up_linear = block.up.at_index(b)
@@ -148,7 +150,7 @@ class NNUEWriter:
         prev_hash ^= model.L1 * 2
 
         ls = model.layer_stacks
-        layers = [ls.l1.linear]
+        layers = [ls.l1.linear, ls.psqt_linear.linear]
         for block in ls.blocks:
             layers.extend([block.up.linear, block.down.linear])
         layers.extend([ls.final_block.up.linear, ls.final_block.output_res.linear])
@@ -253,6 +255,19 @@ class NNUEWriter:
         # Weights stored as [outputs][inputs], so we can flatten
         self.write_tensor(weight, "none")
 
+    def write_psqt_layer(
+        self,
+        model: NNUEModel,
+        layer: nn.Linear,
+        layer_key: str,
+        desc: str,
+    ) -> None:
+        weight = layer.weight.data
+        weight = model.quantization.quantize_weight(
+            weight, layer_key, get_histogram_callback(desc, self.verbose)
+        )
+        self.write_tensor(weight, "none")
+
     def write_output_layer(
         self,
         model: NNUEModel,
@@ -307,13 +322,16 @@ class NNUEReader:
         f: BinaryIO,
         feature_name: str,
         config: ModelConfig,
+        num_psqt_buckets: int = 8,
+        num_ls_buckets: int = 8,
     ):
         self.f = f
-        self.feature_name = feature_name
-        self.model = NNUEModel(feature_name, config)
         self.config = config
-        fc_hash = NNUEWriter.fc_hash(self.model)
+        self.model = NNUEModel(
+            feature_name, config, num_psqt_buckets, num_ls_buckets
+        )
 
+        fc_hash = NNUEWriter.fc_hash(self.model)
         self.read_header(self.model.feature_hash, fc_hash)
         self.read_int32(
             self.model.feature_hash ^ (self.config.L1 * 2)
@@ -327,6 +345,7 @@ class NNUEReader:
 
         l1_w_slices = torch.chunk(ls.l1.linear.weight.data, num_ls_buckets, dim=0)
         l1_b_slices = torch.chunk(ls.l1.linear.bias.data, num_ls_buckets, dim=0)
+        psqt_w_slices = torch.chunk(ls.psqt_linear.linear.weight.data, num_ls_buckets, dim=0)
 
         block_up_w_slices = [
             torch.chunk(block.up.linear.weight.data, num_ls_buckets, dim=0)
@@ -355,6 +374,7 @@ class NNUEReader:
         for b in range(num_ls_buckets):
             self.read_int32(fc_hash)  # FC layers hash
             self.read_fc_layer(l1_w_slices[b], l1_b_slices[b], ls.l1.layer_key)
+            self.read_psqt_layer(psqt_w_slices[b], ls.psqt_linear.layer_key)
 
             for i, block in enumerate(ls.blocks):
                 self.read_fc_layer(block_up_w_slices[i][b], block_up_b_slices[i][b], block.up.layer_key)
@@ -507,6 +527,15 @@ class NNUEReader:
         bias = self.tensor(np.int32, sqr_bias_t.shape)
         bias = self.model.quantization.dequantize_bias(bias, layer_key)
         sqr_bias_t.data.copy_(bias.to(torch.float32))
+
+    def read_psqt_layer(
+        self,
+        weight_t: torch.Tensor,
+        layer_key: str,
+    ) -> None:
+        weight = self.tensor(np.int8, weight_t.shape)
+        weight = self.model.quantization.dequantize_weight(weight, layer_key)
+        weight_t.data.copy_(weight.to(torch.float32))
 
     def read_int32(self, expected: int | None = None) -> int:
         v = struct.unpack("<I", self.f.read(4))[0]

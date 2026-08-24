@@ -65,10 +65,6 @@ def double_feature_transform(
         w, wpsqt = torch.split(wp, l1_size, dim=1)
         b, bpsqt = torch.split(bp, l1_size, dim=1)
 
-        psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
-        wpsqt = wpsqt.gather(1, psqt_indices_unsq)
-        bpsqt = bpsqt.gather(1, psqt_indices_unsq)
-
         l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
         # do not fake quantize sum of (quantized) weights
         l0_ = torch.clamp(l0_, 0.0, max_ft_activation)

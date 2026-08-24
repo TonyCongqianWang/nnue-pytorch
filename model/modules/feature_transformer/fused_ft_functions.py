@@ -46,15 +46,16 @@ class FusedDoubleFtFunction(autograd.Function):
 
         batch_size = white_indices.shape[0]
         max_active_features = white_indices.shape[1]
+        output_size = bias.shape[0]
+        num_psqt_buckets = output_size - l1_size
         l1_quarter = l1_size // 4
 
         l0_ = torch.empty(batch_size, l1_size, dtype=torch.float32, device=us.device)
-        wpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
-        bpsqt = torch.empty(batch_size, 1, dtype=torch.float32, device=us.device)
+        wpsqt = torch.empty(batch_size, num_psqt_buckets, dtype=torch.float32, device=us.device)
+        bpsqt = torch.empty(batch_size, num_psqt_buckets, dtype=torch.float32, device=us.device)
         clamped_out = torch.empty(batch_size, 8, l1_quarter, dtype=torch.float32, device=us.device)
 
-        output_size = bias.shape[0]
-        kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size)
+        kernel = make_fused_double_ft_forward_kernel(max_active_features, l1_size, num_psqt_buckets=num_psqt_buckets)
         kernel(
             grid=(batch_size,),
             args=(

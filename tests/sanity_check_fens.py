@@ -147,12 +147,14 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
 
         # Layer Stacks weight bounds
         max_l1 = q.weight_quantized_max_hidden / q.weight_scale_l1
+        max_psqt = q.weight_quantized_max_hidden / q.weight_scale_psqt
         max_up = q.weight_quantized_max_hidden / q.weight_scale_block_up
         max_down = q.weight_quantized_max_hidden / q.weight_scale_block_down
         max_out_res = q.weight_quantized_max_hidden / q.weight_scale_out_res
         max_out_act = q.weight_quantized_max_hidden / q.weight_scale_out_act
 
         hw_l1 = max_l1 * overshoot
+        hw_psqt = max_psqt * overshoot
         hw_up = max_up * overshoot
         hw_down = max_down * overshoot
         hw_out_res = max_out_res * overshoot
@@ -161,6 +163,7 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
         if fill_value is not None:
             model.layer_stacks.l1.linear.weight.data.fill_(fill_value * hw_l1)
             model.layer_stacks.l1.linear.bias.data.fill_(fill_value * hw_l1)
+            model.layer_stacks.psqt_linear.linear.weight.data.fill_(fill_value * hw_psqt)
             for block in model.layer_stacks.blocks:
                 block.up.linear.weight.data.fill_(fill_value * hw_up)
                 block.up.linear.bias.data.fill_(fill_value * hw_up)
@@ -176,6 +179,7 @@ def _fill_ft_weights(model: M.NNUEModel, fill_value: float | None, seed: int, ov
         else:
             model.layer_stacks.l1.linear.weight.data.uniform_(-hw_l1, hw_l1, generator=rng)
             model.layer_stacks.l1.linear.bias.data.uniform_(-hw_l1, hw_l1, generator=rng)
+            model.layer_stacks.psqt_linear.linear.weight.data.uniform_(-hw_psqt, hw_psqt, generator=rng)
             for block in model.layer_stacks.blocks:
                 block.up.linear.weight.data.uniform_(-hw_up, hw_up, generator=rng)
                 block.up.linear.bias.data.uniform_(-hw_up, hw_up, generator=rng)

@@ -10,12 +10,12 @@ from .sparse_linear_kernel import (
 _fused_double_ft_forward_kernel_cache = {}
 
 @torch.compiler.disable(recursive=False)
-def make_fused_double_ft_forward_kernel(max_active_indices: int, l1_size: int):
+def make_fused_double_ft_forward_kernel(max_active_indices: int, l1_size: int, num_psqt_buckets: int = 8):
     l1_quarter = l1_size // 4
     num_threads = _get_num_threads_for_forward(l1_quarter)
     output_thread_slice_size = l1_quarter // num_threads
 
-    key = (max_active_indices, l1_size, num_threads)
+    key = (max_active_indices, l1_size, num_threads, num_psqt_buckets)
     if key not in _fused_double_ft_forward_kernel_cache:
         kernel = cp.RawKernel(
             r"""
@@ -50,9 +50,7 @@ void fused_double_ft_forward(
 
     const int32_t l1_size = """ + str(l1_size) + r""";
     const int32_t l1_quarter = """ + str(l1_quarter) + r""";
-    const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
-    float w_psqt_val = __ldg(&bias[l1_size + p_idx]);
-    float b_psqt_val = __ldg(&bias[l1_size + p_idx]);
+    const int32_t num_psqt_buckets = """ + str(num_psqt_buckets) + r""";
 
     #pragma unroll
     for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
@@ -124,20 +122,24 @@ void fused_double_ft_forward(
     }
 
     if (threadIdx.x == 0) {
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int w_idx = w_idx_row[k];
-            if (w_idx != -1) {
-                w_psqt_val += __ldg(&weight[w_idx * output_size + l1_size + p_idx]);
-            } else break;
+        for (int p = 0; p < num_psqt_buckets; ++p) {
+            float w_psqt_val = __ldg(&bias[l1_size + p]);
+            float b_psqt_val = __ldg(&bias[l1_size + p]);
+            for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+                int w_idx = w_idx_row[k];
+                if (w_idx != -1) {
+                    w_psqt_val += __ldg(&weight[w_idx * output_size + l1_size + p]);
+                } else break;
+            }
+            for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
+                int b_idx = b_idx_row[k];
+                if (b_idx != -1) {
+                    b_psqt_val += __ldg(&weight[b_idx * output_size + l1_size + p]);
+                } else break;
+            }
+            wpsqt_out[block_idx * num_psqt_buckets + p] = w_psqt_val;
+            bpsqt_out[block_idx * num_psqt_buckets + p] = b_psqt_val;
         }
-        for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
-            int b_idx = b_idx_row[k];
-            if (b_idx != -1) {
-                b_psqt_val += __ldg(&weight[b_idx * output_size + l1_size + p_idx]);
-            } else break;
-        }
-        wpsqt_out[block_idx] = w_psqt_val;
-        bpsqt_out[block_idx] = b_psqt_val;
     }
 }
 """,
@@ -225,13 +227,12 @@ void fused_double_ft_backward(
         const int32_t* const w_idx_row = white_indices + block_idx * """ + str(max_active_indices) + r""";
         const int32_t* const b_idx_row = black_indices + block_idx * """ + str(max_active_indices) + r""";
 
-        const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
-        const float gw_psqt = __ldg(&grad_wpsqt[block_idx]);
-        const float gb_psqt = __ldg(&grad_bpsqt[block_idx]);
-        const uint32_t clamp_base = block_idx * 8 * l1_quarter;
-
         if (threadIdx.x == 0) {
-            shared_grad_bias[l1_size + p_idx] += gw_psqt + gb_psqt;
+            for (int p = 0; p < num_psqt_buckets; ++p) {
+                const float gw_psqt = __ldg(&grad_wpsqt[block_idx * num_psqt_buckets + p]);
+                const float gb_psqt = __ldg(&grad_bpsqt[block_idx * num_psqt_buckets + p]);
+                shared_grad_bias[l1_size + p] += gw_psqt + gb_psqt;
+            }
         }
 
         #pragma unroll
@@ -282,7 +283,12 @@ void fused_double_ft_backward(
             int w_idx = w_idx_row[k];
             if (w_idx == -1) break;
             if (threadIdx.x == 0) {
-                atomicAdd(&grad_weight[w_idx * output_size + l1_size + p_idx], gw_psqt);
+                for (int p = 0; p < num_psqt_buckets; ++p) {
+                    const float gw_psqt = __ldg(&grad_wpsqt[block_idx * num_psqt_buckets + p]);
+                    if (gw_psqt != 0.0f) {
+                        atomicAdd(&grad_weight[w_idx * output_size + l1_size + p], gw_psqt);
+                    }
+                }
             }
             #pragma unroll
             for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
@@ -298,7 +304,12 @@ void fused_double_ft_backward(
             int b_idx = b_idx_row[k];
             if (b_idx == -1) break;
             if (threadIdx.x == 0) {
-                atomicAdd(&grad_weight[b_idx * output_size + l1_size + p_idx], gb_psqt);
+                for (int p = 0; p < num_psqt_buckets; ++p) {
+                    const float gb_psqt = __ldg(&grad_bpsqt[block_idx * num_psqt_buckets + p]);
+                    if (gb_psqt != 0.0f) {
+                        atomicAdd(&grad_weight[b_idx * output_size + l1_size + p], gb_psqt);
+                    }
+                }
             }
             #pragma unroll
             for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {

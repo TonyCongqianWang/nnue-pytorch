@@ -52,10 +52,11 @@ class HalfKav2Hm(InputFeature):
     # Export size uses 11 piece types (704 * 32 = 22,528)
     NUM_REAL_FEATURES = 704 * 32  # 22,528
 
-    def __init__(self, num_outputs: int):
+    def __init__(self, num_outputs: int, num_psqt_buckets: int = 8):
         super().__init__()
 
         self.num_outputs = num_outputs
+        self.num_psqt_buckets = num_psqt_buckets
         self.weight = nn.Parameter(
             torch.empty(self.NUM_INPUTS, num_outputs, dtype=torch.float32)
         )
@@ -78,27 +79,11 @@ class HalfKav2Hm(InputFeature):
         self.virtual_weight.zero_()
 
     @torch.no_grad()
-    def init_weights(self, num_psqt_buckets: int, nnue2score: float) -> None:
-        """Initialize virtual weights to zero and set PSQT columns."""
+    def init_weights(self) -> None:
+        """Initialize virtual weights to zero and set PSQT columns using trunc_normal."""
         self.zero_virtual_weights()
-
-        scale = 1.0 / nnue2score
-        L1 = self.num_outputs - num_psqt_buckets
-
-        initial_values = self.halfka_psqts()
-        assert len(initial_values) == self.NUM_INPUTS
-
-        new_weights = (
-            torch.tensor(
-                initial_values,
-                device=self.weight.device,
-                dtype=self.weight.dtype,
-            )
-            * scale
-        )
-
-        for i in range(num_psqt_buckets):
-            self.weight[:, L1 + i] = new_weights
+        L1 = self.num_outputs - self.num_psqt_buckets
+        torch.nn.init.trunc_normal_(self.weight[:, L1:], mean=0.0, std=0.01, a=-0.03, b=0.03)
 
     @torch.no_grad()
     def get_export_weights(self) -> torch.Tensor:

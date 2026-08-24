@@ -9,11 +9,17 @@ from .inverted_bottleneck_block import (
     FinalInvertedBottleneckBlock,
     InvertedBottleneckBlock,
 )
-from .stacked_linear import FactorizedStackedLinear
+from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 
 class LayerStacks(nn.Module):
-    def __init__(self, count: int, config: LayerStacksConfig, quantization: QuantizationManager):
+    def __init__(
+        self,
+        count: int,
+        config: LayerStacksConfig,
+        quantization: QuantizationManager,
+        num_psqt_buckets: int = 8,
+    ):
         super().__init__()
 
         self.count = count
@@ -21,10 +27,14 @@ class LayerStacks(nn.Module):
         self.res_dim = config.res_dim
         self.expanded_dim = config.expanded_dim
         self.num_blocks = config.num_blocks
+        self.num_psqt_buckets = num_psqt_buckets
         self.quantization = quantization
 
         # Factorized linear for the first layer projecting to residual stream
         self.l1 = FactorizedStackedLinear(2 * self.L1 // 2, self.res_dim, count, quantization, "ls_l1")
+        self.psqt_linear = StackedLinear(
+            2 * num_psqt_buckets, self.res_dim, count, quantization, "ls_psqt", bias=False
+        )
 
         # Intermediate inverted bottleneck blocks
         self.blocks = nn.ModuleList([
@@ -51,11 +61,18 @@ class LayerStacks(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        psqt_features: torch.Tensor,
         ls_indices: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
-        res_stream = self.l1(x, ls_indices, fake_quantize_weights) * self.quantization.l1_correction_factor
+        psqt_features = self.quantization.clip_psqt_act(psqt_features)
+        if fake_quantize_acts:
+            psqt_features = self.quantization.fake_quantize_psqt_act(psqt_features)
+
+        l1_out = self.l1(x, ls_indices, fake_quantize_weights) * self.quantization.l1_correction_factor
+        psqt_out = self.psqt_linear(psqt_features, ls_indices, fake_quantize_weights)
+        res_stream = l1_out + psqt_out
 
         # Process intermediate blocks
         for block in self.blocks:

@@ -61,10 +61,9 @@ class QuantizationConfig:
     score_scale: float = 16.0
     weight_scale_l1: float = 256.0
     weight_scale_block_up: float = 256.0
-    weight_scale_block_down: float = 64.0
-    weight_scale_out_res: float = 256.0
-    weight_scale_out_act: float = 128.0
-    weight_scale_out: float = 128.0
+    weight_scale_block_down: float = 128.0
+    weight_scale_out_res: float = 1024.0
+    weight_scale_out_act: float = 512.0
     weight_quantized_max_hidden: float = 127.0 # i8 max
     ft_quantized_one: float = 256.0
     ft_quantized_max: float = 255.0 # limited to 255 for safe squaring within i16
@@ -89,7 +88,6 @@ class QuantizationManager:
         self.weight_scale_block_down = config.weight_scale_block_down
         self.weight_scale_out_res = config.weight_scale_out_res
         self.weight_scale_out_act = config.weight_scale_out_act
-        self.weight_scale_out = config.weight_scale_out
         self.weight_quantized_max_hidden = config.weight_quantized_max_hidden
         self.expanded_quantized_one = config.expanded_quantized_one
         self.res_quantized_one = config.res_quantized_one

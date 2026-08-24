@@ -18,8 +18,9 @@ class NNUEModel(nn.Module):
 
         feature_cls = get_feature_cls(feature_name)
         self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
+        self.res_dim = config.res_dim
+        self.expanded_dim = config.expanded_dim
+        self.num_blocks = config.num_blocks
 
         self.quantize_config = config.quantize_config
         self.quantization = QuantizationManager(config.quantize_config)
@@ -128,6 +129,11 @@ class NNUEModel(nn.Module):
         # The PSQT values are averaged over perspectives. "Their" perspective
         # has a negative influence (us-0.5 is 0.5 for white and -0.5 for black,
         # which does both the averaging and sign flip for black to move)
-        x = self.layer_stacks(l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights) + (wpsqt - bpsqt) * (us - 0.5)
+        if fake_quantize_acts:
+            psqt_term = self.quantization.fake_quantize_psqt(wpsqt, bpsqt, us)
+        else:
+            psqt_term = (wpsqt - bpsqt) * (us - 0.5)
+
+        x = self.layer_stacks(l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights) + psqt_term
 
         return x

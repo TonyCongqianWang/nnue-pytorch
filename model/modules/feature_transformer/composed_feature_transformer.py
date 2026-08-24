@@ -15,6 +15,11 @@ class ComposedFeatureTransformer(nn.Module):
     bias and delegates everything else to the underlying features.
     """
 
+    # FT permutation for this transformer operates on L1//4 indices within
+    # each of the 4 quarters of the raw side output, because the final L1
+    # input is a shuffled pairwise product of those quarters.
+    ft_permutation_mode: str = "quarters"
+
     def __init__(self, feature_classes: list[Callable[[int], InputFeature]], l1_size: int, num_psqt_buckets:int, quantization: QuantizationManager):
         super().__init__()
 

@@ -11,10 +11,10 @@ _fused_double_ft_forward_kernel_cache = {}
 
 @torch.compiler.disable(recursive=False)
 def make_fused_double_ft_forward_kernel(max_active_indices: int, l1_size: int):
-    l1_half = l1_size // 2
-    num_threads = _get_num_threads_for_forward(l1_half)
-    output_thread_slice_size = l1_half // num_threads
-    
+    l1_quarter = l1_size // 4
+    num_threads = _get_num_threads_for_forward(l1_quarter)
+    output_thread_slice_size = l1_quarter // num_threads
+
     key = (max_active_indices, l1_size, num_threads)
     if key not in _fused_double_ft_forward_kernel_cache:
         kernel = cp.RawKernel(
@@ -49,7 +49,7 @@ void fused_double_ft_forward(
     const int32_t* const b_idx_row = black_indices + block_idx * """ + str(max_active_indices) + r""";
 
     const int32_t l1_size = """ + str(l1_size) + r""";
-    const int32_t l1_half = """ + str(l1_half) + r""";
+    const int32_t l1_quarter = """ + str(l1_quarter) + r""";
     const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
     float w_psqt_val = __ldg(&bias[l1_size + p_idx]);
     float b_psqt_val = __ldg(&bias[l1_size + p_idx]);
@@ -58,15 +58,22 @@ void fused_double_ft_forward(
     for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
         uint32_t i = slice_offset + s;
         float w0 = __ldg(&bias[i]);
-        float w1 = __ldg(&bias[i + l1_half]);
+        float w1 = __ldg(&bias[i + 1 * l1_quarter]);
+        float w2 = __ldg(&bias[i + 2 * l1_quarter]);
+        float w3 = __ldg(&bias[i + 3 * l1_quarter]);
+
         float b0 = __ldg(&bias[i]);
-        float b1 = __ldg(&bias[i + l1_half]);
+        float b1 = __ldg(&bias[i + 1 * l1_quarter]);
+        float b2 = __ldg(&bias[i + 2 * l1_quarter]);
+        float b3 = __ldg(&bias[i + 3 * l1_quarter]);
 
         for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
             int w_idx = w_idx_row[k];
             if (w_idx != -1) {
                 w0 += __ldg(&weight[w_idx * output_size + i]);
-                w1 += __ldg(&weight[w_idx * output_size + i + l1_half]);
+                w1 += __ldg(&weight[w_idx * output_size + i + 1 * l1_quarter]);
+                w2 += __ldg(&weight[w_idx * output_size + i + 2 * l1_quarter]);
+                w3 += __ldg(&weight[w_idx * output_size + i + 3 * l1_quarter]);
             } else break;
         }
 
@@ -74,28 +81,46 @@ void fused_double_ft_forward(
             int b_idx = b_idx_row[k];
             if (b_idx != -1) {
                 b0 += __ldg(&weight[b_idx * output_size + i]);
-                b1 += __ldg(&weight[b_idx * output_size + i + l1_half]);
+                b1 += __ldg(&weight[b_idx * output_size + i + 1 * l1_quarter]);
+                b2 += __ldg(&weight[b_idx * output_size + i + 2 * l1_quarter]);
+                b3 += __ldg(&weight[b_idx * output_size + i + 3 * l1_quarter]);
             } else break;
         }
 
         float l0_w0 = us_val * w0 + them_val * b0;
         float l0_w1 = us_val * w1 + them_val * b1;
+        float l0_w2 = us_val * w2 + them_val * b2;
+        float l0_w3 = us_val * w3 + them_val * b3;
+
         float l0_b0 = us_val * b0 + them_val * w0;
         float l0_b1 = us_val * b1 + them_val * w1;
+        float l0_b2 = us_val * b2 + them_val * w2;
+        float l0_b3 = us_val * b3 + them_val * w3;
 
         if (l0_w0 < 0.0f) l0_w0 = 0.0f; else if (l0_w0 > max_ft_act) l0_w0 = max_ft_act;
         if (l0_w1 < 0.0f) l0_w1 = 0.0f; else if (l0_w1 > max_ft_act) l0_w1 = max_ft_act;
+        if (l0_w2 < 0.0f) l0_w2 = 0.0f; else if (l0_w2 > max_ft_act) l0_w2 = max_ft_act;
+        if (l0_w3 < 0.0f) l0_w3 = 0.0f; else if (l0_w3 > max_ft_act) l0_w3 = max_ft_act;
+
         if (l0_b0 < 0.0f) l0_b0 = 0.0f; else if (l0_b0 > max_ft_act) l0_b0 = max_ft_act;
         if (l0_b1 < 0.0f) l0_b1 = 0.0f; else if (l0_b1 > max_ft_act) l0_b1 = max_ft_act;
+        if (l0_b2 < 0.0f) l0_b2 = 0.0f; else if (l0_b2 > max_ft_act) l0_b2 = max_ft_act;
+        if (l0_b3 < 0.0f) l0_b3 = 0.0f; else if (l0_b3 > max_ft_act) l0_b3 = max_ft_act;
 
-        l0_out[block_idx * l1_size + i] = l0_w0 * l0_w1;
-        l0_out[block_idx * l1_size + l1_half + i] = l0_b0 * l0_b1;
+        l0_out[block_idx * l1_size + 0 * l1_quarter + i] = l0_w0 * l0_w1;
+        l0_out[block_idx * l1_size + 1 * l1_quarter + i] = l0_b0 * l0_b1;
+        l0_out[block_idx * l1_size + 2 * l1_quarter + i] = l0_w2 * l0_b3;
+        l0_out[block_idx * l1_size + 3 * l1_quarter + i] = l0_b2 * l0_w3;
 
-        const uint32_t clamp_base = block_idx * 4 * l1_half;
-        clamped_out[clamp_base + 0 * l1_half + i] = l0_w0;
-        clamped_out[clamp_base + 1 * l1_half + i] = l0_w1;
-        clamped_out[clamp_base + 2 * l1_half + i] = l0_b0;
-        clamped_out[clamp_base + 3 * l1_half + i] = l0_b1;
+        const uint32_t clamp_base = block_idx * 8 * l1_quarter;
+        clamped_out[clamp_base + 0 * l1_quarter + i] = l0_w0;
+        clamped_out[clamp_base + 1 * l1_quarter + i] = l0_w1;
+        clamped_out[clamp_base + 2 * l1_quarter + i] = l0_w2;
+        clamped_out[clamp_base + 3 * l1_quarter + i] = l0_w3;
+        clamped_out[clamp_base + 4 * l1_quarter + i] = l0_b0;
+        clamped_out[clamp_base + 5 * l1_quarter + i] = l0_b1;
+        clamped_out[clamp_base + 6 * l1_quarter + i] = l0_b2;
+        clamped_out[clamp_base + 7 * l1_quarter + i] = l0_b3;
     }
 
     if (threadIdx.x == 0) {
@@ -130,9 +155,9 @@ _fused_double_ft_backward_kernel_cache = {}
 
 @torch.compiler.disable(recursive=False)
 def make_fused_double_ft_backward_kernel(max_active_indices: int, l1_size: int, tile_size: int = BACKWARD_TILE_SIZE, num_psqt_buckets: int = 8):
-    l1_half = l1_size // 2
-    num_threads = _get_num_threads_for_backward(l1_half)
-    output_thread_slice_size = l1_half // num_threads
+    l1_quarter = l1_size // 4
+    num_threads = _get_num_threads_for_backward(l1_quarter)
+    output_thread_slice_size = l1_quarter // num_threads
     output_size = l1_size + num_psqt_buckets
 
     key = (max_active_indices, l1_size, num_threads, tile_size, num_psqt_buckets)
@@ -166,7 +191,7 @@ void fused_double_ft_backward(
     const uint32_t slice_offset = threadIdx.x * """ + str(output_thread_slice_size) + r""";
 
     const int32_t l1_size = """ + str(l1_size) + r""";
-    const int32_t l1_half = """ + str(l1_half) + r""";
+    const int32_t l1_quarter = """ + str(l1_quarter) + r""";
     const int32_t tile_size = """ + str(tile_size) + r""";
 
     __shared__ float shared_grad_bias[""" + str(output_size) + r"""];
@@ -177,10 +202,18 @@ void fused_double_ft_backward(
 
     float g_w0[ """ + str(output_thread_slice_size) + r""" ];
     float g_w1[ """ + str(output_thread_slice_size) + r""" ];
+    float g_w2[ """ + str(output_thread_slice_size) + r""" ];
+    float g_w3[ """ + str(output_thread_slice_size) + r""" ];
+
     float g_b0[ """ + str(output_thread_slice_size) + r""" ];
     float g_b1[ """ + str(output_thread_slice_size) + r""" ];
+    float g_b2[ """ + str(output_thread_slice_size) + r""" ];
+    float g_b3[ """ + str(output_thread_slice_size) + r""" ];
+
     float bias_acc0[ """ + str(output_thread_slice_size) + r""" ];
     float bias_acc1[ """ + str(output_thread_slice_size) + r""" ];
+    float bias_acc2[ """ + str(output_thread_slice_size) + r""" ];
+    float bias_acc3[ """ + str(output_thread_slice_size) + r""" ];
 
     for (int t = 0; t < tile_size; ++t) {
         const uint32_t block_idx = tile_idx * tile_size + t;
@@ -195,7 +228,7 @@ void fused_double_ft_backward(
         const int64_t p_idx = __ldg(&psqt_indices[block_idx]);
         const float gw_psqt = __ldg(&grad_wpsqt[block_idx]);
         const float gb_psqt = __ldg(&grad_bpsqt[block_idx]);
-        const uint32_t clamp_base = block_idx * 4 * l1_half;
+        const uint32_t clamp_base = block_idx * 8 * l1_quarter;
 
         if (threadIdx.x == 0) {
             shared_grad_bias[l1_size + p_idx] += gw_psqt + gb_psqt;
@@ -204,26 +237,45 @@ void fused_double_ft_backward(
         #pragma unroll
         for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
             uint32_t i = slice_offset + s;
-            float clamped_w0 = __ldg(&clamped_out[clamp_base + 0 * l1_half + i]);
-            float clamped_w1 = __ldg(&clamped_out[clamp_base + 1 * l1_half + i]);
-            float clamped_b0 = __ldg(&clamped_out[clamp_base + 2 * l1_half + i]);
-            float clamped_b1 = __ldg(&clamped_out[clamp_base + 3 * l1_half + i]);
+            float clamped_w0 = __ldg(&clamped_out[clamp_base + 0 * l1_quarter + i]);
+            float clamped_w1 = __ldg(&clamped_out[clamp_base + 1 * l1_quarter + i]);
+            float clamped_w2 = __ldg(&clamped_out[clamp_base + 2 * l1_quarter + i]);
+            float clamped_w3 = __ldg(&clamped_out[clamp_base + 3 * l1_quarter + i]);
 
-            float gl0_i    = __ldg(&grad_l0[block_idx * l1_size + i]);
-            float gl0_i_h  = __ldg(&grad_l0[block_idx * l1_size + l1_half + i]);
+            float clamped_b0 = __ldg(&clamped_out[clamp_base + 4 * l1_quarter + i]);
+            float clamped_b1 = __ldg(&clamped_out[clamp_base + 5 * l1_quarter + i]);
+            float clamped_b2 = __ldg(&clamped_out[clamp_base + 6 * l1_quarter + i]);
+            float clamped_b3 = __ldg(&clamped_out[clamp_base + 7 * l1_quarter + i]);
 
-            float dw0 = (clamped_w0 == 0.0f || clamped_w0 == max_ft_act) ? 0.0f : gl0_i   * clamped_w1;
-            float dw1 = (clamped_w1 == 0.0f || clamped_w1 == max_ft_act) ? 0.0f : gl0_i   * clamped_w0;
-            float db0 = (clamped_b0 == 0.0f || clamped_b0 == max_ft_act) ? 0.0f : gl0_i_h * clamped_b1;
-            float db1 = (clamped_b1 == 0.0f || clamped_b1 == max_ft_act) ? 0.0f : gl0_i_h * clamped_b0;
+            float gl0_0 = __ldg(&grad_l0[block_idx * l1_size + 0 * l1_quarter + i]);
+            float gl0_1 = __ldg(&grad_l0[block_idx * l1_size + 1 * l1_quarter + i]);
+            float gl0_2 = __ldg(&grad_l0[block_idx * l1_size + 2 * l1_quarter + i]);
+            float gl0_3 = __ldg(&grad_l0[block_idx * l1_size + 3 * l1_quarter + i]);
+
+            float dw0 = (clamped_w0 == 0.0f || clamped_w0 == max_ft_act) ? 0.0f : gl0_0 * clamped_w1;
+            float dw1 = (clamped_w1 == 0.0f || clamped_w1 == max_ft_act) ? 0.0f : gl0_0 * clamped_w0;
+            float dw2 = (clamped_w2 == 0.0f || clamped_w2 == max_ft_act) ? 0.0f : gl0_2 * clamped_b3;
+            float dw3 = (clamped_w3 == 0.0f || clamped_w3 == max_ft_act) ? 0.0f : gl0_3 * clamped_b2;
+
+            float db0 = (clamped_b0 == 0.0f || clamped_b0 == max_ft_act) ? 0.0f : gl0_1 * clamped_b1;
+            float db1 = (clamped_b1 == 0.0f || clamped_b1 == max_ft_act) ? 0.0f : gl0_1 * clamped_b0;
+            float db2 = (clamped_b2 == 0.0f || clamped_b2 == max_ft_act) ? 0.0f : gl0_3 * clamped_w3;
+            float db3 = (clamped_b3 == 0.0f || clamped_b3 == max_ft_act) ? 0.0f : gl0_2 * clamped_w2;
 
             g_w0[s] = us_val * dw0 + them_val * db0;
             g_w1[s] = us_val * dw1 + them_val * db1;
+            g_w2[s] = us_val * dw2 + them_val * db2;
+            g_w3[s] = us_val * dw3 + them_val * db3;
+
             g_b0[s] = them_val * dw0 + us_val * db0;
             g_b1[s] = them_val * dw1 + us_val * db1;
+            g_b2[s] = them_val * dw2 + us_val * db2;
+            g_b3[s] = them_val * dw3 + us_val * db3;
 
             bias_acc0[s] = g_w0[s] + g_b0[s];
             bias_acc1[s] = g_w1[s] + g_b1[s];
+            bias_acc2[s] = g_w2[s] + g_b2[s];
+            bias_acc3[s] = g_w3[s] + g_b3[s];
         }
 
         for(int k=0; k<""" + str(max_active_indices) + r"""; ++k) {
@@ -235,8 +287,10 @@ void fused_double_ft_backward(
             #pragma unroll
             for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
                 uint32_t i = slice_offset + s;
-                atomicAdd(&grad_weight[w_idx * output_size + i],           g_w0[s]);
-                atomicAdd(&grad_weight[w_idx * output_size + i + l1_half], g_w1[s]);
+                atomicAdd(&grad_weight[w_idx * output_size + i + 0 * l1_quarter], g_w0[s]);
+                atomicAdd(&grad_weight[w_idx * output_size + i + 1 * l1_quarter], g_w1[s]);
+                atomicAdd(&grad_weight[w_idx * output_size + i + 2 * l1_quarter], g_w2[s]);
+                atomicAdd(&grad_weight[w_idx * output_size + i + 3 * l1_quarter], g_w3[s]);
             }
         }
 
@@ -249,16 +303,20 @@ void fused_double_ft_backward(
             #pragma unroll
             for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
                 uint32_t i = slice_offset + s;
-                atomicAdd(&grad_weight[b_idx * output_size + i],           g_b0[s]);
-                atomicAdd(&grad_weight[b_idx * output_size + i + l1_half], g_b1[s]);
+                atomicAdd(&grad_weight[b_idx * output_size + i + 0 * l1_quarter], g_b0[s]);
+                atomicAdd(&grad_weight[b_idx * output_size + i + 1 * l1_quarter], g_b1[s]);
+                atomicAdd(&grad_weight[b_idx * output_size + i + 2 * l1_quarter], g_b2[s]);
+                atomicAdd(&grad_weight[b_idx * output_size + i + 3 * l1_quarter], g_b3[s]);
             }
         }
 
         #pragma unroll
         for (uint32_t s = 0; s < """ + str(output_thread_slice_size) + r"""; ++s) {
             uint32_t i = slice_offset + s;
-            shared_grad_bias[i]           += bias_acc0[s];
-            shared_grad_bias[i + l1_half] += bias_acc1[s];
+            shared_grad_bias[i + 0 * l1_quarter] += bias_acc0[s];
+            shared_grad_bias[i + 1 * l1_quarter] += bias_acc1[s];
+            shared_grad_bias[i + 2 * l1_quarter] += bias_acc2[s];
+            shared_grad_bias[i + 3 * l1_quarter] += bias_acc3[s];
         }
     }
 

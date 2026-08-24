@@ -122,11 +122,24 @@ class NNUEWriter:
         self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
         self.write_feature_transformer(model, ft_compression)
         layer_stacks = model.layer_stacks
-        for bucket, (l1, l2, output) in enumerate(layer_stacks.get_coalesced_layer_stacks()):
+        for b in range(model.num_ls_buckets):
             self.int32(fc_hash)  # FC layers hash
-            self.write_fc_layer(model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}")
-            self.write_fc_layer(model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}")
-            self.write_fc_layer(model, output, layer_stacks.output.layer_key, f"bucket {bucket}")
+            l1_linear = layer_stacks.l1.at_index(b)
+            self.write_fc_layer(model, l1_linear, layer_stacks.l1.layer_key, f"bucket {b} l1")
+
+            for i, block in enumerate(layer_stacks.blocks):
+                up_linear = block.up.at_index(b)
+                self.write_fc_layer(model, up_linear, block.up.layer_key, f"bucket {b} b{i}_up")
+                self.write_dual_act_bias(model, block.act.sqr_bias, block.up.layer_key, f"bucket {b} b{i}_act")
+                down_linear = block.down.at_index(b)
+                self.write_fc_layer(model, down_linear, block.down.layer_key, f"bucket {b} b{i}_down")
+
+            final_up_linear = layer_stacks.final_block.up.at_index(b)
+            self.write_fc_layer(model, final_up_linear, layer_stacks.final_block.up.layer_key, f"bucket {b} final_up")
+            self.write_dual_act_bias(model, layer_stacks.final_block.act.sqr_bias, layer_stacks.final_block.up.layer_key, f"bucket {b} final_act")
+            output_res_linear = layer_stacks.final_block.output_res.at_index(b)
+            output_act_linear = layer_stacks.final_block.output_act.at_index(b)
+            self.write_output_layer(model, output_res_linear, output_act_linear, f"bucket {b} output")
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -134,19 +147,19 @@ class NNUEWriter:
         prev_hash = 0xEC42E90D
         prev_hash ^= model.L1 * 2
 
-        # Fully connected layers
-        layers = [
-            model.layer_stacks.l1.linear,
-            model.layer_stacks.l2.linear,
-            model.layer_stacks.output.linear,
-        ]
+        ls = model.layer_stacks
+        layers = [ls.l1.linear]
+        for block in ls.blocks:
+            layers.extend([block.up.linear, block.down.linear])
+        layers.extend([ls.final_block.up.linear, ls.final_block.output_res.linear])
+
         for layer in layers:
             layer_hash = 0xCC03DAE4
             layer_hash += layer.out_features // model.num_ls_buckets
             layer_hash ^= prev_hash >> 1
             layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
             if layer.out_features // model.num_ls_buckets != 1:
-                # Clipped ReLU hash
+                # Activation hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
         return layer_hash
@@ -240,6 +253,50 @@ class NNUEWriter:
         # Weights stored as [outputs][inputs], so we can flatten
         self.write_tensor(weight, "none")
 
+    def write_output_layer(
+        self,
+        model: NNUEModel,
+        res_layer: nn.Linear,
+        act_layer: nn.Linear,
+        desc: str,
+    ) -> None:
+        bias = res_layer.bias.data
+        w_res = res_layer.weight.data
+        w_act = act_layer.weight.data
+
+        bias, w_res = model.quantization.quantize_fc_layer(
+            bias, w_res, "ls_output_res", get_histogram_callback(f"{desc}_res", self.verbose)
+        )
+        _, w_act = model.quantization.quantize_fc_layer(
+            bias, w_act, "ls_output_act", get_histogram_callback(f"{desc}_act", self.verbose)
+        )
+        weight = torch.cat([w_res, w_act], dim=1)
+
+        num_input = weight.shape[1]
+        if num_input % 32 != 0:
+            num_input += 32 - (num_input % 32)
+            new_w = torch.zeros(weight.shape[0], num_input, dtype=torch.int8)
+            new_w[:, : weight.shape[1]] = weight
+            weight = new_w
+
+        self.write_tensor(bias, "none")
+        self.write_tensor(weight, "none")
+
+    def write_dual_act_bias(
+        self,
+        model: NNUEModel,
+        sqr_bias: torch.Tensor,
+        layer_key: str | None,
+        desc: str,
+    ) -> None:
+        if layer_key is None:
+            raise RuntimeError("layer_key required for quantization.")
+
+        bias = model.quantization.quantize_bias(
+            sqr_bias, layer_key, get_histogram_callback(desc, self.verbose)
+        )
+        self.write_tensor(bias, "none")
+
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v))
 
@@ -265,29 +322,50 @@ class NNUEReader:
 
         self.read_feature_transformer(self.model.input, self.model.num_psqt_buckets)
 
-        layers = [
-            self.model.layer_stacks.l1,
-            self.model.layer_stacks.l2,
-            self.model.layer_stacks.output,
-        ]
+        ls = self.model.layer_stacks
         num_ls_buckets = self.model.num_ls_buckets
-        l_w_slices = [
-            torch.chunk(layer.linear.weight.data, num_ls_buckets, dim=0)
-            for layer in layers
+
+        l1_w_slices = torch.chunk(ls.l1.linear.weight.data, num_ls_buckets, dim=0)
+        l1_b_slices = torch.chunk(ls.l1.linear.bias.data, num_ls_buckets, dim=0)
+
+        block_up_w_slices = [
+            torch.chunk(block.up.linear.weight.data, num_ls_buckets, dim=0)
+            for block in ls.blocks
         ]
-        l_b_slices = [
-            torch.chunk(layer.linear.bias.data, num_ls_buckets, dim=0)
-            for layer in layers
+        block_up_b_slices = [
+            torch.chunk(block.up.linear.bias.data, num_ls_buckets, dim=0)
+            for block in ls.blocks
         ]
+        block_down_w_slices = [
+            torch.chunk(block.down.linear.weight.data, num_ls_buckets, dim=0)
+            for block in ls.blocks
+        ]
+        block_down_b_slices = [
+            torch.chunk(block.down.linear.bias.data, num_ls_buckets, dim=0)
+            for block in ls.blocks
+        ]
+
+        final_up_w_slices = torch.chunk(ls.final_block.up.linear.weight.data, num_ls_buckets, dim=0)
+        final_up_b_slices = torch.chunk(ls.final_block.up.linear.bias.data, num_ls_buckets, dim=0)
+
+        output_res_w_slices = torch.chunk(ls.final_block.output_res.linear.weight.data, num_ls_buckets, dim=0)
+        output_res_b_slices = torch.chunk(ls.final_block.output_res.linear.bias.data, num_ls_buckets, dim=0)
+        output_act_w_slices = torch.chunk(ls.final_block.output_act.linear.weight.data, num_ls_buckets, dim=0)
 
         for b in range(num_ls_buckets):
             self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                self.read_fc_layer(
-                    l_w_slices[layer_idx][b],
-                    l_b_slices[layer_idx][b],
-                    layers[layer_idx].layer_key,
-                )
+            self.read_fc_layer(l1_w_slices[b], l1_b_slices[b], ls.l1.layer_key)
+
+            for i, block in enumerate(ls.blocks):
+                self.read_fc_layer(block_up_w_slices[i][b], block_up_b_slices[i][b], block.up.layer_key)
+                self.read_dual_act_bias(block.act.sqr_bias, block.up.layer_key)
+                self.read_fc_layer(block_down_w_slices[i][b], block_down_b_slices[i][b], block.down.layer_key)
+
+            self.read_fc_layer(final_up_w_slices[b], final_up_b_slices[b], ls.final_block.up.layer_key)
+            self.read_dual_act_bias(ls.final_block.act.sqr_bias, ls.final_block.up.layer_key)
+            self.read_output_layer(
+                output_res_w_slices[b], output_res_b_slices[b], output_act_w_slices[b]
+            )
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
@@ -392,6 +470,43 @@ class NNUEReader:
 
         layer_bias_t.data.copy_(layer_bias)
         layer_weight_t.data.copy_(layer_weight)
+
+    def read_output_layer(
+        self,
+        res_weight_t: torch.Tensor,
+        res_bias_t: torch.Tensor,
+        act_weight_t: torch.Tensor,
+    ) -> None:
+        res_dim = res_weight_t.shape[1]
+        act_dim = act_weight_t.shape[1]
+        total_dim = res_dim + act_dim
+        padded_shape = (res_weight_t.shape[0], ((total_dim + 31) // 32) * 32)
+
+        bias = self.tensor(np.int32, res_bias_t.shape)
+        weight = self.tensor(np.int8, padded_shape)
+
+        w_res_raw = weight[:, :res_dim]
+        w_act_raw = weight[:, res_dim:total_dim]
+
+        bias, w_res = self.model.quantization.dequantize_fc_layer(
+            bias, w_res_raw, "ls_output_res"
+        )
+        _, w_act = self.model.quantization.dequantize_fc_layer(
+            bias, w_act_raw, "ls_output_act"
+        )
+
+        res_bias_t.data.copy_(bias.to(torch.float32))
+        res_weight_t.data.copy_(w_res.to(torch.float32))
+        act_weight_t.data.copy_(w_act.to(torch.float32))
+
+    def read_dual_act_bias(
+        self,
+        sqr_bias_t: torch.Tensor,
+        layer_key: str,
+    ) -> None:
+        bias = self.tensor(np.int32, sqr_bias_t.shape)
+        bias = self.model.quantization.dequantize_bias(bias, layer_key)
+        sqr_bias_t.data.copy_(bias.to(torch.float32))
 
     def read_int32(self, expected: int | None = None) -> int:
         v = struct.unpack("<I", self.f.read(4))[0]

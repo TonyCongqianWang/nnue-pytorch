@@ -2,32 +2,33 @@
 
 NOTE: This script uses CUDA and may require large amounts of VRAM. Decrease --count if encountering problems.
 
+This branch trains resnet2 networks that use a double feature transformer.
+For this architecture the FT permutation operates on L1//4 indices within each
+of the 4 raw side-output quarters, because the L1 input is a shuffled pairwise
+product of those quarters.
+
 Example use:
 
 1. Generate the activation matrix for some sample dataset.
 
-python ftperm.py gather --data=data\fishpack32.binpack --net=networks\nn-5af11540bbfe.nnue --count=1000000 --features=HalfKAv2_hm^ --out ftact1m.npy
+python ftperm.py gather --data=data/fishpack32.binpack --net=nonopt.nnue --count=100000 --features=Full_Threats+PP_3Wide+HalfKAv2_hm^ --out ftact.npy
 
-python ftperm.py gather --data=noob_master_leaf_static_d12_85M_0.binpack --net=nn-5af11540bbfe.nnue --count=10000 --features=HalfKAv2_hm^ --out ftact1m.npy
+2. Find a permutation (length L1//4)
 
-2. Find a permutation
-
-python ftperm.py find_perm --data=ftact1m.npy --out=ftact.perm
+python ftperm.py find_perm --data=ftact.npy --out=ftact.perm
 
 3. Test the permutation against the baseline
 
-python ftperm.py eval_perm --data=ftact1m.npy --perm=ftact.perm
+python ftperm.py eval_perm --data=ftact.npy --perm=ftact.perm
 
 4. Apply permutation and save
-python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm^ --ft_perm=ftact.perm
+python serialize.py nonopt.nnue permuted.nnue --features=Full_Threats+PP_3Wide+HalfKAv2_hm^ --ft_perm=ftact.perm
 
 ----------------------------------------------------------------
 
 OR do the whole process in one step
 
-python serialize.py networks\nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm^ --ft_optimize --ft_optimize_data=data\fishpack32.binpack --ft_optimize_count=1000000
-
-python serialize.py nn-5af11540bbfe.nnue permuted.nnue --features=HalfKAv2_hm^ --ft_optimize --ft_optimize_data=noob_master_leaf_static_d12_85M_0.binpack --ft_optimize_count=10000
+python serialize.py nonopt.nnue permuted.nnue --features=Full_Threats+PP_3Wide+HalfKAv2_hm^ --ft_optimize --ft_optimize_data=data/fishpack32.binpack --ft_optimize_count=100000
 
 """
 
@@ -69,6 +70,12 @@ Algorithm by Daniel Monroe. Github @Ergodice.
 ZERO_BLOCK_SIZE = 4
 VERBOSE = False
 _DEVICE_OVERRIDE = None
+
+
+def _ft_perm_mode(model: NNUEModel) -> str:
+    """Return the FT-permutation mode of the model's input transformer."""
+    return getattr(model.input, "ft_permutation_mode", "halves")
+
 
 @dataclass
 class GatherConfig:
@@ -423,19 +430,22 @@ def make_swaps_3(actmat: torch.Tensor) -> SwapResult:
 
 
 def find_perm_impl(
-    actmat: npt.NDArray[np.bool_] | torch.Tensor, device_str: str, L1: int
+    actmat: npt.NDArray[np.bool_] | torch.Tensor, device_str: str, n_neurons: int
 ) -> npt.NDArray[np.int_]:
     if isinstance(actmat, np.ndarray):
-        actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
         actmat = torch.from_numpy(actmat).to(device_str)
     else:
-        actmat = actmat.reshape((actmat.shape[0] * 2, actmat.shape[1] // 2))
         actmat = actmat.to(device_str)
+
+    if actmat.shape[1] != n_neurons:
+        raise ValueError(
+            f"Activation matrix has {actmat.shape[1]} columns, expected {n_neurons}."
+        )
 
     actmat_orig = actmat.clone()
 
     total_score_change = 0
-    perm = np.arange(L1 // 2)
+    perm = np.arange(n_neurons)
 
     stages: list[SwapFunction] = [make_swaps_2, make_swaps_3]
     # The optimization routines are deterministic, so no need to retry.
@@ -555,27 +565,65 @@ def eval_ft(model: NNUEModel, batch: Iterable[torch.Tensor], device_str: str) ->
 
 @torch.no_grad()
 def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
-    permutation = list(perm)
-
+    mode = _ft_perm_mode(model)
     l1_size = model.layer_stacks.l1.linear.in_features
-    if l1_size != len(permutation) * 2:
-        raise ValueError(
-            f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
+
+    if mode == "quarters":
+        # For the double feature transformer the L1 input is a shuffled product of
+        # 4 quarter-vectors of length q.  A valid permutation acts within each
+        # quarter identically.
+        q = l1_size // 4
+        if l1_size % 16 != 0:
+            raise ValueError(
+                f"Quarter-mode FT permutation requires L1 to be a multiple of 16, got {l1_size}."
+            )
+        if len(perm) != q:
+            raise ValueError(
+                f"Invalid permutation size for quarter mode. Expected {q}. Got {len(perm)}."
+            )
+
+        raw_perm = np.concatenate([perm + r * q for r in range(4)])
+        ft_permutation = np.concatenate(
+            [raw_perm, np.arange(l1_size, model.input.num_outputs)]
         )
 
-    # Both sides of the FT must use the same permutation.
-    permutation.extend([x + l1_size // 2 for x in permutation])
+        # Apply the permutation in place.
+        for f in model.input.features:
+            f.weight.copy_(f.weight[:, ft_permutation])
+            if hasattr(f, "virtual_weight"):
+                f.virtual_weight.copy_(f.virtual_weight[:, ft_permutation])
+        model.input.bias.copy_(model.input.bias[ft_permutation])
 
-    # Add identity permutation for PSQT weights
-    ft_permutation = permutation + list(range(l1_size, model.input.num_outputs))
+        l1 = model.layer_stacks.l1.linear
+        l1.weight.copy_(l1.weight[:, raw_perm])
+        if hasattr(model.layer_stacks.l1, "factorized_linear"):
+            model.layer_stacks.l1.factorized_linear.weight.copy_(
+                model.layer_stacks.l1.factorized_linear.weight[:, raw_perm]
+            )
 
-    # Apply the permutation in place.
-    for f in model.input.features:
-        f.weight.copy_(f.weight[:, ft_permutation])
-    model.input.bias.copy_(model.input.bias[ft_permutation])
-    model.layer_stacks.l1.linear.weight.copy_(model.layer_stacks.l1.linear.weight[
-        :, permutation
-    ])
+    elif mode == "halves":
+        permutation = list(perm)
+        if l1_size != len(permutation) * 2:
+            raise ValueError(
+                f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
+            )
+
+        # Both sides of the FT must use the same permutation.
+        permutation.extend([x + l1_size // 2 for x in permutation])
+
+        # Add identity permutation for PSQT weights
+        ft_permutation = permutation + list(range(l1_size, model.input.num_outputs))
+
+        # Apply the permutation in place.
+        for f in model.input.features:
+            f.weight.copy_(f.weight[:, ft_permutation])
+        model.input.bias.copy_(model.input.bias[ft_permutation])
+        model.layer_stacks.l1.linear.weight.copy_(model.layer_stacks.l1.linear.weight[
+            :, permutation
+        ])
+
+    else:
+        raise ValueError(f"Unknown ft_permutation_mode: {mode}")
 
 
 def ft_permute(model: NNUEModel, ft_perm_path: str) -> None:
@@ -671,8 +719,6 @@ def eval_act_mat(actmat: npt.NDArray[np.bool_]) -> float:
 def eval_perm_impl(
     actmat: npt.NDArray[np.bool_], perm: npt.NDArray[np.int_] | None = None
 ) -> None:
-    actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
-
     actmat_eval = eval_act_mat(actmat)
     print(f"Combined zeros in base matrix: {actmat_eval * 100:0.6f}")
 
@@ -687,13 +733,32 @@ def command_eval_perm(args: FeaturePermutationConfig) -> None:
     with open(args.subcommand.data, "rb") as file:
         actmat = np.load(file)
 
+    if actmat.ndim != 2 or actmat.shape[1] != args.model_config.L1:
+        raise ValueError(
+            f"Activation matrix shape {actmat.shape} does not match L1={args.model_config.L1}."
+        )
+
     if args.subcommand.perm is not None:
         with open(args.subcommand.perm, "rb") as file:
             perm = np.load(file)
     else:
         perm = None
 
-    eval_perm_impl(actmat, perm)
+    mode = _ft_perm_mode(NNUEModel(M.FeatureConfig().features, args.model_config))
+    if mode == "quarters":
+        q = args.model_config.L1 // 4
+        actmat_q = actmat.reshape(-1, q)
+        if perm is not None and len(perm) != q:
+            raise ValueError(f"Permutation length {len(perm)} does not match quarter mode ({q}).")
+        eval_perm_impl(actmat_q, perm)
+    elif mode == "halves":
+        n = args.model_config.L1 // 2
+        actmat_h = actmat.reshape(-1, n)
+        if perm is not None and len(perm) != n:
+            raise ValueError(f"Permutation length {len(perm)} does not match halves mode ({n}).")
+        eval_perm_impl(actmat_h, perm)
+    else:
+        raise ValueError(f"Unknown ft_permutation_mode: {mode}")
 
 
 def command_find_perm(args: FeaturePermutationConfig) -> None:
@@ -701,10 +766,25 @@ def command_find_perm(args: FeaturePermutationConfig) -> None:
     with open(args.subcommand.data, "rb") as file:
         actmat = np.load(file)
 
-    device_str = resolve_device(args.use_cupy, args.device)
-    perm = find_perm_impl(actmat, device_str, args.model_config.L1)
+    if actmat.ndim != 2 or actmat.shape[1] != args.model_config.L1:
+        raise ValueError(
+            f"Activation matrix shape {actmat.shape} does not match L1={args.model_config.L1}."
+        )
 
-    # perm = np.random.permutation([i for i in range(L1)])
+    device_str = resolve_device(args.use_cupy, args.device)
+    mode = _ft_perm_mode(NNUEModel(M.FeatureConfig().features, args.model_config))
+
+    if mode == "quarters":
+        q = args.model_config.L1 // 4
+        actmat_q = actmat.reshape(-1, q)
+        perm = find_perm_impl(actmat_q, device_str, q)
+    elif mode == "halves":
+        n = args.model_config.L1 // 2
+        actmat_h = actmat.reshape(-1, n)
+        perm = find_perm_impl(actmat_h, device_str, n)
+    else:
+        raise ValueError(f"Unknown ft_permutation_mode: {mode}")
+
     with open(args.subcommand.out, "wb") as file:
         np.save(file, perm)
 
@@ -721,6 +801,7 @@ def ft_optimize(
     loader_config: data_loader.DataloaderSkipConfig | None = None,
 ) -> None:
     device_str = resolve_device(use_cupy, device)
+    mode = _ft_perm_mode(model)
 
     print("Gathering activation data...")
     actmat = gather_impl(model, dataset_path, count, device_str, loader_num_workers, loader_config)
@@ -729,13 +810,30 @@ def ft_optimize(
             np.save(file, actmat)
 
     print("Finding permutation...")
-    perm = find_perm_impl(actmat, device_str, model.L1)
+    if mode == "quarters":
+        q = model.L1 // 4
+        if model.L1 % 16 != 0:
+            raise ValueError(
+                f"Quarter-mode FT optimization requires L1 to be a multiple of 16, got {model.L1}."
+            )
+        actmat_q = actmat.reshape(-1, q)
+        perm = find_perm_impl(actmat_q, device_str, q)
+    elif mode == "halves":
+        n = model.L1 // 2
+        actmat_h = actmat.reshape(-1, n)
+        perm = find_perm_impl(actmat_h, device_str, n)
+    else:
+        raise ValueError(f"Unknown ft_permutation_mode: {mode}")
+
     if perm_save_path is not None:
         with open(perm_save_path, "wb") as file:
             np.save(file, perm)
 
     print("Evaluating permutation...")
-    eval_perm_impl(actmat, perm)
+    if mode == "quarters":
+        eval_perm_impl(actmat_q, perm)
+    elif mode == "halves":
+        eval_perm_impl(actmat_h, perm)
 
     print("Applying permutation...")
     ft_permute_impl(model, perm)

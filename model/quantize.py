@@ -119,7 +119,7 @@ class QuantizationManager:
 
         import math
         psqt_shift_flt = math.log2((config.ft_psqt_quantized_one * config.weight_scale_psqt) / (self.res_quantized_one * config.weight_scale_l1))
-        self.psqt_shift = int(round(psqt_shift_flt))
+        self.psqt_shift = round(psqt_shift_flt)
         self.psqt_act_scale = config.ft_psqt_quantized_one / (2 ** self.psqt_shift)
 
         self.sqr_crelu_correction_factor = config.expanded_quantized_one / config.inference_sqr_crelu_division_factor

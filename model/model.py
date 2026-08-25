@@ -27,6 +27,7 @@ class NNUEModel(nn.Module):
 
         self.num_psqt_buckets = num_psqt_buckets
         self.num_ls_buckets = num_ls_buckets
+        self.ft_backend = getattr(config, "ft_backend", "auto")
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.num_psqt_buckets, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
@@ -98,6 +99,7 @@ class NNUEModel(nn.Module):
             psqt_indices,
             fake_quantize_acts=fake_quantize_acts,
             fake_quantize_weights=fake_quantize_weights,
+            backend=self.ft_backend,
         )
 
         return l0_, wpsqt, bpsqt

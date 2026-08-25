@@ -195,6 +195,7 @@ void fused_double_ft_backward(
     const int32_t l1_size = """ + str(l1_size) + r""";
     const int32_t l1_quarter = """ + str(l1_quarter) + r""";
     const int32_t tile_size = """ + str(tile_size) + r""";
+    const int32_t num_psqt_buckets = """ + str(num_psqt_buckets) + r""";
 
     __shared__ float shared_grad_bias[""" + str(output_size) + r"""];
     for (int i = threadIdx.x; i < output_size; i += blockDim.x) {
@@ -221,6 +222,7 @@ void fused_double_ft_backward(
         const uint32_t block_idx = tile_idx * tile_size + t;
         if (block_idx >= batch_size) break;
 
+        const uint32_t clamp_base = block_idx * 8 * l1_quarter;
         const float us_val = __ldg(&us[block_idx]);
         const float them_val = __ldg(&them[block_idx]);
 

@@ -15,6 +15,11 @@ class ComposedFeatureTransformer(nn.Module):
     bias and delegates everything else to the underlying features.
     """
 
+    # FT permutation for this transformer operates on L1//4 indices within
+    # each of the 4 quarters of the raw side output, because the final L1
+    # input is a shuffled pairwise product of those quarters.
+    ft_permutation_mode: str = "quarters"
+
     def __init__(self, feature_classes: list[Callable[[int], InputFeature]], l1_size: int, num_psqt_buckets:int, quantization: QuantizationManager):
         super().__init__()
 
@@ -25,7 +30,7 @@ class ComposedFeatureTransformer(nn.Module):
         self.num_psqt_buckets = num_psqt_buckets
         self.num_outputs = l1_size + num_psqt_buckets
 
-        features = [fc(self.num_outputs) for fc in feature_classes]
+        features = [fc(self.num_outputs, self.num_psqt_buckets) for fc in feature_classes]
         self.features = nn.ModuleList(features)
 
         self.bias = nn.Parameter(torch.empty(self.num_outputs, dtype=torch.float32))
@@ -87,12 +92,11 @@ class ComposedFeatureTransformer(nn.Module):
 
     @torch.no_grad()
     def init_weights(self) -> None:
-        num_psqt_buckets = self.num_psqt_buckets
         for f in self.features:
-            f.init_weights(num_psqt_buckets, self.quantization.nnue2score)
+            f.init_weights()
 
-        L1 = self.num_outputs - num_psqt_buckets
-        for i in range(num_psqt_buckets):
+        L1 = self.num_outputs - self.num_psqt_buckets
+        for i in range(self.num_psqt_buckets):
             self.bias[L1 + i] = 0.0
 
     @torch.no_grad()

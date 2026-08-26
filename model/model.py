@@ -18,20 +18,24 @@ class NNUEModel(nn.Module):
 
         feature_cls = get_feature_cls(feature_name)
         self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
+        self.res_dim = config.res_dim
+        self.expanded_dim = config.expanded_dim
+        self.num_blocks = config.num_blocks
 
         self.quantize_config = config.quantize_config
         self.quantization = QuantizationManager(config.quantize_config)
 
         self.num_psqt_buckets = num_psqt_buckets
         self.num_ls_buckets = num_ls_buckets
+        self.ft_backend = getattr(config, "ft_backend", "auto")
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.num_psqt_buckets, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
-        self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
+        self.layer_stacks = LayerStacks(
+            self.num_ls_buckets, config, self.quantization, self.num_psqt_buckets
+        )
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
@@ -84,18 +88,21 @@ class NNUEModel(nn.Module):
         white_indices: torch.Tensor,
         black_indices: torch.Tensor,
         psqt_indices: torch.Tensor,
-        fake_quantize_acts: bool,
-        fake_quantize_weights: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.input(
+        fake_quantize_acts: bool=True,
+        fake_quantize_weights: bool=True,
+    ):
+        l0_, wpsqt, bpsqt = self.input(
             us,
             them,
             white_indices,
             black_indices,
             psqt_indices,
-            fake_quantize_acts,
-            fake_quantize_weights,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+            backend=self.ft_backend,
         )
+
+        return l0_, wpsqt, bpsqt
 
     def calculate_buckets(self, piece_count: torch.Tensor):
         psqt_indices = (piece_count - 1) // 4
@@ -125,9 +132,20 @@ class NNUEModel(nn.Module):
             fake_quantize_acts,
             fake_quantize_weights,
         )
-        # The PSQT values are averaged over perspectives. "Their" perspective
-        # has a negative influence (us-0.5 is 0.5 for white and -0.5 for black,
-        # which does both the averaging and sign flip for black to move)
-        x = self.layer_stacks(l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights) + (wpsqt - bpsqt) * (us - 0.5)
+
+        us_cond = (us > 0.5)
+        psqt_features = torch.where(
+            us_cond,
+            torch.cat([wpsqt, bpsqt], dim=1),
+            torch.cat([bpsqt, wpsqt], dim=1),
+        )
+
+        x = self.layer_stacks(
+            l0_,
+            psqt_features,
+            layer_stack_indices,
+            fake_quantize_acts,
+            fake_quantize_weights,
+        )
 
         return x

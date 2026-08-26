@@ -5,78 +5,102 @@ from torch import nn
 
 from ..quantize import QuantizationManager
 from .config import LayerStacksConfig
+from .inverted_bottleneck_block import (
+    FinalInvertedBottleneckBlock,
+    InvertedBottleneckBlock,
+)
 from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 
 class LayerStacks(nn.Module):
-    def __init__(self, count: int, config: LayerStacksConfig, quantization: QuantizationManager):
+    def __init__(
+        self,
+        count: int,
+        config: LayerStacksConfig,
+        quantization: QuantizationManager,
+        num_psqt_buckets: int = 8,
+    ):
         super().__init__()
 
         self.count = count
         self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
+        self.res_dim = config.res_dim
+        self.expanded_dim = config.expanded_dim
+        self.num_blocks = config.num_blocks
+        self.num_psqt_buckets = num_psqt_buckets
         self.quantization = quantization
 
-        # Factorizer only for the first layer because later
-        # there's a non-linearity and factorization breaks.
-        # This is by design. The weights in the further layers should be
-        # able to diverge a lot.
-        self.l1 = FactorizedStackedLinear(2 * self.L1 // 2, self.L2, count, quantization, "ls_l1")
-        self.l2 = StackedLinear(self.L2 * 2, self.L3, count, quantization, "ls_l2")
+        # Factorized linear for the first layer projecting to residual stream
+        self.l1 = FactorizedStackedLinear(2 * self.L1 // 2, self.res_dim, count, quantization, "ls_l1")
+        self.psqt_linear = StackedLinear(
+            2 * num_psqt_buckets, self.res_dim, count, quantization, "ls_psqt", bias=False
+        )
 
-        self.output = StackedLinear(self.L2 * 2 + self.L3 * 2, 1, count, quantization, "ls_output")
+        # Intermediate inverted bottleneck blocks
+        self.blocks = nn.ModuleList([
+            InvertedBottleneckBlock(
+                self.res_dim,
+                self.expanded_dim,
+                count,
+                quantization,
+                f"ls_b{i}",
+            )
+            for i in range(self.num_blocks - 1)
+        ])
 
-        with torch.no_grad():
-            self.output.linear.bias.zero_()
+        # Final block up-projection, dual activation, and fused output
+        last_block_idx = self.num_blocks - 1
+        self.final_block = FinalInvertedBottleneckBlock(
+            self.res_dim,
+            self.expanded_dim,
+            count,
+            quantization,
+            f"ls_b{last_block_idx}",
+        )
 
     def forward(
-        self, x: torch.Tensor,
+        self,
+        x: torch.Tensor,
+        psqt_features: torch.Tensor,
         ls_indices: torch.Tensor,
-        fake_quantize_acts: bool=True,
-        fake_quantize_weights: bool=True,
-    ):
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights)
-
-        # Extract the short-path skip connection before fake quantization
-        l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-        l1x_ = l1c_
-
-        l1_sqr = torch.pow(l1x_, 2.0)
+        fake_quantize_acts: bool = True,
+        fake_quantize_weights: bool = True,
+    ) -> torch.Tensor:
+        psqt_features = self.quantization.clip_psqt_act(psqt_features)
         if fake_quantize_acts:
-            l1_sqr = self.quantization.fake_quantize_ls_act(l1_sqr)
+            psqt_features = self.quantization.fake_quantize_psqt_act(psqt_features)
 
-        l1_sqr = l1_sqr * (self.quantization.sqr_crelu_correction_factor)
+        l1_out = self.l1(x, ls_indices, fake_quantize_weights) * self.quantization.l1_correction_factor
+        psqt_out = self.psqt_linear(psqt_features, ls_indices, fake_quantize_weights)
+        res_stream = l1_out + psqt_out
 
+        # Process intermediate blocks
+        for block in self.blocks:
+            if fake_quantize_acts:
+                res_stream = self.quantization.fake_quantize_res_act(res_stream)
+            res_stream = self.quantization.clip_res_act(res_stream)
+
+            down_out = block(
+                res_stream,
+                ls_indices,
+                fake_quantize_acts=fake_quantize_acts,
+                fake_quantize_weights=fake_quantize_weights,
+            )
+            res_stream = res_stream + down_out
+
+        # Final block pre-processing and fused output
         if fake_quantize_acts:
-            l1x_ = self.quantization.fake_quantize_ls_act(l1x_)
+            res_stream = self.quantization.fake_quantize_res_act(res_stream)
+        res_stream = self.quantization.clip_res_act(res_stream)
 
-        l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
-        l1x_ = self.quantization.clip_ls_act(l1x_)
+        l3c_ = self.final_block(
+            res_stream,
+            ls_indices,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+        )
 
-        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights)
-        l2x_ = l2c_
-
-        l2_sqr = torch.pow(l2x_, 2.0)
-        if fake_quantize_acts:
-            l2_sqr = self.quantization.fake_quantize_ls_act(l2_sqr)
-
-        l2_sqr = l2_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        if fake_quantize_acts:
-            l2x_ = self.quantization.fake_quantize_ls_act(l2x_)
-
-        l2x_ = torch.cat([l2_sqr, l2x_], dim=1)
-        l2x_ = self.quantization.clip_ls_act(l2x_)
-
-        l3_input = torch.cat([l1x_, l2x_], dim=1)
-
-        l3c_ = self.output(l3_input, ls_indices, fake_quantize_weights)
-
-        if fake_quantize_acts:
-            l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
-
-        l3x_ = l3c_ + l1x_out
+        l3x_ = l3c_
         if fake_quantize_acts:
             l3x_ = self.quantization.fake_quantize_output(l3x_)
 
@@ -88,15 +112,16 @@ class LayerStacks(nn.Module):
         self.l1.zero_virtual_weights()
 
     @torch.no_grad()
-    def get_coalesced_layer_stacks(
-        self,
-    ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        # During training the buckets are represented by a single, wider, layer.
-        # This representation needs to be transformed into individual layers
-        # for the serializer, because the buckets are interpreted as separate layers.
-        for i in range(self.count):
-            yield self.l1.at_index(i), self.l2.at_index(i), self.output.at_index(i)
-
-    @torch.no_grad()
     def coalesce_layer_stacks_inplace(self) -> None:
         self.l1.coalesce_weights()
+
+    @torch.no_grad()
+    def get_coalesced_layer_stacks(
+        self,
+    ) -> Generator[list[nn.Linear], None, None]:
+        for i in range(self.count):
+            bucket_layers = [self.l1.at_index(i)]
+            for block in self.blocks:
+                bucket_layers.extend([block.up.at_index(i), block.down.at_index(i)])
+            bucket_layers.extend([self.final_block.up.at_index(i), self.final_block.output_res.at_index(i), self.final_block.output_act.at_index(i)])
+            yield bucket_layers

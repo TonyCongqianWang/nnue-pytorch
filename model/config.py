@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Literal
 
 import tyro
 from tyro.conf import OmitArgPrefixes
@@ -12,6 +12,9 @@ from .quantize import QuantizationConfig
 # 3 layer fully connected network
 @dataclass(kw_only=True)
 class ModelConfig(LayerStacksConfig):
+    ft_backend: Literal["auto", "fused", "sparse", "torch"] = "auto"
+    """Backend implementation for feature transformer: 'auto' (default), 'fused' (CuPy fused kernel), 'sparse' (CuPy sparse linear), or 'torch' (pure PyTorch)."""
+
     @staticmethod
     def add_model_args(parser):
         parser.add_argument(
@@ -21,17 +24,40 @@ class ModelConfig(LayerStacksConfig):
             default=ModelConfig.L1,
         )
         parser.add_argument(
-            "--l2",
-            dest="L2",
+            "--res-dim",
+            dest="res_dim",
             type=int,
-            default=ModelConfig.L2,
+            default=ModelConfig.res_dim,
+        )
+        parser.add_argument(
+            "--expanded-dim",
+            dest="expanded_dim",
+            type=int,
+            default=ModelConfig.expanded_dim,
+        )
+        parser.add_argument(
+            "--num-blocks",
+            dest="num_blocks",
+            type=int,
+            default=ModelConfig.num_blocks,
+        )
+        parser.add_argument(
+            "--ft-backend",
+            dest="ft_backend",
+            type=str,
+            default="auto",
+            choices=["auto", "fused", "sparse", "torch"],
+            help="Backend for feature transformer (auto, fused, sparse, torch)",
         )
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
         config = ModelConfig()
         config.L1 = args.L1
-        config.L2 = args.L2
+        config.res_dim = args.res_dim
+        config.expanded_dim = args.expanded_dim
+        config.num_blocks = args.num_blocks
+        config.ft_backend = getattr(args, "ft_backend", "auto")
         return config
 
     # Not omitting prefix on purpose.

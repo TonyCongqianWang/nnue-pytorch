@@ -136,7 +136,7 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Dense Layer Stacks - l1
+            # Dense Layer Stacks - l1 & psqt
             {
                 "params": [self.model.layer_stacks.l1.factorized_linear.weight],
                 "lr": LRs[2],
@@ -156,6 +156,11 @@ class NNUE(nn.Module):
                 "params": [self.model.layer_stacks.l1.linear.bias],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
+            },
+            {
+                "params": [self.model.layer_stacks.psqt_linear.linear.weight],
+                "lr": LRs[4],
+                "weight_decay": dense_wd,
             },
         ]
 

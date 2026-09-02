@@ -53,6 +53,8 @@ const CliConfig default_cli_config = {
         .soft_early_fen_skipping = 30,
         .simple_eval_skipping    = 0,
         .param_index             = 0,
+        .skip_check_prob         = 1.0,
+        .skip_capture_prob       = 1.0,
         .pc_y0                   = 0.1,
         .pc_y1                   = 0.5,
         .pc_y2                   = 1.0,
@@ -114,6 +116,7 @@ CliConfig build_config_from_map(const std::map<std::string, std::string>& m) {
     const std::vector<std::string> required_keys = {
         "filtered", "random_fen_skipping", "wld_filtered", "early_fen_skipping",
         "soft_early_fen_skipping", "simple_eval_skipping", "param_index",
+        "skip_check_prob", "skip_capture_prob",
         "pc_y0", "pc_y1", "pc_y2", "pc_y3", "pc_y4",
         "ply_x1", "ply_y1", "ply_x2", "ply_y2", "ply_x3", "ply_y3", "ply_x4", "ply_y4",
         "ddp_config.rank", "ddp_config.world_size", "batch_size", "cyclic"
@@ -140,6 +143,8 @@ CliConfig build_config_from_map(const std::map<std::string, std::string>& m) {
             .soft_early_fen_skipping = std::stoi(m.at("soft_early_fen_skipping")),
             .simple_eval_skipping = std::stoi(m.at("simple_eval_skipping")),
             .param_index          = std::stoi(m.at("param_index")),
+            .skip_check_prob      = std::stod(m.at("skip_check_prob")),
+            .skip_capture_prob    = std::stod(m.at("skip_capture_prob")),
             .pc_y0                = std::stod(m.at("pc_y0")),
             .pc_y1                = std::stod(m.at("pc_y1")),
             .pc_y2                = std::stod(m.at("pc_y2")),

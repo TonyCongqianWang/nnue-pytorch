@@ -18,6 +18,10 @@ class DataloaderSkipConfig:
     """Skip positions based on simple eval. -1 = disabled."""
     param_index: int = 0
     """Indexing for parameter scans."""
+    skip_check_prob: float = 1.0
+    """Skip probability for positions where the king is in check. >= 1.0 is always skip."""
+    skip_capture_prob: float = 1.0
+    """Skip probability for positions where the best move is a capture. >= 1.0 is always skip."""
     pc_y0: float = 0.0
     """Piece count spline y0 parameter (x=0). Parameters `pc_y*` control the desired relative frequency of positions with certain piececounts x. Uses spline interpolation inbetween."""
     pc_y1: float = 0.4
@@ -60,6 +64,8 @@ class CDataloaderSkipConfig(ctypes.Structure):
         ("soft_early_fen_skipping", ctypes.c_int),
         ("simple_eval_skipping", ctypes.c_int),
         ("param_index", ctypes.c_int),
+        ("skip_check_prob", ctypes.c_double),
+        ("skip_capture_prob", ctypes.c_double),
         ("pc_y0", ctypes.c_double),
         ("pc_y1", ctypes.c_double),
         ("pc_y2", ctypes.c_double),
@@ -84,6 +90,8 @@ class CDataloaderSkipConfig(ctypes.Structure):
             soft_early_fen_skipping=config.soft_early_fen_skipping,
             simple_eval_skipping=config.simple_eval_skipping,
             param_index=config.param_index,
+            skip_check_prob=config.skip_check_prob,
+            skip_capture_prob=config.skip_capture_prob,
             pc_y0=config.pc_y0,
             pc_y1=config.pc_y1,
             pc_y2=config.pc_y2,

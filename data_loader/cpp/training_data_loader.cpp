@@ -762,7 +762,8 @@ FenBatch* FenBatchStream::next() {
 }
 
 std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkipConfig config) {
-    if (!config.filtered && !config.wld_filtered && config.random_fen_skipping <= 0
+    bool check_or_cap_filter = config.filtered && (config.skip_check_prob > 0.0 || config.skip_capture_prob > 0.0);
+    if (!check_or_cap_filter && !config.wld_filtered && config.random_fen_skipping <= 0
         && config.early_fen_skipping < 0 && config.soft_early_fen_skipping <= 0)
     {
         return nullptr;
@@ -774,6 +775,18 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
     {
         skip_prob = double(config.random_fen_skipping) / (config.random_fen_skipping + 1);
         random_skip_threshold = static_cast<uint64_t>(skip_prob * static_cast<double>(~0ULL));
+    }
+
+    uint64_t skip_check_threshold = 0;
+    if (config.skip_check_prob > 0.0 && config.skip_check_prob < 1.0)
+    {
+        skip_check_threshold = static_cast<uint64_t>(config.skip_check_prob * static_cast<double>(~0ULL));
+    }
+
+    uint64_t skip_capture_threshold = 0;
+    if (config.skip_capture_prob > 0.0 && config.skip_capture_prob < 1.0)
+    {
+        skip_capture_threshold = static_cast<uint64_t>(config.skip_capture_prob * static_cast<double>(~0ULL));
     }
 
     // --- Precompute 5-Point Spline PC LUT ---
@@ -874,7 +887,8 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
         }
     }
 
-    return [config, random_skip_threshold, target_pc_weights_lut, target_pc_weights_total,
+    return [config, random_skip_threshold, skip_check_threshold, skip_capture_threshold,
+            target_pc_weights_lut, target_pc_weights_total,
             early_ply_accept_prob = std::move(early_ply_accept_prob)](const TrainingDataEntry& e) {
         static constexpr int    VALUE_NONE = 32002;
         static thread_local int last_ply   = -1;
@@ -906,8 +920,19 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
 
         if (config.random_fen_skipping && (prng() < random_skip_threshold))
             return true;
-        if (config.filtered && (e.isCapturingMove() || e.isInCheck()))
-            return true;
+        if (config.filtered)
+        {
+            if (config.skip_check_prob > 0.0 && e.isInCheck())
+            {
+                if (config.skip_check_prob >= 1.0 || prng() < skip_check_threshold)
+                    return true;
+            }
+            if (config.skip_capture_prob > 0.0 && e.isCapturingMove())
+            {
+                if (config.skip_capture_prob >= 1.0 || prng() < skip_capture_threshold)
+                    return true;
+            }
+        }
 
         if (config.wld_filtered)
         {

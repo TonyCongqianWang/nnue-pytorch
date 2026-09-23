@@ -8,7 +8,17 @@ from .modules import (
     get_feature_cls,
 )
 from .nnue import NNUE
-from .optimizers import OptimizerConfig, RangerLiteWrapper, ScheduleFreeWrapper
+from .optimizers import (
+    AdamWConfig,
+    AdamWWrapper,
+    LRSchedulerConfig,
+    OptimizerConfig,
+    RangerLiteConfig,
+    RangerLiteWrapper,
+    SafeOneCycleLR,
+    ScheduleFreeConfig,
+    ScheduleFreeWrapper,
+)
 from .quantize import QuantizationConfig
 from .utils import (
     NNUEReader,
@@ -18,7 +28,10 @@ from .utils import (
 
 __all__ = [
     "NNUE",
+    "AdamWConfig",
+    "AdamWWrapper",
     "FeatureConfig",
+    "LRSchedulerConfig",
     "LayerStacksConfig",
     "LossParams",
     "ModelConfig",
@@ -28,7 +41,10 @@ __all__ = [
     "NNUEWriter",
     "OptimizerConfig",
     "QuantizationConfig",
+    "RangerLiteConfig",
     "RangerLiteWrapper",
+    "SafeOneCycleLR",
+    "ScheduleFreeConfig",
     "ScheduleFreeWrapper",
     "add_feature_args",
     "get_available_features",

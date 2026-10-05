@@ -108,7 +108,7 @@ class NNUEWriter:
         self,
         model: NNUEModel,
         description: str | None = None,
-        ft_compression: str = "none",
+        ft_compression: str = "leb128",
         verbose: bool = True,
     ):
         if description is None:
@@ -186,7 +186,7 @@ class NNUEWriter:
             bias, get_histogram_callback("", self.verbose)
         )
 
-        self.write_tensor(biases, ft_compression)
+        self.write_tensor(biases, "leb128")
 
         # Weights stored as [num_features][outputs]
         offset = 0
@@ -246,10 +246,11 @@ class NNUEReader:
         f: BinaryIO,
         feature_name: str,
         config: ModelConfig,
+        num_ls_buckets: int = 32,
     ):
         self.f = f
         self.feature_name = feature_name
-        self.model = NNUEModel(feature_name, config)
+        self.model = NNUEModel(feature_name, config, num_ls_buckets=num_ls_buckets)
         self.config = config
         fc_hash = NNUEWriter.fc_hash(self.model)
 
@@ -324,7 +325,14 @@ class NNUEReader:
         compression = self.determine_compression()
 
         if compression == "none":
-            d = np.fromfile(self.f, dtype, reduce(operator.mul, shape, 1))
+            count = reduce(operator.mul, shape, 1)
+            itemsize = np.dtype(dtype).itemsize
+            raw = self.f.read(count * itemsize)
+            if len(raw) != count * itemsize:
+                raise EOFError(
+                    f"Unexpected end of file: expected {count * itemsize} bytes, got {len(raw)}"
+                )
+            d = np.frombuffer(raw, dtype=dtype)
             d = torch.from_numpy(d.astype(np.float32))
             d = d.reshape(shape)
             return d

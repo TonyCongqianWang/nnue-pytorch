@@ -11,7 +11,7 @@ class NNUEModel(nn.Module):
         self,
         feature_name: str,
         config: ModelConfig,
-        num_ls_buckets: int = 8,
+        num_ls_buckets: int = 32,
     ):
         super().__init__()
 
@@ -94,6 +94,8 @@ class NNUEModel(nn.Module):
         )
 
     def calculate_buckets(self, piece_count: torch.Tensor):
+        if self.num_ls_buckets == 32:
+            return piece_count
         layer_stack_indices = (piece_count - 1) // 4
         return layer_stack_indices
 

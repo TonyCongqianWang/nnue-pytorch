@@ -1,6 +1,8 @@
 import math
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -22,8 +24,11 @@ class CrossCheckConfig:
     data: str
     """Path to the .bin or .binpack dataset to use for evaluation."""
 
-    net: str
+    net: str | None = None
     """Path to the .nnue net to evaluate."""
+
+    random_weights: bool = False
+    """Generate a random network for cross-checking instead of using a trained net."""
 
     checkpoint: str | None = None
     """Optional checkpoint (used instead of nnue for local eval)."""
@@ -305,10 +310,33 @@ def main():
         # --checkpoint - returns a plain NNUE wrapping a NNUEModel
         ckpt_model = ckpt.model
 
-    nnue = read_model(
-        cross_check_config.net,
-        config=nnue_config,
-    )
+    temp_net_path = None
+    if cross_check_config.random_weights:
+        init_model = M.NNUEModel(
+            feature_name=nnue_config.features,
+            config=nnue_config.model_config,
+            num_ls_buckets=32,
+        )
+        init_model.clip_weights(include_input=True)
+        if cross_check_config.net:
+            net_path = cross_check_config.net
+        else:
+            temp_file = tempfile.NamedTemporaryFile(suffix=".nnue", delete=False)
+            net_path = temp_file.name
+            temp_file.close()
+            temp_net_path = net_path
+
+        writer = M.NNUEWriter(init_model, verbose=False)
+        with open(net_path, "wb") as f:
+            f.write(writer.buf)
+
+        nnue = read_model(net_path, config=nnue_config)
+    elif cross_check_config.net:
+        net_path = cross_check_config.net
+        nnue = read_model(net_path, config=nnue_config)
+    else:
+        raise ValueError("Either --net or --random-weights must be specified.")
+
     nnue.to(cross_check_config.device)
     nnue.eval()
     # --net - returns the NNUEModel directly
@@ -343,7 +371,7 @@ def main():
 
         engine_evals += eval_engine_batch(
             cross_check_config.engine,
-            cross_check_config.net,
+            net_path,
             fens,
         )
 
@@ -360,6 +388,9 @@ def main():
     else:
         compute_correlation(nnue_evals, engine_evals, all_fens, "NNUE VS SF", "NNUE", "SF")
         compute_correlation(nnue_quantized_evals, engine_evals, all_fens, "QUANTIZED NNUE VS SF", "NNUE (Q)", "SF")
+
+    if temp_net_path and os.path.exists(temp_net_path):
+        os.remove(temp_net_path)
 
 
 if __name__ == "__main__":

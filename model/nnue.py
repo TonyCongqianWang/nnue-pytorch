@@ -78,7 +78,7 @@ class NNUE(nn.Module):
         max_epoch=None,
         num_batches_per_epoch=None,
         param_index=0,
-        num_ls_buckets=8,
+        num_ls_buckets=32,
     ):
         super().__init__()
 

@@ -72,6 +72,11 @@ class K32Q2(InputFeature):
         """Initialize virtual weights to zero."""
         self.zero_virtual_weights()
 
+    def clip_weights(self, quantization) -> None:
+        self.weight.data.clamp_(
+            quantization.min_threat_weight, quantization.max_threat_weight
+        )
+
     @torch.no_grad()
     def get_export_weights(self) -> torch.Tensor:
         """Return coalesced weight remapped from 12->11 piece types for export.

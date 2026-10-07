@@ -323,9 +323,8 @@ def main():
         if cross_check_config.net:
             net_path = cross_check_config.net
         else:
-            temp_file = tempfile.NamedTemporaryFile(suffix=".nnue", delete=False)
-            net_path = temp_file.name
-            temp_file.close()
+            with tempfile.NamedTemporaryFile(suffix=".nnue", delete=False) as temp_file:
+                net_path = temp_file.name
             temp_net_path = net_path
 
         writer = M.NNUEWriter(init_model, verbose=False)

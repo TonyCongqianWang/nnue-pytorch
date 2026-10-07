@@ -54,11 +54,11 @@ def add_feature_args(parser: argparse.ArgumentParser) -> None:
 
 
 __all__ = [
+    "K32Q2",
     "FeatureConfig",
     "FullThreats",
     "HalfKav2Hm",
     "InputFeature",
-    "K32Q2",
     "PP3Wide",
     "add_feature_args",
     "get_available_features",

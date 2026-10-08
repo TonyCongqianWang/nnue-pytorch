@@ -299,6 +299,8 @@ def init_random_weights(model: M.NNUEModel) -> None:
         max_threat = model.quantization.max_threat_weight
         for f in model.input.features:
             f.weight.data.uniform_(min_threat * 1.2, max_threat * 1.2)
+            if hasattr(f, "virtual_weight") and f.virtual_weight is not None:
+                f.virtual_weight.data.uniform_(min_threat * 1.2, max_threat * 1.2)
         model.input.bias.data.uniform_(-1.0, 1.0)
 
         for group in model.weight_clipping:
@@ -306,11 +308,12 @@ def init_random_weights(model: M.NNUEModel) -> None:
             max_w = group["max_weight"]
             for p in group["params"]:
                 p.data.uniform_(min_w * 1.2, max_w * 1.2)
+            if "virtual_params" in group:
+                group["virtual_params"].data.uniform_(min_w * 1.2, max_w * 1.2)
 
         for ls in [model.layer_stacks.l1, model.layer_stacks.l2, model.layer_stacks.output]:
             ls.linear.bias.data.uniform_(-0.5, 0.5)
 
-        model.zero_virtual_weights()
         model.clip_weights(include_input=True)
 
 

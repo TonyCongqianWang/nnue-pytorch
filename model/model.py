@@ -11,7 +11,7 @@ class NNUEModel(nn.Module):
         self,
         feature_name: str,
         config: ModelConfig,
-        num_ls_buckets: int = 8,
+        num_ls_buckets: int = 32,
     ):
         super().__init__()
 
@@ -93,9 +93,15 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
 
-    def calculate_buckets(self, piece_count: torch.Tensor):
-        layer_stack_indices = (piece_count - 1) // 4
-        return layer_stack_indices
+    def calculate_buckets(
+        self, piece_count: torch.Tensor, queen_bucket: torch.Tensor | None = None
+    ):
+        pc_bucket = (piece_count - 1) // 4
+        if self.num_ls_buckets == 32:
+            if queen_bucket is None:
+                raise ValueError("queen_bucket is required when num_ls_buckets == 32")
+            return pc_bucket * 4 + queen_bucket
+        return pc_bucket
 
 
     def forward(
@@ -105,10 +111,11 @@ class NNUEModel(nn.Module):
         white_indices: torch.Tensor,
         black_indices: torch.Tensor,
         piece_count: torch.Tensor,
+        queen_bucket: torch.Tensor | None = None,
         fake_quantize_acts: bool=True,
         fake_quantize_weights: bool=True,
     ):
-        layer_stack_indices = self.calculate_buckets(piece_count)
+        layer_stack_indices = self.calculate_buckets(piece_count, queen_bucket)
 
         l0_ = self.forward_ft(
             us,

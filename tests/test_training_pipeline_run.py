@@ -89,9 +89,9 @@ def main():
 
         f"{python_executable} -u serialize.py \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.pt \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}",
 
-        f"{python_executable} -u serialize.py \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue --ft_optimize_data=./.pgo/small.binpack --features={args.features} --l1=1024 --ft_optimize --ft_optimize_count=1000 --ft_compression=leb128 {serialize_device_arg} {serialize_workers_arg}",
+        f"{python_executable} -u serialize.py \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue --ft_optimize_data=./.pgo/small.binpack --features={args.features} --l1=1024 --ft_optimize --ft_optimize_count=1000 --compression=zlib {serialize_device_arg} {serialize_workers_arg}",
 
-        f"{python_executable} -u serialize.py \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue --features={args.features} --l1=1024 --ft_compression=leb128 --out-sha {serialize_device_arg} {serialize_workers_arg}"
+        f"{python_executable} -u serialize.py \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue \"{test_dir_str}\"/training_logs/version_2/checkpoints/last.nnue --features={args.features} --l1=1024 --compression=zlib --out-sha {serialize_device_arg} {serialize_workers_arg}"
     ]
 
     # --- 5. Execute ---

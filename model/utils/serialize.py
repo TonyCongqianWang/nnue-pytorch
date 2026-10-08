@@ -1,5 +1,7 @@
+import io
 import operator
 import struct
+import zlib
 from collections.abc import Sequence
 from functools import reduce
 from typing import BinaryIO
@@ -7,7 +9,6 @@ from typing import BinaryIO
 import numpy as np
 import numpy.typing as npt
 import torch
-from numba import njit
 from torch import nn
 
 from ..config import ModelConfig
@@ -30,6 +31,7 @@ def ascii_hist(name, x, bins=7):
         bar = "#" * int(n * 1.0 * width / nmax)
         xi = f"{xi: <8.4g}".ljust(10)
         print(f"{xi}| {bar}")
+
 
 def get_histogram_callback(hist_title: str, verbose: bool):
     if not verbose:
@@ -62,37 +64,6 @@ def get_histogram_callback(hist_title: str, verbose: bool):
 
     return histogram_callback
 
-@njit
-def encode_leb_128_array(arr: npt.NDArray) -> list:
-    res = []
-    for v in arr:
-        while True:
-            byte = v & 0x7F
-            v = v >> 7
-            if (v == 0 and byte & 0x40 == 0) or (v == -1 and byte & 0x40 != 0):
-                res.append(byte)
-                break
-            res.append(byte | 0x80)
-    return res
-
-
-@njit
-def decode_leb_128_array(arr: bytes, n: int) -> npt.NDArray:
-    ints = np.zeros(n)
-    k = 0
-    for i in range(n):
-        r = 0
-        shift = 0
-        while True:
-            byte = arr[k]
-            k = k + 1
-            r |= (byte & 0x7F) << shift
-            shift += 7
-            if (byte & 0x80) == 0:
-                ints[i] = r if (byte & 0x40) == 0 else r | ~((1 << shift) - 1)
-                break
-    return ints
-
 
 # hardcoded for now
 VERSION = 0x6A448AFA
@@ -108,25 +79,53 @@ class NNUEWriter:
         self,
         model: NNUEModel,
         description: str | None = None,
-        ft_compression: str = "none",
+        compression: str = "zlib",
+        ft_compression: str | None = None,
         verbose: bool = True,
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
 
-        self.buf = bytearray()
+        if ft_compression is not None:
+            if ft_compression in ("none", "raw"):
+                compression = "none"
+            elif ft_compression in ("zlib", "leb128"):
+                compression = "zlib"
+
         self.verbose = verbose
 
         fc_hash = self.fc_hash(model)
+
+        # 1. Plaintext header (always uncompressed)
+        header_buf = bytearray()
+        self.buf = header_buf
         self.write_header(model, fc_hash, description)
+
+        # 2. Payload (Feature Transformer + Layer Stacks)
+        payload_buf = bytearray()
+        self.buf = payload_buf
         self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
-        self.write_feature_transformer(model, ft_compression)
+        self.write_feature_transformer(model)
         layer_stacks = model.layer_stacks
         for bucket, (l1, l2, output) in enumerate(layer_stacks.get_coalesced_layer_stacks()):
             self.int32(fc_hash)  # FC layers hash
             self.write_fc_layer(model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}")
             self.write_fc_layer(model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}")
             self.write_fc_layer(model, output, layer_stacks.output.layer_key, f"bucket {bucket}")
+
+        # 3. Combine header and payload
+        if compression == "zlib":
+            compressed_payload = zlib.compress(bytes(payload_buf), level=6)
+            self.buf = (
+                header_buf
+                + b"COMPRESSED_ZLIB"
+                + struct.pack("<II", len(payload_buf), len(compressed_payload))
+                + compressed_payload
+            )
+        elif compression == "none":
+            self.buf = header_buf + payload_buf
+        else:
+            raise ValueError(f"Invalid compression method: {compression}")
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -158,22 +157,11 @@ class NNUEWriter:
         self.int32(len(encoded_description))  # Network definition
         self.buf.extend(encoded_description)
 
-    def write_leb_128_array(self, arr: npt.NDArray) -> None:
-        buf = encode_leb_128_array(arr)
-        self.int32(len(buf))
-        self.buf.extend(buf)
-
-    def write_tensor(self, arr: torch.Tensor, compression="none") -> None:
+    def write_tensor(self, arr: torch.Tensor) -> None:
         arr = arr.detach().flatten().cpu().numpy()
-        if compression == "none":
-            self.buf.extend(arr.tobytes())
-        elif compression == "leb128":
-            self.buf.extend(b"COMPRESSED_LEB128")
-            self.write_leb_128_array(arr)
-        else:
-            raise ValueError("Invalid compression method.")
+        self.buf.extend(arr.tobytes())
 
-    def write_feature_transformer(self, model: NNUEModel, ft_compression: str) -> None:
+    def write_feature_transformer(self, model: NNUEModel) -> None:
         layer = model.input
 
         bias = layer.bias.data[: model.L1]
@@ -186,7 +174,7 @@ class NNUEWriter:
             bias, get_histogram_callback("", self.verbose)
         )
 
-        self.write_tensor(biases, ft_compression)
+        self.write_tensor(biases)
 
         # Weights stored as [num_features][outputs]
         offset = 0
@@ -199,12 +187,9 @@ class NNUEWriter:
             segment_weight = model.quantization.quantize_feature_transformer_weights(
                 segment_weight, f_export_dtype, ft_histogram_callback
             )
-            # compression is only useful for types larger than 1 byte
-            segment_compression = ft_compression if f_export_dtype != torch.int8 else "none"
             offset += n
 
-            self.write_tensor(segment_weight, segment_compression)
-
+            self.write_tensor(segment_weight)
 
     def write_fc_layer(
         self,
@@ -232,9 +217,9 @@ class NNUEWriter:
             new_w[:, : weight.shape[1]] = weight
             weight = new_w
 
-        self.write_tensor(bias, "none")
+        self.write_tensor(bias)
         # Weights stored as [outputs][inputs], so we can flatten
-        self.write_tensor(weight, "none")
+        self.write_tensor(weight)
 
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v))
@@ -246,14 +231,33 @@ class NNUEReader:
         f: BinaryIO,
         feature_name: str,
         config: ModelConfig,
+        num_ls_buckets: int = 32,
     ):
         self.f = f
         self.feature_name = feature_name
-        self.model = NNUEModel(feature_name, config)
+        self.model = NNUEModel(feature_name, config, num_ls_buckets=num_ls_buckets)
         self.config = config
         fc_hash = NNUEWriter.fc_hash(self.model)
 
         self.read_header(self.model.feature_hash, fc_hash)
+
+        # Check if the payload is compressed with zlib
+        magic = b"COMPRESSED_ZLIB"
+        if self.peek(len(magic)) == magic:
+            self.f.read(len(magic))
+            uncompressed_size, compressed_size = struct.unpack("<II", self.f.read(8))
+            compressed_data = self.f.read(compressed_size)
+            if len(compressed_data) != compressed_size:
+                raise EOFError(
+                    f"Unexpected end of file when reading compressed data: expected {compressed_size}, got {len(compressed_data)}"
+                )
+            decompressed_data = zlib.decompress(compressed_data)
+            if len(decompressed_data) != uncompressed_size:
+                raise ValueError(
+                    f"Decompressed size mismatch: expected {uncompressed_size}, got {len(decompressed_data)}"
+                )
+            self.f = io.BytesIO(decompressed_data)
+
         self.read_int32(
             self.model.feature_hash ^ (self.config.L1 * 2)
         )  # Feature transformer hash
@@ -291,47 +295,24 @@ class NNUEReader:
         desc_len = self.read_int32()
         self.description = self.f.read(desc_len).decode("utf-8")
 
-    def read_leb_128_array(
-        self, dtype: npt.DTypeLike, shape: Sequence[int]
-    ) -> torch.Tensor:
-        len_bytes = self.read_int32()
-        d = self.f.read(len_bytes)
-        if len(d) != len_bytes:
-            raise EOFError("Unexpected end of file when reading compressed data.")
-
-        res = torch.tensor(
-            decode_leb_128_array(d, reduce(operator.mul, shape, 1)),
-            dtype=torch.float32
-        )
-        res = res.reshape(shape)
-        return res
-
     def peek(self, length: int = 1) -> bytes:
         pos = self.f.tell()
         data = self.f.read(length)
         self.f.seek(pos)
         return data
 
-    def determine_compression(self) -> str:
-        leb128_magic = b"COMPRESSED_LEB128"
-        if self.peek(len(leb128_magic)) == leb128_magic:
-            self.f.read(len(leb128_magic))  # actually advance the file pointer
-            return "leb128"
-        else:
-            return "none"
-
     def tensor(self, dtype: npt.DTypeLike, shape: Sequence[int]) -> torch.Tensor:
-        compression = self.determine_compression()
-
-        if compression == "none":
-            d = np.fromfile(self.f, dtype, reduce(operator.mul, shape, 1))
-            d = torch.from_numpy(d.astype(np.float32))
-            d = d.reshape(shape)
-            return d
-        elif compression == "leb128":
-            return self.read_leb_128_array(dtype, shape)
-        else:
-            raise ValueError("Invalid compression method.")
+        count = reduce(operator.mul, shape, 1)
+        itemsize = np.dtype(dtype).itemsize
+        raw = self.f.read(count * itemsize)
+        if len(raw) != count * itemsize:
+            raise EOFError(
+                f"Unexpected end of file: expected {count * itemsize} bytes, got {len(raw)}"
+            )
+        d = np.frombuffer(raw, dtype=dtype)
+        d = torch.from_numpy(d.astype(np.float32))
+        d = d.reshape(shape)
+        return d
 
     def read_feature_transformer(self, layer) -> None:
         L1 = layer.num_outputs

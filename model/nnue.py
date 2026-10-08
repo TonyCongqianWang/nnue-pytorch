@@ -78,7 +78,7 @@ class NNUE(nn.Module):
         max_epoch=None,
         num_batches_per_epoch=None,
         param_index=0,
-        num_ls_buckets=8,
+        num_ls_buckets=32,
     ):
         super().__init__()
 
@@ -323,6 +323,7 @@ class NNUE(nn.Module):
             _outcome,
             _score,
             piece_count,
+            queen_bucket,
         ) = batch
         scorenet = self.model(
             us,
@@ -330,6 +331,7 @@ class NNUE(nn.Module):
             white_indices,
             black_indices,
             piece_count,
+            queen_bucket,
             self.config.use_fake_act_quantization,
             self.config.use_fake_weight_quantization,
         )
@@ -345,7 +347,7 @@ class NNUE(nn.Module):
             _black_indices,
             outcome,
             score,
-            _piece_count,
+            *_rest,
         ) = batch
 
         scorenet = scorenet * self.model.quantization.nnue2score

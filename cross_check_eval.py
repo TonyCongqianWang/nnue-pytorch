@@ -1,6 +1,8 @@
 import math
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -22,8 +24,11 @@ class CrossCheckConfig:
     data: str
     """Path to the .bin or .binpack dataset to use for evaluation."""
 
-    net: str
+    net: str | None = None
     """Path to the .nnue net to evaluate."""
+
+    random_weights: bool = False
+    """Generate a random network for cross-checking instead of using a trained net."""
 
     checkpoint: str | None = None
     """Optional checkpoint (used instead of nnue for local eval)."""
@@ -72,6 +77,7 @@ def eval_model_batch(model: M.NNUEModel, batch: data_loader.SparseBatchPtr, devi
         _outcome,
         _score,
         piece_count,
+        queen_bucket,
     ) = batch.contents.get_tensors(device)
 
     evals = [
@@ -82,6 +88,7 @@ def eval_model_batch(model: M.NNUEModel, batch: data_loader.SparseBatchPtr, devi
             white_indices,
             black_indices,
             piece_count,
+            queen_bucket,
             fake_quantize_acts=fake_quantize,
             fake_quantize_weights=fake_quantize,
         )
@@ -285,6 +292,84 @@ def filter_fens(fens):
     return filtered_fens
 
 
+def init_random_weights(model: M.NNUEModel) -> None:
+    """Initialize model weights across full dynamic range, hitting clipping bounds."""
+    with torch.no_grad():
+        min_threat = model.quantization.min_threat_weight
+        max_threat = model.quantization.max_threat_weight
+        for f in model.input.features:
+            f.weight.data.uniform_(min_threat * 1.2, max_threat * 1.2)
+            if hasattr(f, "virtual_weight") and f.virtual_weight is not None:
+                f.virtual_weight.data.uniform_(min_threat * 1.2, max_threat * 1.2)
+        model.input.bias.data.uniform_(-1.0, 1.0)
+
+        for group in model.weight_clipping:
+            min_w = group["min_weight"]
+            max_w = group["max_weight"]
+            for p in group["params"]:
+                p.data.uniform_(min_w * 1.2, max_w * 1.2)
+            if "virtual_params" in group:
+                group["virtual_params"].data.uniform_(min_w * 1.2, max_w * 1.2)
+
+        for ls in [model.layer_stacks.l1, model.layer_stacks.l2, model.layer_stacks.output]:
+            ls.linear.bias.data.uniform_(-0.5, 0.5)
+
+        model.clip_weights(include_input=True)
+
+
+def run_smoke_test(
+    engine_path: str,
+    net_path: str,
+    nnue_model: M.NNUEModel,
+    ckpt_model: M.NNUEModel | None,
+    device: str,
+) -> None:
+    fen = chess.STARTING_FEN
+    fens = [fen]
+    b = data_loader.get_sparse_batch_from_fens(
+        nnue_model.input_feature_name, fens, [0], [1], [0]
+    )
+    nnue_eval = eval_model_batch(nnue_model, b, device, False)[0]
+    nnue_quant = eval_model_batch(nnue_model, b, device, True)[0]
+
+    ckpt_eval = None
+    ckpt_quant = None
+    if ckpt_model is not None:
+        ckpt_eval = eval_model_batch(ckpt_model, b, device, False)[0]
+        ckpt_quant = eval_model_batch(ckpt_model, b, device, True)[0]
+
+    data_loader.destroy_sparse_batch(b)
+
+    sf_evals = eval_engine_batch(engine_path, net_path, fens)
+    if not sf_evals:
+        raise RuntimeError("Stockfish returned no evaluation for starting position.")
+    sf_eval = sf_evals[0]
+
+    diff_quant = nnue_quant - sf_eval
+
+    W = 80
+    print("=" * W)
+    print(f"[Smoke Test] Evaluating starting position: {fen}")
+    print(f"  Stockfish Eval      : {sf_eval:+d}")
+    print(f"  NNUE (PyTorch) Eval : {nnue_eval:+.2f}")
+    print(f"  NNUE (Quant) Eval   : {nnue_quant:+.2f}")
+    if ckpt_model is not None and ckpt_eval is not None and ckpt_quant is not None:
+        print(f"  CKPT Eval           : {ckpt_eval:+.2f}")
+        print(f"  CKPT (Quant) Eval   : {ckpt_quant:+.2f}")
+    print(f"  Diff (Quant - SF)   : {diff_quant:+.2f}")
+
+    if math.isnan(nnue_quant) or abs(diff_quant) > 5.0:
+        print(f"[Smoke Test] FAILED: Evaluation difference too large ({diff_quant:+.2f})!")
+        print("=" * W)
+        raise RuntimeError(
+            f"Smoke test failed: Quantized NNUE eval ({nnue_quant}) and Stockfish eval ({sf_eval}) "
+            f"differ by {diff_quant:.2f} (> 5.0) on starting position."
+        )
+
+    print("[Smoke Test] SUCCESS: Starting position evaluation verified!")
+    print("=" * W + "\n")
+
+
 def main():
     args = tyro.cli(CliConfig)
 
@@ -305,14 +390,45 @@ def main():
         # --checkpoint - returns a plain NNUE wrapping a NNUEModel
         ckpt_model = ckpt.model
 
-    nnue = read_model(
-        cross_check_config.net,
-        config=nnue_config,
-    )
+    temp_net_path = None
+    if cross_check_config.random_weights:
+        init_model = M.NNUEModel(
+            feature_name=nnue_config.features,
+            config=nnue_config.model_config,
+            num_ls_buckets=32,
+        )
+        init_random_weights(init_model)
+        if cross_check_config.net:
+            net_path = cross_check_config.net
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".nnue", delete=False) as temp_file:
+                net_path = temp_file.name
+            temp_net_path = net_path
+
+        writer = M.NNUEWriter(init_model, verbose=False)
+        with open(net_path, "wb") as f:
+            f.write(writer.buf)
+
+        nnue = read_model(net_path, config=nnue_config)
+    elif cross_check_config.net:
+        net_path = cross_check_config.net
+        nnue = read_model(net_path, config=nnue_config)
+    else:
+        raise ValueError("Either --net or --random-weights must be specified.")
+
     nnue.to(cross_check_config.device)
     nnue.eval()
     # --net - returns the NNUEModel directly
     nnue_model = nnue
+
+    # Run smoke test upfront before initializing dataloader
+    run_smoke_test(
+        cross_check_config.engine,
+        net_path,
+        nnue_model,
+        ckpt_model,
+        cross_check_config.device,
+    )
 
     input_feature_name = nnue_model.input_feature_name
     fen_batch_provider = make_fen_batch_provider(cross_check_config.data, batch_size)
@@ -343,7 +459,7 @@ def main():
 
         engine_evals += eval_engine_batch(
             cross_check_config.engine,
-            cross_check_config.net,
+            net_path,
             fens,
         )
 
@@ -360,6 +476,9 @@ def main():
     else:
         compute_correlation(nnue_evals, engine_evals, all_fens, "NNUE VS SF", "NNUE", "SF")
         compute_correlation(nnue_quantized_evals, engine_evals, all_fens, "QUANTIZED NNUE VS SF", "NNUE (Q)", "SF")
+
+    if temp_net_path and os.path.exists(temp_net_path):
+        os.remove(temp_net_path)
 
 
 if __name__ == "__main__":

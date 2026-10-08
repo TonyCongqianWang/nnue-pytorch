@@ -82,6 +82,67 @@ struct HalfKAv2_hmExtractor: IFeatureExtractor {
     }
 };
 
+struct K32Q2 {
+    static constexpr std::string_view NAME = "K32Q2";
+
+    static constexpr int NUM_SQ              = 64;
+    static constexpr int NUM_PT              = 12;
+    static constexpr int NUM_PLANES          = NUM_SQ * NUM_PT;
+    static constexpr int NUM_KING_BUCKETS    = NUM_SQ / 2;
+    static constexpr int NUM_QUEEN_BUCKETS   = 2;
+    static constexpr int NUM_BUCKETS         = NUM_KING_BUCKETS * NUM_QUEEN_BUCKETS;
+    static constexpr int INPUTS              = NUM_PLANES * NUM_BUCKETS;
+    static constexpr int MAX_ACTIVE_FEATURES = 32;
+
+    // clang-format off
+    static constexpr int KingBuckets[64] = {
+      -1, -1, -1, -1, 31, 30, 29, 28,
+      -1, -1, -1, -1, 27, 26, 25, 24,
+      -1, -1, -1, -1, 23, 22, 21, 20,
+      -1, -1, -1, -1, 19, 18, 17, 16,
+      -1, -1, -1, -1, 15, 14, 13, 12,
+      -1, -1, -1, -1, 11, 10, 9, 8,
+      -1, -1, -1, -1, 7, 6, 5, 4,
+      -1, -1, -1, -1, 3, 2, 1, 0
+    };
+    // clang-format on
+
+    static int feature_index(Color color, Square ksq, bool opp_queen, Square sq, Piece p) {
+        Square o_ksq = orient_flip_2(color, ksq, ksq);
+        auto   p_idx = static_cast<int>(p.type()) * 2 + (p.color() != color);
+        int    bucket = KingBuckets[static_cast<int>(o_ksq)] * 2 + (opp_queen ? 1 : 0);
+        return static_cast<int>(orient_flip_2(color, sq, ksq)) + p_idx * NUM_SQ
+             + bucket * NUM_PLANES;
+    }
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        auto& pos       = e.pos;
+        auto  pieces    = pos.piecesBB();
+        auto  ksq       = pos.kingSquare(color);
+        bool  opp_queen = pos.piecesBB(Piece(PieceType::Queen, !color)).any();
+
+        int j = 0;
+        for (Square sq : pieces)
+        {
+            auto p      = pos.pieceAt(sq);
+            features[j] = feature_index(color, ksq, opp_queen, sq, p);
+            ++j;
+        }
+        return {j, INPUTS};
+    }
+};
+
+struct K32Q2Extractor: IFeatureExtractor {
+    int inputs() const override { return K32Q2::INPUTS; }
+    int max_active_features() const override { return K32Q2::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e,
+                                             int*                     features,
+                                             Color                    color) const override {
+        return K32Q2::fill_features_sparse(e, features, color);
+    }
+};
+
 // Pawn attackers no longer target pawns; those relationships are represented by PP_3Wide.
 constexpr int numvalidtargets[6] = {4, 10, 8, 8, 10, 0};
 
@@ -433,6 +494,8 @@ struct ComposedFeatureExtractor: IFeatureExtractor {
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
     if (name == "HalfKAv2_hm")
         return std::make_unique<HalfKAv2_hmExtractor>();
+    if (name == "K32Q2")
+        return std::make_unique<K32Q2Extractor>();
     if (name == "Full_Threats")
         return std::make_unique<FullThreatsExtractor>();
     if (name == "PP_3Wide")
@@ -495,7 +558,7 @@ SparseBatch::SparseBatch(const IFeatureExtractor&              feature_set,
     size                = entries.size();
     max_active_features = feature_set.max_active_features();
     const size_t total_floats = size * 3;
-    const size_t total_ints   = size + size * max_active_features * 2;
+    const size_t total_ints   = size * 2 + size * max_active_features * 2;
 
     m_float_block = new float[total_floats];
     m_int_block   = new int[total_ints];
@@ -509,6 +572,7 @@ SparseBatch::SparseBatch(const IFeatureExtractor&              feature_set,
     white               = int_alloc.alloc(size * max_active_features);
     black               = int_alloc.alloc(size * max_active_features);
     piece_count         = int_alloc.alloc(size);
+    queen_bucket        = int_alloc.alloc(size);
 
     num_active_white_features = 0;
     num_active_black_features = 0;
@@ -532,6 +596,9 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     outcome[i]             = (e.result + 1.0f) / 2.0f;
     score[i]               = e.score;
     piece_count[i]         = e.pos.piecesBB().count();
+    const auto stm          = e.pos.sideToMove();
+    queen_bucket[i]        = (e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 2 : 0)
+                            | (e.pos.piecesBB(Piece(PieceType::Queen, !stm)).any() ? 1 : 0);
     fill_features(fs, i, e);
 }
 

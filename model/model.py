@@ -37,6 +37,7 @@ class NNUEModel(nn.Module):
         self.router = VQCodebookRouter(
             num_contexts=68640, num_experts=self.num_ls_buckets
         )
+        self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
@@ -78,8 +79,7 @@ class NNUEModel(nn.Module):
     def zero_virtual_weights(self) -> None:
         self.input.zero_virtual_weights()
         self.layer_stacks.zero_virtual_weights()
-        if hasattr(self, "router"):
-            self.router.zero_weights()
+        self.router.zero_weights()
 
     def forward_ft(
         self,

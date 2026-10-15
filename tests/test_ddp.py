@@ -88,10 +88,10 @@ def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active):
             indices.append(idx)
         outcome = torch.randint(0, 3, (batch_size, 1), generator=gen).float() / 2
         score = torch.randn(batch_size, 1, generator=gen) * 300
-        piece_count = torch.randint(2, 33, (batch_size,), generator=gen)
-        queen_bucket = torch.randint(0, 4, (batch_size,), generator=gen)
+        c_us = torch.randint(0, 68640, (batch_size,), generator=gen)
+        c_them = torch.randint(0, 68640, (batch_size,), generator=gen)
         batches.append(
-            (us, 1.0 - us, *indices, outcome, score, piece_count, queen_bucket)
+            (us, 1.0 - us, *indices, outcome, score, c_us, c_them)
         )
     return batches
 

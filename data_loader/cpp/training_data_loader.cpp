@@ -641,10 +641,66 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     is_white[i]     = static_cast<float>(e.pos.sideToMove() == Color::White);
     outcome[i]      = (e.result + 1.0f) / 2.0f;
     score[i]        = e.score;
-    piece_count[i]  = e.pos.piecesBB().count();
-    const auto stm  = e.pos.sideToMove();
-    queen_bucket[i] = (e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 2 : 0)
-                    | (e.pos.piecesBB(Piece(PieceType::Queen, !stm)).any() ? 1 : 0);
+    const auto stm     = e.pos.sideToMove();
+    const auto non_stm = !stm;
+    const auto castlingRights = e.pos.castlingRights();
+
+    // Perspective 1 (STM):
+    const int ourPieces = std::clamp(static_cast<int>(e.pos.piecesBB(stm).count()) - 1, 0, 15);
+    const int ourQueen  = e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 1 : 0;
+    const Square ourKsq = e.pos.kingSquare(stm);
+    const Square ourKsqOriented = (stm == Color::Black) ? ourKsq.flippedVertically() : ourKsq;
+    const bool ourCastling = (stm == Color::White)
+        ? bool(castlingRights & CastlingRights::White)
+        : bool(castlingRights & CastlingRights::Black);
+    int ourKingBucket;
+    if (ourCastling && ourKsqOriented == Square(fileE, rank1))
+        ourKingBucket = 32;
+    else
+    {
+        const int r = static_cast<int>(ourKsqOriented) / 8;
+        const int f = static_cast<int>(ourKsqOriented) % 8;
+        ourKingBucket = r * 4 + (f < 4 ? f : 7 - f);
+    }
+
+    const Square enemyKsq = e.pos.kingSquare(non_stm);
+    const Square enemyKsqOriented = (stm == Color::Black) ? enemyKsq.flippedVertically() : enemyKsq;
+    const bool enemyCastling = (stm == Color::White)
+        ? bool(castlingRights & CastlingRights::Black)
+        : bool(castlingRights & CastlingRights::White);
+    int enemyKingBucket;
+    if (enemyCastling && enemyKsqOriented == Square(fileE, rank8))
+        enemyKingBucket = 64;
+    else
+        enemyKingBucket = static_cast<int>(enemyKsqOriented);
+
+    const int c_us = ((ourPieces * 2 + ourQueen) * 33 + ourKingBucket) * 65 + enemyKingBucket;
+
+    // Perspective 2 (Non-STM):
+    const int theirPieces = std::clamp(static_cast<int>(e.pos.piecesBB(non_stm).count()) - 1, 0, 15);
+    const int theirQueen  = e.pos.piecesBB(Piece(PieceType::Queen, non_stm)).any() ? 1 : 0;
+    const Square theirKsqOriented = (non_stm == Color::Black) ? enemyKsq.flippedVertically() : enemyKsq;
+    int theirKingBucket;
+    if (enemyCastling && theirKsqOriented == Square(fileE, rank1))
+        theirKingBucket = 32;
+    else
+    {
+        const int r = static_cast<int>(theirKsqOriented) / 8;
+        const int f = static_cast<int>(theirKsqOriented) % 8;
+        theirKingBucket = r * 4 + (f < 4 ? f : 7 - f);
+    }
+
+    const Square ourKsqOrientedThem = (non_stm == Color::Black) ? ourKsq.flippedVertically() : ourKsq;
+    int ourKingBucketThem;
+    if (ourCastling && ourKsqOrientedThem == Square(fileE, rank8))
+        ourKingBucketThem = 64;
+    else
+        ourKingBucketThem = static_cast<int>(ourKsqOrientedThem);
+
+    const int c_them = ((theirPieces * 2 + theirQueen) * 33 + theirKingBucket) * 65 + ourKingBucketThem;
+
+    piece_count[i]  = c_us;
+    queen_bucket[i] = c_them;
     fill_features(fs, i, e);
 }
 

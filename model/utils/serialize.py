@@ -63,6 +63,8 @@ def get_histogram_callback(hist_title: str, verbose: bool):
     return histogram_callback
 
 
+from ..modules.router import ROUTER_HASH, ROUTER_TABLE_SIZE
+
 # hardcoded for now
 VERSION = 0x6A448AFA
 DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
@@ -108,6 +110,11 @@ class NNUEWriter:
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
 
+        # 3. Downstream Top-2 MoE Router Lookup Table (68,640 bytes)
+        if hasattr(model, "router"):
+            router_table = model.router.get_lookup_table()
+            self.write_tensor(router_table)
+
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
         # InputSlice hash
@@ -133,7 +140,10 @@ class NNUEWriter:
 
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
-        self.int32(fc_hash ^ model.feature_hash ^ (model.L1 * 2))  # halfkp network hash
+        net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2)
+        if hasattr(model, "router"):
+            net_hash ^= ROUTER_HASH
+        self.int32(net_hash)  # halfkp network hash
         encoded_description = description.encode("utf-8")
         self.int32(len(encoded_description))  # Network definition
         self.buf.extend(encoded_description)
@@ -219,7 +229,7 @@ class NNUEReader:
         self.config = config
         fc_hash = NNUEWriter.fc_hash(self.model)
 
-        self.read_header(self.model.feature_hash, fc_hash)
+        self.has_router = self.read_header(self.model.feature_hash, fc_hash)
         self.read_int32(
             self.model.feature_hash ^ (self.config.L1 * 2)
         )  # Feature transformer hash
@@ -251,11 +261,41 @@ class NNUEReader:
                     layers[layer_idx].layer_key,
                 )
 
-    def read_header(self, feature_hash: int, fc_hash: int) -> None:
+        if self.has_router:
+            raw_router = self.f.read(ROUTER_TABLE_SIZE)
+            if len(raw_router) != ROUTER_TABLE_SIZE:
+                raise EOFError(
+                    f"Expected {ROUTER_TABLE_SIZE} bytes for router table, got {len(raw_router)}"
+                )
+            self.model.router.load_lookup_table(raw_router)
+        else:
+            # Fallback for legacy net without router table
+            lut = torch.zeros(ROUTER_TABLE_SIZE, dtype=torch.uint8)
+            for p in range(16):
+                for q in range(2):
+                    for k1 in range(33):
+                        for k2 in range(65):
+                            idx = ((p * 2 + q) * 33 + k1) * 65 + k2
+                            b = (p // 2) * 4 + (2 if q else 0)
+                            lut[idx] = b % num_ls_buckets
+            self.model.router.load_lookup_table(lut)
+
+    def read_header(self, feature_hash: int, fc_hash: int) -> bool:
         self.read_int32(VERSION)  # version
-        self.read_int32(fc_hash ^ feature_hash ^ (self.config.L1 * 2))
+        header_hash = self.read_int32()
+        expected_top2 = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ ROUTER_HASH
+        expected_legacy = fc_hash ^ feature_hash ^ (self.config.L1 * 2)
+        if header_hash == expected_top2:
+            has_router = True
+        elif header_hash == expected_legacy:
+            has_router = False
+        else:
+            raise ValueError(
+                f"Expected hash {expected_top2:x} or {expected_legacy:x}, got {header_hash:x}"
+            )
         desc_len = self.read_int32()
         self.description = self.f.read(desc_len).decode("utf-8")
+        return has_router
 
     def tensor(self, dtype: npt.DTypeLike, shape: Sequence[int]) -> torch.Tensor:
         count = reduce(operator.mul, shape, 1)

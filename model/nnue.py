@@ -198,6 +198,12 @@ class NNUE(nn.Module):
                 "lr": LRs[9],
                 "weight_decay": 0.0,
             },
+            # Downstream Top-2 MoE Router
+            {
+                "params": list(self.model.router.parameters()),
+                "lr": LRs[0],
+                "weight_decay": 0.0,
+            },
         ]
 
         train_params = [group for group in train_params if len(group["params"]) > 0]
@@ -390,5 +396,8 @@ class NNUE(nn.Module):
         sf_loss = calculate_sf_loss(
             scorenet, score, outcome, self.config.loss_params, actual_lambda
         )
+
+        if self.training and hasattr(self.model, "commit_loss") and self.model.commit_loss is not None:
+            sf_loss = sf_loss + self.model.commit_loss
 
         return sf_loss

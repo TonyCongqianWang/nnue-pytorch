@@ -362,6 +362,12 @@ def init_random_weights(model: M.NNUEModel) -> None:
                 ls.factorized_linear.bias.data.uniform_(-0.5, 0.5)
                 touched.add(id(ls.factorized_linear.bias))
 
+        if hasattr(model, "router"):
+            for p in model.router.parameters():
+                p.data.uniform_(-1.0, 1.0)
+                touched.add(id(p))
+            model.router.update_lookup_table()
+
         all_param_ids = {id(p) for p in model.parameters()}
         untouched = all_param_ids - touched
         if untouched:

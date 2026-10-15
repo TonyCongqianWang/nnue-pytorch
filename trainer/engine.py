@@ -163,7 +163,7 @@ class SimpleTrainer:
                 "gradient_as_bucket_view": True,
                 "static_graph": True,
                 "find_unused_parameters": False,
-                "forward_sync_buffers": False,
+                "broadcast_buffers": False,
                 "bucket_cap_mb": 50,
             }
             if self.device.type == "cuda":

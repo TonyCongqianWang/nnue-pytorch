@@ -158,53 +158,88 @@ class NNUE(nn.Module):
                 "weight_decay": 0.0,
             },
             # Dense Layer Stacks
-            {
-                "params": [self.model.layer_stacks.l1.factorized_linear.weight],
-                "lr": LRs[2],
-                "weight_decay": factorized_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.l1.factorized_linear.bias],
-                "lr": LRs[3],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.l1.linear.weight],
-                "lr": LRs[4],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.l1.linear.bias],
-                "lr": LRs[5],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.l2.linear.weight],
-                "lr": LRs[6],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.l2.linear.bias],
-                "lr": LRs[7],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.weight],
-                "lr": LRs[8],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.bias],
-                "lr": LRs[9],
-                "weight_decay": 0.0,
-            },
-            # Downstream Top-2 MoE Router
+        ]
+        ls_layers = [
+            self.model.layer_stacks.l1,
+            self.model.layer_stacks.l2,
+            self.model.layer_stacks.output,
+        ]
+        if hasattr(self.model.layer_stacks.l1, "weight_base"):
+            train_params.extend(
+                [
+                    {
+                        "params": [ls.weight_base for ls in ls_layers],
+                        "lr": LRs[4],
+                        "weight_decay": dense_wd,
+                    },
+                    {
+                        "params": [ls.down_proj for ls in ls_layers]
+                        + [ls.up_proj for ls in ls_layers],
+                        "lr": LRs[4],
+                        "weight_decay": factorized_wd,
+                    },
+                    {
+                        "params": [ls.bias_base for ls in ls_layers]
+                        + [ls.bias_adapter for ls in ls_layers],
+                        "lr": LRs[5],
+                        "weight_decay": 0.0,
+                    },
+                ]
+            )
+        else:
+            train_params.extend(
+                [
+                    {
+                        "params": [self.model.layer_stacks.l1.factorized_linear.weight],
+                        "lr": LRs[2],
+                        "weight_decay": factorized_wd,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.l1.factorized_linear.bias],
+                        "lr": LRs[3],
+                        "weight_decay": 0.0,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.l1.linear.weight],
+                        "lr": LRs[4],
+                        "weight_decay": dense_wd,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.l1.linear.bias],
+                        "lr": LRs[5],
+                        "weight_decay": 0.0,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.l2.linear.weight],
+                        "lr": LRs[6],
+                        "weight_decay": dense_wd,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.l2.linear.bias],
+                        "lr": LRs[7],
+                        "weight_decay": 0.0,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.output.linear.weight],
+                        "lr": LRs[8],
+                        "weight_decay": dense_wd,
+                    },
+                    {
+                        "params": [self.model.layer_stacks.output.linear.bias],
+                        "lr": LRs[9],
+                        "weight_decay": 0.0,
+                    },
+                ]
+            )
+
+        # Downstream Top-2 MoE Router
+        train_params.append(
             {
                 "params": list(self.model.router.parameters()),
                 "lr": LRs[0],
                 "weight_decay": 0.0,
-            },
-        ]
+            }
+        )
 
         train_params = [group for group in train_params if len(group["params"]) > 0]
 

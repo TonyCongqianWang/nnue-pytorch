@@ -566,7 +566,11 @@ def eval_ft(
 def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     permutation = list(perm)
 
-    l1_size = model.layer_stacks.l1.linear.in_features
+    l1_size = (
+        model.layer_stacks.l1.in_features
+        if hasattr(model.layer_stacks.l1, "in_features")
+        else model.layer_stacks.l1.linear.in_features
+    )
     if l1_size != len(permutation) * 2:
         raise ValueError(
             f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
@@ -579,9 +583,12 @@ def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     for f in model.input.features:
         f.weight.copy_(f.weight[:, permutation])
     model.input.bias.copy_(model.input.bias[permutation])
-    model.layer_stacks.l1.linear.weight.copy_(
-        model.layer_stacks.l1.linear.weight[:, permutation]
-    )
+    if hasattr(model.layer_stacks.l1, "permute_inputs"):
+        model.layer_stacks.l1.permute_inputs(permutation)
+    else:
+        model.layer_stacks.l1.linear.weight.copy_(
+            model.layer_stacks.l1.linear.weight[:, permutation]
+        )
 
 
 def ft_permute(model: NNUEModel, ft_perm_path: str) -> None:

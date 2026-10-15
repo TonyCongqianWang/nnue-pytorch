@@ -347,6 +347,15 @@ def init_random_weights(model: M.NNUEModel) -> None:
             model.layer_stacks.l2,
             model.layer_stacks.output,
         ]:
+            if hasattr(ls, "weight_base"):
+                ls.bias_base.data.uniform_(-0.5, 0.5)
+                touched.add(id(ls.bias_base))
+                ls.down_proj.data.uniform_(-0.1, 0.1)
+                touched.add(id(ls.down_proj))
+                ls.up_proj.data.uniform_(-0.1, 0.1)
+                touched.add(id(ls.up_proj))
+                ls.bias_adapter.data.uniform_(-0.1, 0.1)
+                touched.add(id(ls.bias_adapter))
             if (
                 hasattr(ls, "linear")
                 and hasattr(ls.linear, "bias")

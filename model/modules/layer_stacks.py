@@ -5,12 +5,16 @@ from torch import nn
 
 from ..quantize import QuantizationManager
 from .config import LayerStacksConfig
-from .stacked_linear import FactorizedStackedLinear, StackedLinear
+from .stacked_linear import LowRankStackedLinear
 
 
 class LayerStacks(nn.Module):
     def __init__(
-        self, count: int, config: LayerStacksConfig, quantization: QuantizationManager
+        self,
+        count: int,
+        config: LayerStacksConfig,
+        quantization: QuantizationManager,
+        rank: int = 32,
     ):
         super().__init__()
 
@@ -19,22 +23,60 @@ class LayerStacks(nn.Module):
         self.L2 = config.L2
         self.L3 = config.L3
         self.quantization = quantization
+        self.rank = rank
 
-        # Factorizer only for the first layer because later
-        # there's a non-linearity and factorization breaks.
-        # This is by design. The weights in the further layers should be
-        # able to diverge a lot.
-        self.l1 = FactorizedStackedLinear(
-            2 * self.L1 // 2, self.L2, count, quantization, "ls_l1"
+        self.l1 = LowRankStackedLinear(
+            2 * self.L1 // 2,
+            self.L2,
+            count,
+            rank=rank,
+            quantization=quantization,
+            layer_key="ls_l1",
         )
-        self.l2 = StackedLinear(self.L2 * 2, self.L3, count, quantization, "ls_l2")
-
-        self.output = StackedLinear(
-            self.L2 * 2 + self.L3 * 2, 1, count, quantization, "ls_output"
+        self.l2 = LowRankStackedLinear(
+            self.L2 * 2,
+            self.L3,
+            count,
+            rank=rank,
+            quantization=quantization,
+            layer_key="ls_l2",
+        )
+        self.output = LowRankStackedLinear(
+            self.L2 * 2 + self.L3 * 2,
+            1,
+            count,
+            rank=rank,
+            quantization=quantization,
+            layer_key="ls_output",
         )
 
         with torch.no_grad():
-            self.output.linear.bias.zero_()
+            self.output.bias_base.zero_()
+            self.output.bias_adapter.zero_()
+
+    def set_router(self, router: nn.Module) -> None:
+        self.__dict__["_router"] = router
+        self.l1.set_router(router)
+        self.l2.set_router(router)
+        self.output.set_router(router)
+
+    def get_codebook(self) -> torch.Tensor | None:
+        if hasattr(self, "_router") and self._router is not None:
+            return self._router.codebook
+        return None
+
+    def get_expert_deltas(
+        self, codebook: torch.Tensor | None = None
+    ) -> list[torch.Tensor]:
+        if codebook is None:
+            codebook = self.get_codebook()
+        if codebook is None:
+            return []
+        return [
+            self.l1.get_delta_weights(codebook),
+            self.l2.get_delta_weights(codebook),
+            self.output.get_delta_weights(codebook),
+        ]
 
     def forward_head(
         self,
@@ -42,8 +84,12 @@ class LayerStacks(nn.Module):
         ls_indices: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
+        codebook: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights)
+        if codebook is None:
+            codebook = self.get_codebook()
+
+        l1c_ = self.l1(x, ls_indices, fake_quantize_weights, codebook=codebook)
 
         # Extract the short-path skip connection before fake quantization
         l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
@@ -61,7 +107,7 @@ class LayerStacks(nn.Module):
         l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
         l1x_ = self.quantization.clip_ls_act(l1x_)
 
-        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights)
+        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights, codebook=codebook)
         l2x_ = l2c_
 
         l2_sqr = torch.pow(l2x_, 2.0)
@@ -78,7 +124,9 @@ class LayerStacks(nn.Module):
 
         l3_input = torch.cat([l1x_, l2x_], dim=1)
 
-        l3c_ = self.output(l3_input, ls_indices, fake_quantize_weights)
+        l3c_ = self.output(
+            l3_input, ls_indices, fake_quantize_weights, codebook=codebook
+        )
 
         if fake_quantize_acts:
             l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
@@ -96,28 +144,64 @@ class LayerStacks(nn.Module):
         self,
         x: torch.Tensor,
         e1: torch.Tensor,
-        e2: torch.Tensor,
+        e2: torch.Tensor | bool | None = None,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
+        codebook: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out1 = self.forward_head(x, e1, fake_quantize_acts, fake_quantize_weights)
-        out2 = self.forward_head(x, e2, fake_quantize_acts, fake_quantize_weights)
+        if isinstance(e2, bool) or e2 is None:
+            f_acts = e2 if isinstance(e2, bool) else fake_quantize_acts
+            f_weights = fake_quantize_weights
+            return self.forward_head(
+                x,
+                e1,
+                fake_quantize_acts=f_acts,
+                fake_quantize_weights=f_weights,
+                codebook=codebook,
+            )
+
+        out1 = self.forward_head(
+            x,
+            e1,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+            codebook=codebook,
+        )
+        out2 = self.forward_head(
+            x,
+            e2,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
+            codebook=codebook,
+        )
         return out1 + out2
 
     @torch.no_grad()
     def zero_virtual_weights(self) -> None:
         self.l1.zero_virtual_weights()
+        self.l2.zero_virtual_weights()
+        self.output.zero_virtual_weights()
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(
         self,
+        codebook: torch.Tensor | None = None,
     ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        # During training the buckets are represented by a single, wider, layer.
-        # This representation needs to be transformed into individual layers
-        # for the serializer, because the buckets are interpreted as separate layers.
+        if codebook is None:
+            codebook = self.get_codebook()
         for i in range(self.count):
-            yield self.l1.at_index(i), self.l2.at_index(i), self.output.at_index(i)
+            yield (
+                self.l1.at_index(i, codebook),
+                self.l2.at_index(i, codebook),
+                self.output.at_index(i, codebook),
+            )
 
     @torch.no_grad()
-    def coalesce_layer_stacks_inplace(self) -> None:
-        self.l1.coalesce_weights()
+    def coalesce_layer_stacks_inplace(
+        self, codebook: torch.Tensor | None = None
+    ) -> None:
+        if codebook is None:
+            codebook = self.get_codebook()
+        self.l1.coalesce_weights(codebook)
+        self.l2.coalesce_weights(codebook)
+        self.output.coalesce_weights(codebook)

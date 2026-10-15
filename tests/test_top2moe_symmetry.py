@@ -155,12 +155,22 @@ def test_model_dual_head_forward():
     e2 = torch.tensor([31, 12, 5, 0])
 
     out = model.layer_stacks(
-        x, e1, e2, fake_quantize_acts=False, fake_quantize_weights=False
+        x,
+        model.router.codebook,
+        e1,
+        e2,
+        fake_quantize_acts=False,
+        fake_quantize_weights=False,
     )
     assert out.shape == (4, 1)
 
     # Commutative symmetry: H_{e1} + H_{e2} == H_{e2} + H_{e1}
     out_rev = model.layer_stacks(
-        x, e2, e1, fake_quantize_acts=False, fake_quantize_weights=False
+        x,
+        model.router.codebook,
+        e2,
+        e1,
+        fake_quantize_acts=False,
+        fake_quantize_weights=False,
     )
     assert torch.allclose(out, out_rev, atol=1e-6)

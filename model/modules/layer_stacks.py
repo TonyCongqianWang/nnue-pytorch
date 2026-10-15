@@ -54,24 +54,7 @@ class LayerStacks(nn.Module):
             self.output.bias_base.zero_()
             self.output.bias_adapter.zero_()
 
-    def set_router(self, router: nn.Module) -> None:
-        self.__dict__["_router"] = router
-        self.l1.set_router(router)
-        self.l2.set_router(router)
-        self.output.set_router(router)
-
-    def get_codebook(self) -> torch.Tensor | None:
-        if hasattr(self, "_router") and self._router is not None:
-            return self._router.codebook
-        return None
-
-    def get_expert_deltas(
-        self, codebook: torch.Tensor | None = None
-    ) -> list[torch.Tensor]:
-        if codebook is None:
-            codebook = self.get_codebook()
-        if codebook is None:
-            return []
+    def get_expert_deltas(self, codebook: torch.Tensor) -> list[torch.Tensor]:
         return [
             self.l1.get_delta_weights(codebook),
             self.l2.get_delta_weights(codebook),
@@ -81,15 +64,12 @@ class LayerStacks(nn.Module):
     def forward_head(
         self,
         x: torch.Tensor,
+        codebook: torch.Tensor | None,
         ls_indices: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
-        codebook: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if codebook is None:
-            codebook = self.get_codebook()
-
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights, codebook=codebook)
+        l1c_ = self.l1(x, codebook, ls_indices, fake_quantize_weights)
 
         # Extract the short-path skip connection before fake quantization
         l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
@@ -107,7 +87,7 @@ class LayerStacks(nn.Module):
         l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
         l1x_ = self.quantization.clip_ls_act(l1x_)
 
-        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights, codebook=codebook)
+        l2c_ = self.l2(l1x_, codebook, ls_indices, fake_quantize_weights)
         l2x_ = l2c_
 
         l2_sqr = torch.pow(l2x_, 2.0)
@@ -124,9 +104,7 @@ class LayerStacks(nn.Module):
 
         l3_input = torch.cat([l1x_, l2x_], dim=1)
 
-        l3c_ = self.output(
-            l3_input, ls_indices, fake_quantize_weights, codebook=codebook
-        )
+        l3c_ = self.output(l3_input, codebook, ls_indices, fake_quantize_weights)
 
         if fake_quantize_acts:
             l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
@@ -143,36 +121,25 @@ class LayerStacks(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        codebook: torch.Tensor | None,
         e1: torch.Tensor,
-        e2: torch.Tensor | bool | None = None,
+        e2: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
-        codebook: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if isinstance(e2, bool) or e2 is None:
-            f_acts = e2 if isinstance(e2, bool) else fake_quantize_acts
-            f_weights = fake_quantize_weights
-            return self.forward_head(
-                x,
-                e1,
-                fake_quantize_acts=f_acts,
-                fake_quantize_weights=f_weights,
-                codebook=codebook,
-            )
-
         out1 = self.forward_head(
             x,
+            codebook,
             e1,
             fake_quantize_acts=fake_quantize_acts,
             fake_quantize_weights=fake_quantize_weights,
-            codebook=codebook,
         )
         out2 = self.forward_head(
             x,
+            codebook,
             e2,
             fake_quantize_acts=fake_quantize_acts,
             fake_quantize_weights=fake_quantize_weights,
-            codebook=codebook,
         )
         return out1 + out2
 
@@ -187,8 +154,6 @@ class LayerStacks(nn.Module):
         self,
         codebook: torch.Tensor | None = None,
     ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        if codebook is None:
-            codebook = self.get_codebook()
         for i in range(self.count):
             yield (
                 self.l1.at_index(i, codebook),
@@ -200,8 +165,6 @@ class LayerStacks(nn.Module):
     def coalesce_layer_stacks_inplace(
         self, codebook: torch.Tensor | None = None
     ) -> None:
-        if codebook is None:
-            codebook = self.get_codebook()
         self.l1.coalesce_weights(codebook)
         self.l2.coalesce_weights(codebook)
         self.output.coalesce_weights(codebook)

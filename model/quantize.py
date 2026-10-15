@@ -176,31 +176,23 @@ class QuantizationManager:
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        configs: list[WeightClippingConfig] = []
-        layers = [
-            model.layer_stacks.l1,
-            model.layer_stacks.l2,
-            model.layer_stacks.output,
+        return [
+            {
+                "params": [model.layer_stacks.l1.weight_base],
+                "min_weight": -self.max_hidden_weight[0],
+                "max_weight": self.max_hidden_weight[0],
+            },
+            {
+                "params": [model.layer_stacks.l2.weight_base],
+                "min_weight": -self.max_hidden_weight[1],
+                "max_weight": self.max_hidden_weight[1],
+            },
+            {
+                "params": [model.layer_stacks.output.weight_base],
+                "min_weight": -self.max_hidden_weight[2],
+                "max_weight": self.max_hidden_weight[2],
+            },
         ]
-        for i, ls in enumerate(layers):
-            if hasattr(ls, "weight_base"):
-                configs.append(
-                    {
-                        "params": [ls.weight_base],
-                        "min_weight": -self.max_hidden_weight[i],
-                        "max_weight": self.max_hidden_weight[i],
-                    }
-                )
-            elif hasattr(ls, "linear"):
-                cfg: WeightClippingConfig = {
-                    "params": [ls.linear.weight],
-                    "min_weight": -self.max_hidden_weight[i],
-                    "max_weight": self.max_hidden_weight[i],
-                }
-                if hasattr(ls, "factorized_linear"):
-                    cfg["virtual_params"] = ls.factorized_linear.weight
-                configs.append(cfg)
-        return configs
 
     def quantize_feature_transformer_weights(
         self,

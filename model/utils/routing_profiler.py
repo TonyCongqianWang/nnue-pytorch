@@ -22,10 +22,8 @@ def print_routing_profile(model, file=None) -> None:
     if file is None:
         file = sys.stdout
 
-    router = getattr(model, "router", None)
-    layer_stacks = getattr(model, "layer_stacks", None)
-    if router is None:
-        return
+    router = model.router
+    layer_stacks = model.layer_stacks
 
     lut = router.get_lookup_table()
     total_contexts = lut.numel()
@@ -38,10 +36,7 @@ def print_routing_profile(model, file=None) -> None:
     q_np = q.cpu().numpy()  # 0 or 1
     k_us_np = k_us.cpu().numpy()  # 0..32
 
-    # Get delta weights if layer_stacks has low-rank deltas
-    delta_w_layers = []
-    if layer_stacks is not None and hasattr(layer_stacks, "get_expert_deltas"):
-        delta_w_layers = layer_stacks.get_expert_deltas(router.codebook)
+    delta_w_layers = layer_stacks.get_expert_deltas(router.codebook)
 
     print("\nExpert Routing Profile (68,640 contexts):", file=file)
     print(

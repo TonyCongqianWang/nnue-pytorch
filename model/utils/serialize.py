@@ -96,9 +96,8 @@ class NNUEWriter:
         self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
         self.write_feature_transformer(model)
         layer_stacks = model.layer_stacks
-        codebook = model.router.codebook if hasattr(model, "router") else None
         for bucket, (l1, l2, output) in enumerate(
-            layer_stacks.get_coalesced_layer_stacks(codebook)
+            layer_stacks.get_coalesced_layer_stacks(model.router.codebook)
         ):
             self.int32(fc_hash)  # FC layers hash
             self.write_fc_layer(
@@ -112,7 +111,7 @@ class NNUEWriter:
             )
 
         # 3. Downstream Top-2 MoE Router Lookup Table (68,640 bytes)
-        if self.verbose and hasattr(model, "router"):
+        if self.verbose:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
@@ -133,15 +132,10 @@ class NNUEWriter:
         ]
         for layer in layers:
             layer_hash = 0xCC03DAE4
-            out_f = (
-                layer.out_features
-                if hasattr(layer, "weight_base")
-                else layer.linear.out_features // model.num_ls_buckets
-            )
-            layer_hash += out_f
+            layer_hash += layer.out_features
             layer_hash ^= prev_hash >> 1
             layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
-            if out_f != 1:
+            if layer.out_features != 1:
                 # Clipped ReLU hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
@@ -251,37 +245,15 @@ class NNUEReader:
         ]
         num_ls_buckets = self.model.num_ls_buckets
         for layer in layers:
-            if hasattr(layer, "init_coalesced_storage"):
-                layer.init_coalesced_storage()
-
-        l_w_slices = [
-            torch.chunk(layer.linear.weight.data, num_ls_buckets, dim=0)
-            if hasattr(layer, "linear")
-            else None
-            for layer in layers
-        ]
-        l_b_slices = [
-            torch.chunk(layer.linear.bias.data, num_ls_buckets, dim=0)
-            if hasattr(layer, "linear")
-            else None
-            for layer in layers
-        ]
+            layer.init_coalesced_storage()
 
         for b in range(num_ls_buckets):
             self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                layer = layers[layer_idx]
-                if hasattr(layer, "coalesced_weight") and layer.is_coalesced:
-                    out_f = layer.out_features
-                    w_slice = layer.coalesced_weight[b * out_f : (b + 1) * out_f, :]
-                    b_slice = layer.coalesced_bias[b * out_f : (b + 1) * out_f]
-                    self.read_fc_layer(w_slice, b_slice, layer.layer_key)
-                else:
-                    self.read_fc_layer(
-                        l_w_slices[layer_idx][b],
-                        l_b_slices[layer_idx][b],
-                        layer.layer_key,
-                    )
+            for layer in layers:
+                out_f = layer.out_features
+                w_slice = layer.coalesced_weight[b * out_f : (b + 1) * out_f, :]
+                b_slice = layer.coalesced_bias[b * out_f : (b + 1) * out_f]
+                self.read_fc_layer(w_slice, b_slice, layer.layer_key)
 
         raw_router = self.f.read(ROUTER_TABLE_SIZE)
         if len(raw_router) != ROUTER_TABLE_SIZE:

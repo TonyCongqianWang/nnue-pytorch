@@ -37,7 +37,6 @@ class NNUEModel(nn.Module):
         self.router = VQCodebookRouter(
             num_contexts=68640, num_experts=self.num_ls_buckets
         )
-        self.layer_stacks.set_router(self.router)
         self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
@@ -128,11 +127,11 @@ class NNUEModel(nn.Module):
         )
         x = self.layer_stacks(
             l0_,
+            self.router.codebook,
             e1,
             e2,
             fake_quantize_acts,
             fake_quantize_weights,
-            codebook=self.router.codebook,
         )
 
         return x

@@ -223,14 +223,6 @@ class LowRankStackedLinear(nn.Module):
 
         self._reset_parameters()
 
-    def set_router(self, router: nn.Module) -> None:
-        self.__dict__["_router"] = router
-
-    def get_codebook(self) -> torch.Tensor | None:
-        if hasattr(self, "_router") and self._router is not None:
-            return self._router.codebook
-        return None
-
     def _reset_parameters(self) -> None:
         bound_base = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
         nn.init.uniform_(self.weight_base, -bound_base, bound_base)
@@ -260,8 +252,6 @@ class LowRankStackedLinear(nn.Module):
             return self.coalesced_weight, self.coalesced_bias
 
         if codebook is None:
-            codebook = self.get_codebook()
-        if codebook is None:
             codebook = torch.zeros(
                 self.count,
                 self.rank,
@@ -284,9 +274,9 @@ class LowRankStackedLinear(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        codebook: torch.Tensor | None,
         ls_indices: torch.Tensor,
         fake_quantize_weights: bool = False,
-        codebook: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flat_w, flat_b = self.get_merged_weights_and_biases(codebook)
 

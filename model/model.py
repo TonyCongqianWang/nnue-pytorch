@@ -34,7 +34,9 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
-        self.router = VQCodebookRouter(num_contexts=68640, num_experts=self.num_ls_buckets)
+        self.router = VQCodebookRouter(
+            num_contexts=68640, num_experts=self.num_ls_buckets
+        )
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
@@ -123,8 +125,6 @@ class NNUEModel(nn.Module):
             fake_quantize_acts,
             fake_quantize_weights,
         )
-        x = self.layer_stacks(
-            l0_, e1, e2, fake_quantize_acts, fake_quantize_weights
-        )
+        x = self.layer_stacks(l0_, e1, e2, fake_quantize_acts, fake_quantize_weights)
 
         return x

@@ -397,7 +397,11 @@ class NNUE(nn.Module):
             scorenet, score, outcome, self.config.loss_params, actual_lambda
         )
 
-        if self.training and hasattr(self.model, "commit_loss") and self.model.commit_loss is not None:
+        if (
+            self.training
+            and hasattr(self.model, "commit_loss")
+            and self.model.commit_loss is not None
+        ):
             sf_loss = sf_loss + self.model.commit_loss
 
         return sf_loss

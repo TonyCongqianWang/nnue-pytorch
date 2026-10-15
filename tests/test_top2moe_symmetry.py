@@ -1,5 +1,4 @@
 import chess
-import pytest
 import torch
 
 from cross_check_eval import init_random_weights
@@ -22,8 +21,12 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
     our_pieces = min(max((white_pieces if stm else black_pieces) - 1, 0), 15)
     their_pieces = min(max((black_pieces if stm else white_pieces) - 1, 0), 15)
 
-    our_queen = 1 if bool(board.pieces(chess.QUEEN, chess.WHITE if stm else chess.BLACK)) else 0
-    their_queen = 1 if bool(board.pieces(chess.QUEEN, chess.BLACK if stm else chess.WHITE)) else 0
+    our_queen = (
+        1 if bool(board.pieces(chess.QUEEN, chess.WHITE if stm else chess.BLACK)) else 0
+    )
+    their_queen = (
+        1 if bool(board.pieces(chess.QUEEN, chess.BLACK if stm else chess.WHITE)) else 0
+    )
 
     our_ksq = board.king(chess.WHITE if stm else chess.BLACK)
     enemy_ksq = board.king(chess.BLACK if stm else chess.WHITE)
@@ -64,7 +67,9 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
     else:
         our_king_bucket_them = our_ksq_oriented_them
 
-    c_them = make_router_index(their_pieces, their_queen, their_king_bucket, our_king_bucket_them)
+    c_them = make_router_index(
+        their_pieces, their_queen, their_king_bucket, our_king_bucket_them
+    )
 
     return c_us, c_them
 
@@ -77,7 +82,9 @@ def test_router_bijection():
                 for k2 in [0, 31, 64]:
                     idx = make_router_index(p, q, k1, k2)
                     assert 0 <= idx < ROUTER_TABLE_SIZE
-                    p_rec, q_rec, k1_rec, k2_rec = decompose_router_index(torch.tensor([idx]))
+                    p_rec, q_rec, k1_rec, k2_rec = decompose_router_index(
+                        torch.tensor([idx])
+                    )
                     assert p_rec.item() == p
                     assert q_rec.item() == q
                     assert k1_rec.item() == k1
@@ -107,20 +114,34 @@ def test_board_symmetry_permutation():
         board_turn_flip.turn = not board.turn
         c_us_tflip, c_them_tflip = get_context_indices(board_turn_flip)
 
-        assert c_us == c_them_tflip, f"Turn toggle failed: c_us={c_us} != c_them_tflip={c_them_tflip}"
-        assert c_them == c_us_tflip, f"Turn toggle failed: c_them={c_them} != c_us_tflip={c_us_tflip}"
+        assert c_us == c_them_tflip, (
+            f"Turn toggle failed: c_us={c_us} != c_them_tflip={c_them_tflip}"
+        )
+        assert c_them == c_us_tflip, (
+            f"Turn toggle failed: c_them={c_them} != c_us_tflip={c_us_tflip}"
+        )
 
         # 2. Color-inverted mirrored board preserves exact STM evaluation context
         mirrored = board.mirror()
         c_us_mirror, c_them_mirror = get_context_indices(mirrored)
-        assert c_us == c_us_mirror, f"Color mirror invariance failed: c_us={c_us} != c_us_mirror={c_us_mirror}"
-        assert c_them == c_them_mirror, f"Color mirror invariance failed: c_them={c_them} != c_them_mirror={c_them_mirror}"
+        assert c_us == c_us_mirror, (
+            f"Color mirror invariance failed: c_us={c_us} != c_us_mirror={c_us_mirror}"
+        )
+        assert c_them == c_them_mirror, (
+            f"Color mirror invariance failed: c_them={c_them} != c_them_mirror={c_them_mirror}"
+        )
 
         # 3. Router expert selection
         e1, e2, _ = router(torch.tensor([c_us]), torch.tensor([c_them]))
-        e1_tf, e2_tf, _ = router(torch.tensor([c_us_tflip]), torch.tensor([c_them_tflip]))
-        assert e1.item() == e2_tf.item(), f"Expert swap failed: e1={e1.item()} != e2_tf={e2_tf.item()}"
-        assert e2.item() == e1_tf.item(), f"Expert swap failed: e2={e2.item()} != e1_tf={e1_tf.item()}"
+        e1_tf, e2_tf, _ = router(
+            torch.tensor([c_us_tflip]), torch.tensor([c_them_tflip])
+        )
+        assert e1.item() == e2_tf.item(), (
+            f"Expert swap failed: e1={e1.item()} != e2_tf={e2_tf.item()}"
+        )
+        assert e2.item() == e1_tf.item(), (
+            f"Expert swap failed: e2={e2.item()} != e1_tf={e1_tf.item()}"
+        )
 
 
 def test_model_dual_head_forward():
@@ -133,9 +154,13 @@ def test_model_dual_head_forward():
     e1 = torch.tensor([0, 5, 12, 31])
     e2 = torch.tensor([31, 12, 5, 0])
 
-    out = model.layer_stacks(x, e1, e2, fake_quantize_acts=False, fake_quantize_weights=False)
+    out = model.layer_stacks(
+        x, e1, e2, fake_quantize_acts=False, fake_quantize_weights=False
+    )
     assert out.shape == (4, 1)
 
     # Commutative symmetry: H_{e1} + H_{e2} == H_{e2} + H_{e1}
-    out_rev = model.layer_stacks(x, e2, e1, fake_quantize_acts=False, fake_quantize_weights=False)
+    out_rev = model.layer_stacks(
+        x, e2, e1, fake_quantize_acts=False, fake_quantize_weights=False
+    )
     assert torch.allclose(out, out_rev, atol=1e-6)

@@ -90,9 +90,7 @@ def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active):
         score = torch.randn(batch_size, 1, generator=gen) * 300
         c_us = torch.randint(0, 68640, (batch_size,), generator=gen)
         c_them = torch.randint(0, 68640, (batch_size,), generator=gen)
-        batches.append(
-            (us, 1.0 - us, *indices, outcome, score, c_us, c_them)
-        )
+        batches.append((us, 1.0 - us, *indices, outcome, score, c_us, c_them))
     return batches
 
 

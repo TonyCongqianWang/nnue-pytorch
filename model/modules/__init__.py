@@ -17,6 +17,8 @@ from .router import ROUTER_HASH, ROUTER_TABLE_SIZE, VQCodebookRouter
 
 __all__ = [
     "K32Q2",
+    "ROUTER_HASH",
+    "ROUTER_TABLE_SIZE",
     "ComposedFeatureTransformer",
     "FeatureConfig",
     "FullThreats",
@@ -24,8 +26,6 @@ __all__ = [
     "InputFeature",
     "LayerStacks",
     "LayerStacksConfig",
-    "ROUTER_HASH",
-    "ROUTER_TABLE_SIZE",
     "VQCodebookRouter",
     "add_feature_args",
     "get_available_features",

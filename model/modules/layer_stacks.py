@@ -103,8 +103,12 @@ class LayerStacks(nn.Module):
         if e2 is None:
             if e1.ndim == 2 and e1.shape[1] == 2:
                 e1_idx, e2_idx = e1[:, 0], e1[:, 1]
-                out1 = self.forward_head(x, e1_idx, fake_quantize_acts, fake_quantize_weights)
-                out2 = self.forward_head(x, e2_idx, fake_quantize_acts, fake_quantize_weights)
+                out1 = self.forward_head(
+                    x, e1_idx, fake_quantize_acts, fake_quantize_weights
+                )
+                out2 = self.forward_head(
+                    x, e2_idx, fake_quantize_acts, fake_quantize_weights
+                )
                 return out1 + out2
             return self.forward_head(x, e1, fake_quantize_acts, fake_quantize_weights)
 

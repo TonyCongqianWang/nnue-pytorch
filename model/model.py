@@ -78,8 +78,6 @@ class NNUEModel(nn.Module):
     @torch.no_grad()
     def zero_virtual_weights(self) -> None:
         self.input.zero_virtual_weights()
-        self.layer_stacks.zero_virtual_weights()
-        self.router.zero_weights()
 
     def forward_ft(
         self,
@@ -100,7 +98,7 @@ class NNUEModel(nn.Module):
         )
 
     def calculate_buckets(self, c_us: torch.Tensor, c_them: torch.Tensor):
-        e1, e2, _ = self.router(c_us, c_them)
+        e1, e2, *_ = self.router(c_us, c_them)
         return e1, e2
 
     def forward(
@@ -114,8 +112,10 @@ class NNUEModel(nn.Module):
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ):
-        e1, e2, commit_loss = self.router(c_us, c_them)
+        e1, e2, moe_loss, commit_loss, balance_loss = self.router(c_us, c_them)
+        self.moe_loss = moe_loss
         self.commit_loss = commit_loss
+        self.balance_loss = balance_loss
 
         l0_ = self.forward_ft(
             us,

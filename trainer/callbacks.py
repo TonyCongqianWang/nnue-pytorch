@@ -660,6 +660,12 @@ class SimpleLineLogger(Callback):
             loss_val = trainer.callback_metrics.get(
                 self.train_metric_step, float("nan")
             )
+            sf_val = trainer.callback_metrics.get("sf_loss", None)
+            moe_val = trainer.callback_metrics.get("moe_loss", None)
+            if sf_val is not None and moe_val is not None:
+                loss_str = f"{self.train_metric_step}={loss_val:.5f} (sf={sf_val:.5f}, moe={moe_val:.5f})"
+            else:
+                loss_str = f"{self.train_metric_step}={loss_val:.5f}"
 
             print(
                 f"Epoch {trainer.current_epoch:>2} (Train): "
@@ -667,7 +673,7 @@ class SimpleLineLogger(Callback):
                 f"{current_step:>5}/{total_batches:<5} "
                 f"[{self._format_time(elapsed_total)}<{self._format_time(remaining)}, "
                 f"{rate:>6.2f}it/s, "
-                f"{self.train_metric_step}={loss_val:.5f}, "
+                f"{loss_str}, "
                 f"v_num={trainer.logger.version}]",
                 flush=True,
             )
@@ -681,9 +687,16 @@ class SimpleLineLogger(Callback):
             return
 
         train_loss = trainer.callback_metrics.get(self.train_metric_epoch, float("nan"))
+        sf_loss_epoch = trainer.callback_metrics.get("train_sf_loss_epoch", None)
+        moe_loss_epoch = trainer.callback_metrics.get("train_moe_loss_epoch", None)
         unique_val = trainer.callback_metrics.get("unique", None)
         total_val = trainer.callback_metrics.get("total", None)
         preskip_val = trainer.callback_metrics.get("preskip", None)
+
+        if sf_loss_epoch is not None and moe_loss_epoch is not None:
+            loss_str = f"{self.train_metric_epoch}={train_loss:.5f} (sf={sf_loss_epoch:.5f}, moe={moe_loss_epoch:.5f})"
+        else:
+            loss_str = f"{self.train_metric_epoch}={train_loss:.5f}"
 
         unique_str = f", unique={unique_val:.0f}" if unique_val is not None else ""
         total_str = f", total={total_val:.0f}" if total_val is not None else ""
@@ -691,7 +704,7 @@ class SimpleLineLogger(Callback):
 
         print(
             f"Epoch {trainer.current_epoch:>2} (Train): "
-            f"[{self.train_metric_epoch}={train_loss:.5f}"
+            f"[{loss_str}"
             f"{unique_str}{total_str}{preskip_str}]",
             flush=True,
         )

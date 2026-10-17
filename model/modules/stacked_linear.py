@@ -367,15 +367,12 @@ class LowRankStackedLinear(nn.Module):
     def init_coalesced_storage(self) -> None:
         self.coalesced_weight.zero_()
         self.coalesced_bias.zero_()
-        self.is_coalesced = True
-
-    @torch.no_grad()
-    def zero_virtual_weights(self) -> None:
         self.weight_base.zero_()
         self.bias_base.zero_()
         self.down_proj.zero_()
         self.up_proj.zero_()
         self.bias_adapter.zero_()
+        self.is_coalesced = True
 
     @torch.no_grad()
     def permute_inputs(self, permutation: Sequence[int]) -> None:

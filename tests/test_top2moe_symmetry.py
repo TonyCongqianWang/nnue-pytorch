@@ -132,8 +132,8 @@ def test_board_symmetry_permutation():
         )
 
         # 3. Router expert selection
-        e1, e2, _ = router(torch.tensor([c_us]), torch.tensor([c_them]))
-        e1_tf, e2_tf, _ = router(
+        e1, e2, *_ = router(torch.tensor([c_us]), torch.tensor([c_them]))
+        e1_tf, e2_tf, *_ = router(
             torch.tensor([c_us_tflip]), torch.tensor([c_them_tflip])
         )
         assert e1.item() == e2_tf.item(), (

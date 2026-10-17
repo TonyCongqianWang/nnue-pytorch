@@ -222,13 +222,23 @@ class SimpleTrainer:
                 self.model.config.use_fake_act_quantization,
                 self.model.config.use_fake_weight_quantization,
             )
-            loss = _unwrap_module(self.model).compute_loss_with_scorenet(
-                scorenet, batch, self.global_step
+            total_loss, sf_loss, moe_loss, commit_loss, balance_loss = _unwrap_module(
+                self.model
+            ).compute_loss_with_scorenet(
+                scorenet, batch, self.global_step, return_details=True
             )
-            _unwrap_module(self.model).loss_metrics["train_loss_epoch"].update(
-                loss.detach()
-            )
-            outputs = {"loss": loss, "train_loss": loss.detach()}
+            unwrapped = _unwrap_module(self.model)
+            unwrapped.loss_metrics["train_loss_epoch"].update(total_loss.detach())
+            unwrapped.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
+            unwrapped.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
+            outputs = {
+                "loss": total_loss,
+                "train_loss": total_loss.detach(),
+                "sf_loss": sf_loss.detach(),
+                "moe_loss": moe_loss.detach(),
+                "commit_loss": commit_loss.detach(),
+                "balance_loss": balance_loss.detach(),
+            }
         else:
             outputs = self.model.train_step(batch, self.current_epoch, self.global_step)
         return outputs
@@ -362,6 +372,10 @@ class SimpleTrainer:
             # Store the raw loss tensor (GPU).  Only convert to float
             # when logging is due or when a callback needs the scalar.
             self.callback_metrics["train_loss"] = outputs["train_loss"].detach()
+            if "sf_loss" in outputs:
+                self.callback_metrics["sf_loss"] = outputs["sf_loss"].detach()
+            if "moe_loss" in outputs:
+                self.callback_metrics["moe_loss"] = outputs["moe_loss"].detach()
 
             if (batch_idx + 1) % self.log_every_n_steps == 0 or (
                 batch_idx + 1
@@ -369,8 +383,19 @@ class SimpleTrainer:
                 self.callback_metrics["train_loss"] = float(
                     self.callback_metrics["train_loss"]
                 )
+                step_metrics = {"train_loss": self.callback_metrics["train_loss"]}
+                if "sf_loss" in self.callback_metrics:
+                    self.callback_metrics["sf_loss"] = float(
+                        self.callback_metrics["sf_loss"]
+                    )
+                    step_metrics["sf_loss"] = self.callback_metrics["sf_loss"]
+                if "moe_loss" in self.callback_metrics:
+                    self.callback_metrics["moe_loss"] = float(
+                        self.callback_metrics["moe_loss"]
+                    )
+                    step_metrics["moe_loss"] = self.callback_metrics["moe_loss"]
                 self._log_metrics(
-                    {"train_loss": self.callback_metrics["train_loss"]},
+                    step_metrics,
                     step=self.global_step,
                 )
 
@@ -379,8 +404,24 @@ class SimpleTrainer:
         # Compute and log epoch-level training loss before the model resets it.
         train_loss_epoch = self.model.loss_metrics["train_loss_epoch"].compute().item()
         self.callback_metrics["train_loss_epoch"] = train_loss_epoch
+        epoch_metrics = {
+            "train_loss_epoch": train_loss_epoch,
+            "epoch": self.current_epoch,
+        }
+        if "train_sf_loss_epoch" in self.model.loss_metrics:
+            train_sf_loss_epoch = (
+                self.model.loss_metrics["train_sf_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+            epoch_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+        if "train_moe_loss_epoch" in self.model.loss_metrics:
+            train_moe_loss_epoch = (
+                self.model.loss_metrics["train_moe_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
+            epoch_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
         self._log_metrics(
-            {"train_loss_epoch": train_loss_epoch, "epoch": self.current_epoch},
+            epoch_metrics,
             step=self.global_step,
         )
 

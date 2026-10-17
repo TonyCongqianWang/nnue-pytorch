@@ -119,6 +119,8 @@ class NNUE(nn.Module):
                 # TerminateOnNaN checks at logging boundaries; non-finite
                 # losses still propagate into the epoch metric.
                 "train_loss_epoch": MeanMetric(nan_strategy="disable"),
+                "train_sf_loss_epoch": MeanMetric(nan_strategy="disable"),
+                "train_moe_loss_epoch": MeanMetric(nan_strategy="disable"),
                 "val_loss_epoch": MeanMetric(nan_strategy="disable"),
                 "test_loss_epoch": MeanMetric(nan_strategy="disable"),
             }
@@ -322,9 +324,20 @@ class NNUE(nn.Module):
 
     def train_step(self, batch, current_epoch, global_step):
         _ = current_epoch
-        loss = self.compute_loss(batch, global_step)
-        self.loss_metrics["train_loss_epoch"].update(loss)
-        return {"loss": loss, "train_loss": loss.detach()}
+        total_loss, sf_loss, moe_loss, commit_loss, balance_loss = self.compute_loss(
+            batch, global_step, return_details=True
+        )
+        self.loss_metrics["train_loss_epoch"].update(total_loss.detach())
+        self.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
+        self.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
+        return {
+            "loss": total_loss,
+            "train_loss": total_loss.detach(),
+            "sf_loss": sf_loss.detach(),
+            "moe_loss": moe_loss.detach(),
+            "commit_loss": commit_loss.detach(),
+            "balance_loss": balance_loss.detach(),
+        }
 
     @torch.no_grad()
     def val_step(self, batch, current_epoch, global_step):
@@ -340,7 +353,12 @@ class NNUE(nn.Module):
         self.loss_metrics["test_loss_epoch"].update(loss)
         return {"test_loss": loss}
 
-    def compute_loss(self, batch: tuple[Tensor, ...], current_step: int):
+    def compute_loss(
+        self,
+        batch: tuple[Tensor, ...],
+        current_step: int,
+        return_details: bool = False,
+    ):
         (
             us,
             them,
@@ -361,10 +379,16 @@ class NNUE(nn.Module):
             self.config.use_fake_act_quantization,
             self.config.use_fake_weight_quantization,
         )
-        return self.compute_loss_with_scorenet(scorenet, batch, current_step)
+        return self.compute_loss_with_scorenet(
+            scorenet, batch, current_step, return_details=return_details
+        )
 
     def compute_loss_with_scorenet(
-        self, scorenet: Tensor, batch: tuple[Tensor, ...], current_step: int
+        self,
+        scorenet: Tensor,
+        batch: tuple[Tensor, ...],
+        current_step: int,
+        return_details: bool = False,
     ):
         (
             _us,
@@ -390,7 +414,24 @@ class NNUE(nn.Module):
             scorenet, score, outcome, self.config.loss_params, actual_lambda
         )
 
-        if self.training and self.model.commit_loss is not None:
-            sf_loss = sf_loss + self.model.commit_loss
+        moe_loss = (
+            self.model.moe_loss
+            if self.training and getattr(self.model, "moe_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+        commit_loss = (
+            self.model.commit_loss
+            if self.training and getattr(self.model, "commit_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+        balance_loss = (
+            self.model.balance_loss
+            if self.training and getattr(self.model, "balance_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
 
-        return sf_loss
+        total_loss = sf_loss + moe_loss
+
+        if return_details:
+            return total_loss, sf_loss, moe_loss, commit_loss, balance_loss
+        return total_loss

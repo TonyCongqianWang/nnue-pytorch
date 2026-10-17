@@ -144,12 +144,6 @@ class LayerStacks(nn.Module):
         return out1 + out2
 
     @torch.no_grad()
-    def zero_virtual_weights(self) -> None:
-        self.l1.zero_virtual_weights()
-        self.l2.zero_virtual_weights()
-        self.output.zero_virtual_weights()
-
-    @torch.no_grad()
     def get_coalesced_layer_stacks(
         self,
         codebook: torch.Tensor | None = None,

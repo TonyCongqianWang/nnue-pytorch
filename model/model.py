@@ -2,7 +2,12 @@ import torch
 from torch import nn
 
 from .config import ModelConfig
-from .modules import ComposedFeatureTransformer, LayerStacks, get_feature_cls
+from .modules import (
+    ComposedFeatureTransformer,
+    LayerStacks,
+    VQCodebookRouter,
+    get_feature_cls,
+)
 from .quantize import QuantizationManager
 
 
@@ -29,6 +34,10 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
+        self.router = VQCodebookRouter(
+            num_contexts=68640, num_experts=self.num_ls_buckets
+        )
+        self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
@@ -70,6 +79,7 @@ class NNUEModel(nn.Module):
     def zero_virtual_weights(self) -> None:
         self.input.zero_virtual_weights()
         self.layer_stacks.zero_virtual_weights()
+        self.router.zero_weights()
 
     def forward_ft(
         self,
@@ -89,9 +99,9 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
 
-    def calculate_buckets(self, piece_count: torch.Tensor, queen_bucket: torch.Tensor):
-        pc_bucket = (piece_count - 1) // 4
-        return pc_bucket * 4 + queen_bucket
+    def calculate_buckets(self, c_us: torch.Tensor, c_them: torch.Tensor):
+        e1, e2, _ = self.router(c_us, c_them)
+        return e1, e2
 
     def forward(
         self,
@@ -99,12 +109,13 @@ class NNUEModel(nn.Module):
         them: torch.Tensor,
         white_indices: torch.Tensor,
         black_indices: torch.Tensor,
-        piece_count: torch.Tensor,
-        queen_bucket: torch.Tensor,
+        c_us: torch.Tensor,
+        c_them: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ):
-        layer_stack_indices = self.calculate_buckets(piece_count, queen_bucket)
+        e1, e2, commit_loss = self.router(c_us, c_them)
+        self.commit_loss = commit_loss
 
         l0_ = self.forward_ft(
             us,
@@ -115,7 +126,12 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
         x = self.layer_stacks(
-            l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights
+            l0_,
+            self.router.codebook,
+            e1,
+            e2,
+            fake_quantize_acts,
+            fake_quantize_weights,
         )
 
         return x

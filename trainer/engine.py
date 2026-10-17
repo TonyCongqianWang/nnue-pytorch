@@ -6,6 +6,7 @@ while keeping `model.NNUE` as a plain `torch.nn.Module`.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -163,9 +164,12 @@ class SimpleTrainer:
                 "gradient_as_bucket_view": True,
                 "static_graph": True,
                 "find_unused_parameters": False,
-                "forward_sync_buffers": False,
                 "bucket_cap_mb": 50,
             }
+            if "forward_sync_buffers" in inspect.signature(DDP.__init__).parameters:
+                kwargs["forward_sync_buffers"] = False
+            else:
+                kwargs["broadcast_buffers"] = False
             if self.device.type == "cuda":
                 kwargs["device_ids"] = [self.local_rank]
                 kwargs["output_device"] = self.local_rank

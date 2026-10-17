@@ -52,14 +52,23 @@ def _fake_quantize_acts(value, act_scale):
     return value
 
 
-def _fake_quantize_weights(value, weight_scale):
+def _fake_quantize_weights(
+    value: torch.Tensor,
+    weight_scale: float,
+    clamp_bounds: tuple[float, float] | None = None,
+) -> torch.Tensor:
     # Fake quantization with STE
     # In contrast to activations,
     # weights use rounding as they are
     # quantized during serialization.
-    value_hard = value.mul(weight_scale).round().div(weight_scale).detach()
-    value_soft = value.detach()
-    value = value_hard + (value - value_soft)
+    scaled = value.mul(weight_scale)
+    if clamp_bounds is not None:
+        scaled_clamped = scaled.clamp(clamp_bounds[0], clamp_bounds[1])
+    else:
+        scaled_clamped = scaled
+    value_hard = scaled_clamped.round().div(weight_scale).detach()
+    value_soft = scaled_clamped.div(weight_scale).detach()
+    value = value_hard + (scaled_clamped.div(weight_scale) - value_soft)
 
     return value
 
@@ -159,27 +168,27 @@ class QuantizationManager:
 
         return quantized_out.detach() + (preact - preact.detach())
 
-    def fake_quantize_weights(self, tensor: torch.Tensor, key: str):
+    def fake_quantize_weights(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
         weight_scale = self.weight_scales_dict[key]
-        return _fake_quantize_weights(tensor, weight_scale)
+        clamp_bounds = (-127.0, 127.0) if key.endswith("_weight") else None
+        return _fake_quantize_weights(tensor, weight_scale, clamp_bounds=clamp_bounds)
 
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
         return [
             {
-                "params": [model.layer_stacks.l1.linear.weight],
+                "params": [model.layer_stacks.l1.weight_base],
                 "min_weight": -self.max_hidden_weight[0],
                 "max_weight": self.max_hidden_weight[0],
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
             },
             {
-                "params": [model.layer_stacks.l2.linear.weight],
+                "params": [model.layer_stacks.l2.weight_base],
                 "min_weight": -self.max_hidden_weight[1],
                 "max_weight": self.max_hidden_weight[1],
             },
             {
-                "params": [model.layer_stacks.output.linear.weight],
+                "params": [model.layer_stacks.output.weight_base],
                 "min_weight": -self.max_hidden_weight[2],
                 "max_weight": self.max_hidden_weight[2],
             },

@@ -3,9 +3,9 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from ...quantize import QuantizationManager
+from ...quantize import QuantizationManager, _fake_quantize_acts
 from ..features.input_feature import InputFeature
-from .double_ft_functions import double_feature_transform
+from .sparse_linear_functions import SparseLinearFunction
 
 
 class ComposedFeatureTransformer(nn.Module):
@@ -20,6 +20,7 @@ class ComposedFeatureTransformer(nn.Module):
         feature_classes: list[Callable[[int], InputFeature]],
         l1_size: int,
         quantization: QuantizationManager,
+        ft_dynamic_bias_dim: int = 256,
     ):
         super().__init__()
 
@@ -27,7 +28,8 @@ class ComposedFeatureTransformer(nn.Module):
             raise ValueError(f"l1_size must be even, got {l1_size}.")
 
         self.l1_size = l1_size
-        self.num_outputs = l1_size
+        self.ft_dynamic_bias_dim = ft_dynamic_bias_dim
+        self.num_outputs = l1_size + ft_dynamic_bias_dim
 
         features = [fc(self.num_outputs) for fc in feature_classes]
         self.features = nn.ModuleList(features)
@@ -114,28 +116,40 @@ class ComposedFeatureTransformer(nn.Module):
         fake_quantize_acts: bool,
         fake_quantize_weights: bool,
         backend: str = "auto",
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         merged, bias = self.merged_weight_and_bias(fake_quantize_weights)
         ft_max_act = self.quantization.max_ft_activation
 
-        l0_ = double_feature_transform(
-            us,
-            them,
-            white_indices,
-            black_indices,
-            merged,
-            bias,
-            ft_max_act,
-            self.l1_size,
-            backend,
+        w = SparseLinearFunction.apply(white_indices, merged, bias, backend=backend)
+        b = SparseLinearFunction.apply(black_indices, merged, bias, backend=backend)
+
+        w_main = w[:, : self.l1_size]
+        b_main = b[:, : self.l1_size]
+        l0_ = (us * torch.cat([w_main, b_main], dim=1)) + (
+            them * torch.cat([b_main, w_main], dim=1)
         )
+        l0_ = torch.clamp(l0_, 0.0, ft_max_act)
+        l0_s = torch.split(l0_, self.l1_size // 2, dim=1)
+        l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
+        l0_ = torch.cat(l0_s1, dim=1)
 
         if fake_quantize_acts:
             l0_ = self.quantization.fake_quantize_ft_act(l0_)
-        # We multiply by a correction factor,
-        # so we can use only bitshift and multiplication at inference.
-        # When using fake quantization any correction factor
-        # not equal 1.0 will lead to diverging discrete grids
         l0_ = l0_ * self.quantization.l0_correction_factor
 
-        return l0_
+        w_dyn = w[:, self.l1_size :]
+        b_dyn = b[:, self.l1_size :]
+        a_stm = (us - them) * (w_dyn - b_dyn)
+        half_dyn = a_stm.shape[1] // 2
+        u = a_stm[:, :half_dyn]
+        v = a_stm[:, half_dyn:]
+
+        u_clamped = torch.clamp(u, 0.0, ft_max_act)
+        if fake_quantize_acts:
+            u_clamped = _fake_quantize_acts(
+                u_clamped, self.quantization.ft_quantized_one
+            )
+            v = _fake_quantize_acts(v, self.quantization.ft_quantized_one)
+
+        delta_b = u_clamped * v
+        return l0_, delta_b

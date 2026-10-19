@@ -26,12 +26,28 @@ class ModelConfig(LayerStacksConfig):
             type=int,
             default=ModelConfig.L2,
         )
+        parser.add_argument(
+            "--l3",
+            dest="L3",
+            type=int,
+            default=ModelConfig.L3,
+        )
+        parser.add_argument(
+            "--ft-dynamic-bias-dim",
+            dest="ft_dynamic_bias_dim",
+            type=int,
+            default=ModelConfig.ft_dynamic_bias_dim,
+        )
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
         config = ModelConfig()
         config.L1 = args.L1
         config.L2 = args.L2
+        if hasattr(args, "L3"):
+            config.L3 = args.L3
+        if hasattr(args, "ft_dynamic_bias_dim"):
+            config.ft_dynamic_bias_dim = args.ft_dynamic_bias_dim
         return config
 
     # Not omitting prefix on purpose.

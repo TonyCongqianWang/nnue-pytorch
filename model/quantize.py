@@ -163,6 +163,10 @@ class QuantizationManager:
         weight_scale = self.weight_scales_dict[key]
         return _fake_quantize_weights(tensor, weight_scale)
 
+    def fake_quantize_dynamic_biases(self, tensor: torch.Tensor, weight_key: str):
+        act_scale = self.weight_scales_dict[weight_key]
+        return _fake_quantize_acts(tensor, act_scale)
+
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:

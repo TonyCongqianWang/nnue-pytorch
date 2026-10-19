@@ -18,13 +18,20 @@ class NNUEModel(nn.Module):
         self.L1 = config.L1
         self.L2 = config.L2
         self.L3 = config.L3
+        self.ft_dynamic_bias_dim = config.ft_dynamic_bias_dim
+        self.ft_outputs = config.ft_outputs
 
         self.quantize_config = config.quantize_config
         self.quantization = QuantizationManager(config.quantize_config)
 
         self.num_ls_buckets = 32
 
-        self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
+        self.input = ComposedFeatureTransformer(
+            feature_cls,
+            self.L1,
+            self.quantization,
+            ft_dynamic_bias_dim=self.ft_dynamic_bias_dim,
+        )
         self.feature_name = self.input.FEATURE_NAME
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
@@ -79,7 +86,7 @@ class NNUEModel(nn.Module):
         black_indices: torch.Tensor,
         fake_quantize_acts: bool,
         fake_quantize_weights: bool,
-    ) -> torch.Tensor:
+    ):
         return self.input(
             us,
             them,
@@ -106,7 +113,7 @@ class NNUEModel(nn.Module):
     ):
         layer_stack_indices = self.calculate_buckets(piece_count, queen_bucket)
 
-        l0_ = self.forward_ft(
+        l0_, delta_b = self.forward_ft(
             us,
             them,
             white_indices,
@@ -115,7 +122,11 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
         x = self.layer_stacks(
-            l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights
+            l0_,
+            layer_stack_indices,
+            delta_b,
+            fake_quantize_acts=fake_quantize_acts,
+            fake_quantize_weights=fake_quantize_weights,
         )
 
         return x

@@ -198,6 +198,12 @@ class NNUE(nn.Module):
                 "lr": LRs[9],
                 "weight_decay": 0.0,
             },
+            # Dynamic Bias Router
+            {
+                "params": list(self.model.router.parameters()),
+                "lr": LRs[0],
+                "weight_decay": 0.0,
+            },
         ]
 
         train_params = [group for group in train_params if len(group["params"]) > 0]
@@ -391,4 +397,10 @@ class NNUE(nn.Module):
             scorenet, score, outcome, self.config.loss_params, actual_lambda
         )
 
-        return sf_loss
+        moe_loss = (
+            self.model.moe_loss
+            if self.training and getattr(self.model, "moe_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+
+        return sf_loss + moe_loss

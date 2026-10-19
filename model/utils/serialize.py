@@ -11,6 +11,12 @@ from torch import nn
 
 from ..config import ModelConfig
 from ..model import NNUEModel
+from ..modules.dynamic_bias_router import (
+    BIAS_DIM,
+    NUM_CONTEXTS,
+    NUM_EXPERTS,
+    ROUTER_HASH,
+)
 
 
 def ascii_hist(name, x, bins=7):
@@ -108,6 +114,11 @@ class NNUEWriter:
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
 
+        # 3. Dynamic Bias Router (LUT + Coalesced Biases)
+        if getattr(model, "router", None) is not None:
+            self.int32(ROUTER_HASH)
+            self.write_dynamic_bias_router(model)
+
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
         # InputSlice hash
@@ -202,6 +213,20 @@ class NNUEWriter:
         # Weights stored as [outputs][inputs], so we can flatten
         self.write_tensor(weight)
 
+    def write_dynamic_bias_router(self, model: NNUEModel) -> None:
+        router = model.router
+        lut = router.get_lookup_table()
+        # Serialize LUT as uint16
+        lut_np = lut.detach().cpu().numpy().astype(np.uint16)
+        self.buf.extend(lut_np.tobytes())
+
+        # Evaluate and quantize coalesced biases (1024, 128)
+        coalesced_biases = router.get_coalesced_bias_table()
+        q_biases = model.quantization.quantize_dynamic_bias(
+            coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)
+        )
+        self.write_tensor(q_biases)
+
     def int32(self, v: int) -> None:
         self.buf.extend(struct.pack("<I", v))
 
@@ -250,6 +275,25 @@ class NNUEReader:
                     l_b_slices[layer_idx][b],
                     layers[layer_idx].layer_key,
                 )
+
+        if getattr(self.model, "router", None) is not None:
+            self.read_int32(ROUTER_HASH)
+            self.read_dynamic_bias_router()
+
+    def read_dynamic_bias_router(self) -> None:
+        lut_bytes = self.f.read(NUM_CONTEXTS * 2)
+        if len(lut_bytes) != NUM_CONTEXTS * 2:
+            raise EOFError(
+                f"Expected {NUM_CONTEXTS * 2} bytes for router table, got {len(lut_bytes)}"
+            )
+        lut_tensor = torch.frombuffer(bytearray(lut_bytes), dtype=torch.int16).to(
+            torch.int32
+        )
+        self.model.router.load_lookup_table(lut_tensor)
+
+        coalesced_q = self.tensor(np.int32, [NUM_EXPERTS, BIAS_DIM])
+        coalesced_fp = self.model.quantization.dequantize_dynamic_bias(coalesced_q)
+        self.model.router.load_coalesced_biases(coalesced_fp)
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version

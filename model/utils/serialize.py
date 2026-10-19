@@ -63,7 +63,12 @@ def get_histogram_callback(hist_title: str, verbose: bool):
     return histogram_callback
 
 
-from ..modules.router import ROUTER_HASH, ROUTER_TABLE_SIZE
+from ..modules.router import (
+    NUM_BIAS_EXPERTS,
+    NUM_BIASES,
+    ROUTER_HASH,
+    ROUTER_TABLE_SIZE,
+)
 
 # hardcoded for now
 VERSION = 0x6A448AFA
@@ -113,12 +118,19 @@ class NNUEWriter:
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
 
-        # 3. Downstream Top-2 MoE Router Lookup Table (68,640 bytes)
+        # 3. Downstream Top-2 MoE Dual Router Lookup Table (810,810 uint16 = 1,621,620 bytes)
         if self.verbose:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
-        self.write_tensor(router_table)
+        self.write_tensor(router_table.to(torch.uint16))
+
+        # 4. Dynamic Biases Table (512 experts x 128 int32 values = 262,144 bytes)
+        coalesced_biases = model.router.get_coalesced_bias_table()
+        q_biases = model.quantization.quantize_dynamic_bias(
+            coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)
+        )
+        self.write_tensor(q_biases)
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -257,12 +269,17 @@ class NNUEReader:
                 b_slice = layer.coalesced_bias[b * out_f : (b + 1) * out_f]
                 self.read_fc_layer(w_slice, b_slice, layer.layer_key)
 
-        raw_router = self.f.read(ROUTER_TABLE_SIZE)
-        if len(raw_router) != ROUTER_TABLE_SIZE:
+        router_table_bytes = ROUTER_TABLE_SIZE * 2
+        raw_router = self.f.read(router_table_bytes)
+        if len(raw_router) != router_table_bytes:
             raise EOFError(
-                f"Expected {ROUTER_TABLE_SIZE} bytes for router table, got {len(raw_router)}"
+                f"Expected {router_table_bytes} bytes for router table, got {len(raw_router)}"
             )
         self.model.router.load_lookup_table(raw_router)
+
+        raw_biases = self.tensor(np.int32, [NUM_BIAS_EXPERTS, NUM_BIASES])
+        biases = self.model.quantization.dequantize_dynamic_bias(raw_biases)
+        self.model.router.load_coalesced_biases(biases)
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version

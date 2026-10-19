@@ -765,7 +765,7 @@ class SimpleLineLogger(Callback):
 
 
 class MoEDeadExpertReseeder(Callback):
-    """Periodically checks all 68,640 contexts and reseeds dead MoE experts."""
+    """Periodically checks all 810,810 contexts and reseeds dead MoE experts across both codebooks."""
 
     def __init__(self, reseed_interval: int = 1024):
         super().__init__()
@@ -783,17 +783,28 @@ class MoEDeadExpertReseeder(Callback):
 
             unwrapped = _unwrap_module(trainer.model)
             router = unwrapped.model.router
-            reseeded = router.reseed_dead_experts_context_wide()
-            if reseeded:
+            reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
+            if reseeded_w:
                 if dist.is_available() and dist.is_initialized():
-                    dist.broadcast(router.codebook.data, src=0)
+                    dist.broadcast(router.codebook_weights.data, src=0)
                 if trainer.rank == 0:
                     print(
-                        f"[Step {trainer.global_step}] Reseeded {len(reseeded)} dead MoE expert(s): {reseeded}",
+                        f"[Step {trainer.global_step}] Reseeded {len(reseeded_w)} dead weight expert(s): {reseeded_w}",
                         flush=True,
                     )
                 self._reset_optimizer_state(
-                    trainer.optimizer, router.codebook, reseeded
+                    trainer.optimizer, router.codebook_weights, reseeded_w
+                )
+            if reseeded_b:
+                if dist.is_available() and dist.is_initialized():
+                    dist.broadcast(router.codebook_biases.data, src=0)
+                if trainer.rank == 0:
+                    print(
+                        f"[Step {trainer.global_step}] Reseeded {len(reseeded_b)} dead bias expert(s): {reseeded_b}",
+                        flush=True,
+                    )
+                self._reset_optimizer_state(
+                    trainer.optimizer, router.codebook_biases, reseeded_b
                 )
 
     def _reset_optimizer_state(self, optimizer, param, reseeded_indices):

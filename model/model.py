@@ -4,8 +4,8 @@ from torch import nn
 from .config import ModelConfig
 from .modules import (
     ComposedFeatureTransformer,
+    DualVQCodebookRouter,
     LayerStacks,
-    VQCodebookRouter,
     get_feature_cls,
 )
 from .quantize import QuantizationManager
@@ -34,9 +34,7 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
-        self.router = VQCodebookRouter(
-            num_contexts=68640, num_experts=self.num_ls_buckets
-        )
+        self.router = DualVQCodebookRouter()
         self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
@@ -98,8 +96,8 @@ class NNUEModel(nn.Module):
         )
 
     def calculate_buckets(self, c_us: torch.Tensor, c_them: torch.Tensor):
-        e1, e2, *_ = self.router(c_us, c_them)
-        return e1, e2
+        e1_w, e2_w, *_ = self.router(c_us, c_them)
+        return e1_w, e2_w
 
     def forward(
         self,
@@ -112,7 +110,15 @@ class NNUEModel(nn.Module):
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ):
-        e1, e2, moe_loss, commit_loss, balance_loss = self.router(c_us, c_them)
+        (
+            e1_w,
+            e2_w,
+            dyn_b1,
+            dyn_b2,
+            moe_loss,
+            commit_loss,
+            balance_loss,
+        ) = self.router(c_us, c_them)
         self.moe_loss = moe_loss
         self.commit_loss = commit_loss
         self.balance_loss = balance_loss
@@ -127,9 +133,11 @@ class NNUEModel(nn.Module):
         )
         x = self.layer_stacks(
             l0_,
-            self.router.codebook,
-            e1,
-            e2,
+            self.router.codebook_weights,
+            e1_w,
+            e2_w,
+            dyn_b1,
+            dyn_b2,
             fake_quantize_acts,
             fake_quantize_weights,
         )

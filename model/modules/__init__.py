@@ -13,19 +13,35 @@ from .features import (
     get_feature_cls,
 )
 from .layer_stacks import LayerStacks
-from .router import ROUTER_HASH, ROUTER_TABLE_SIZE, VQCodebookRouter
+from .router import (
+    BIAS_RANK,
+    NUM_BIAS_EXPERTS,
+    NUM_BIASES,
+    NUM_WEIGHT_EXPERTS,
+    ROUTER_HASH,
+    ROUTER_TABLE_SIZE,
+    DualVQCodebookRouter,
+    StructuredKingEmbedding,
+    VQCodebookRouter,
+)
 
 __all__ = [
+    "BIAS_RANK",
     "K32Q2",
+    "NUM_BIASES",
+    "NUM_BIAS_EXPERTS",
+    "NUM_WEIGHT_EXPERTS",
     "ROUTER_HASH",
     "ROUTER_TABLE_SIZE",
     "ComposedFeatureTransformer",
+    "DualVQCodebookRouter",
     "FeatureConfig",
     "FullThreats",
     "HalfKav2Hm",
     "InputFeature",
     "LayerStacks",
     "LayerStacksConfig",
+    "StructuredKingEmbedding",
     "VQCodebookRouter",
     "add_feature_args",
     "get_available_features",

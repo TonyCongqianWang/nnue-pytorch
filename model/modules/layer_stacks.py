@@ -66,21 +66,26 @@ class LayerStacks(nn.Module):
         x: torch.Tensor,
         codebook: torch.Tensor | None,
         ls_indices: torch.Tensor,
+        dyn_biases: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
+        b1_sqr, b1_lin, b2_sqr, b2_lin = dyn_biases
         l1c_ = self.l1(x, codebook, ls_indices, fake_quantize_weights)
 
-        # Extract the short-path skip connection before fake quantization
+        # Extract the short-path skip connection before fake quantization and dynamic biases
         l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-        l1x_ = l1c_
 
-        l1_sqr = torch.pow(l1x_, 2.0)
+        l1x_sqr = l1c_ + b1_sqr
+        l1x_lin = l1c_ + b1_lin
+
+        l1_sqr = torch.pow(l1x_sqr, 2.0)
         if fake_quantize_acts:
             l1_sqr = self.quantization.fake_quantize_ls_act(l1_sqr)
 
         l1_sqr = l1_sqr * (self.quantization.sqr_crelu_correction_factor)
 
+        l1x_ = l1x_lin
         if fake_quantize_acts:
             l1x_ = self.quantization.fake_quantize_ls_act(l1x_)
 
@@ -88,14 +93,17 @@ class LayerStacks(nn.Module):
         l1x_ = self.quantization.clip_ls_act(l1x_)
 
         l2c_ = self.l2(l1x_, codebook, ls_indices, fake_quantize_weights)
-        l2x_ = l2c_
 
-        l2_sqr = torch.pow(l2x_, 2.0)
+        l2x_sqr = l2c_ + b2_sqr
+        l2x_lin = l2c_ + b2_lin
+
+        l2_sqr = torch.pow(l2x_sqr, 2.0)
         if fake_quantize_acts:
             l2_sqr = self.quantization.fake_quantize_ls_act(l2_sqr)
 
         l2_sqr = l2_sqr * (self.quantization.sqr_crelu_correction_factor)
 
+        l2x_ = l2x_lin
         if fake_quantize_acts:
             l2x_ = self.quantization.fake_quantize_ls_act(l2x_)
 
@@ -124,6 +132,8 @@ class LayerStacks(nn.Module):
         codebook: torch.Tensor | None,
         e1: torch.Tensor,
         e2: torch.Tensor,
+        dyn_biases_1: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        dyn_biases_2: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
@@ -131,6 +141,7 @@ class LayerStacks(nn.Module):
             x,
             codebook,
             e1,
+            dyn_biases_1,
             fake_quantize_acts=fake_quantize_acts,
             fake_quantize_weights=fake_quantize_weights,
         )
@@ -138,6 +149,7 @@ class LayerStacks(nn.Module):
             x,
             codebook,
             e2,
+            dyn_biases_2,
             fake_quantize_acts=fake_quantize_acts,
             fake_quantize_weights=fake_quantize_weights,
         )

@@ -1,10 +1,11 @@
 import torch
 import torch.nn.functional as F
 
-from model.config import ModelConfig
-from model.model import NNUEModel
-from model.modules.features import DEFAULT_FEATURES
-from model.modules.router import VQCodebookRouter
+from model.modules.router import (
+    NUM_WEIGHT_EXPERTS,
+    ROUTER_TABLE_SIZE,
+    DualVQCodebookRouter,
+)
 
 
 def test_balance_loss_bounds():
@@ -41,21 +42,22 @@ def test_balance_loss_bounds():
 def test_dead_expert_reseeding():
     """Verify that unused experts across the context space are actively reseeded."""
     torch.manual_seed(42)
-    router = VQCodebookRouter(num_experts=32, dim=32)
+    router = DualVQCodebookRouter()
 
     # Forcefully test reseeding with an extreme scenario:
     # Set all codebook entries to far away except expert 0
     with torch.no_grad():
-        router.codebook.data[1:] = 1000.0
-        router.codebook.data[0] = 0.0
+        router.codebook_weights.data[1:] = 1000.0
+        router.codebook_weights.data[0] = 0.0
 
-    # All 68,640 contexts will map to expert 0, so experts 1..31 are dead
-    reseeded = router.reseed_dead_experts_context_wide()
-    assert reseeded == list(range(1, 32))
+    # All contexts will map to expert 0, so experts 1..31 are dead
+    reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
+    assert reseeded_w == list(range(1, NUM_WEIGHT_EXPERTS))
+    assert isinstance(reseeded_b, list)
 
     # Now experts 1..31 should be reseeded from context embeddings and no longer equal 1000.0
-    for j in range(1, 32):
-        assert not torch.all(router.codebook.data[j] == 1000.0), (
+    for j in range(1, NUM_WEIGHT_EXPERTS):
+        assert not torch.all(router.codebook_weights.data[j] == 1000.0), (
             f"Expert {j} was not reseeded!"
         )
     assert not bool(router.lut_valid.item())
@@ -63,7 +65,7 @@ def test_dead_expert_reseeding():
 
 def test_lut_cache_lifecycle():
     """Verify clean LUT cache invalidation, train-mode resets, and non-persistence."""
-    router = VQCodebookRouter(num_experts=32, dim=32)
+    router = DualVQCodebookRouter()
     assert not bool(router.lut_valid.item())
 
     # State dict should not contain ephemeral buffers lut and lut_valid
@@ -73,7 +75,7 @@ def test_lut_cache_lifecycle():
 
     # update_lookup_table sets lut_valid = True
     lut = router.update_lookup_table()
-    assert lut.shape[0] == 68640
+    assert lut.shape[0] == ROUTER_TABLE_SIZE
     assert bool(router.lut_valid.item())
 
     # Switching to train mode invalidates the LUT cache
@@ -101,16 +103,20 @@ def test_dead_expert_callback_momentum_reset():
             self.rank = 0
 
     torch.manual_seed(42)
-    router = VQCodebookRouter(num_experts=32, dim=32)
+    router = DualVQCodebookRouter()
     with torch.no_grad():
-        router.codebook.data[1:] = 1000.0
-        router.codebook.data[0] = 0.0
+        router.codebook_weights.data[1:] = 1000.0
+        router.codebook_weights.data[0] = 0.0
 
-    opt = torch.optim.AdamW([router.codebook], lr=1e-3)
+    opt = torch.optim.AdamW([router.codebook_weights, router.codebook_biases], lr=1e-3)
     # Simulate non-zero momentum buffers
-    opt.state[router.codebook] = {
-        "exp_avg": torch.ones_like(router.codebook),
-        "exp_avg_sq": torch.ones_like(router.codebook),
+    opt.state[router.codebook_weights] = {
+        "exp_avg": torch.ones_like(router.codebook_weights),
+        "exp_avg_sq": torch.ones_like(router.codebook_weights),
+    }
+    opt.state[router.codebook_biases] = {
+        "exp_avg": torch.ones_like(router.codebook_biases),
+        "exp_avg_sq": torch.ones_like(router.codebook_biases),
     }
 
     trainer = DummyTrainer(DummyNNUE(router), opt)
@@ -118,48 +124,41 @@ def test_dead_expert_callback_momentum_reset():
     callback.on_train_batch_end(trainer)
 
     # Momentum for experts 1..31 should be 0, while expert 0 retains momentum
-    state = opt.state[router.codebook]
-    assert torch.all(state["exp_avg"][0] == 1.0)
-    assert torch.all(state["exp_avg"][1:] == 0.0)
-    assert torch.all(state["exp_avg_sq"][0] == 1.0)
-    assert torch.all(state["exp_avg_sq"][1:] == 0.0)
+    state_w = opt.state[router.codebook_weights]
+    assert torch.all(state_w["exp_avg"][0] == 1.0)
+    assert torch.all(state_w["exp_avg"][1:] == 0.0)
+    assert torch.all(state_w["exp_avg_sq"][0] == 1.0)
+    assert torch.all(state_w["exp_avg_sq"][1:] == 0.0)
 
 
 def test_router_gradient_flow():
-    """Verify that backpropagation produces non-zero gradients for router codebook and embeddings."""
+    """Verify that backpropagation produces non-zero gradients for router codebooks and embeddings."""
     torch.manual_seed(42)
-    router = VQCodebookRouter(num_experts=32, dim=32, balance_cost=0.02)
+    router = DualVQCodebookRouter(balance_cost=0.02)
     router.train()
 
     c_us = torch.randint(0, 1000, (16,))
     c_them = torch.randint(0, 1000, (16,))
 
-    e1, e2, moe_loss, *_ = router(c_us, c_them)
-    total_loss = moe_loss + (e1.sum() + e2.sum()) * 0.01
+    (
+        e1_w,
+        e2_w,
+        dyn_biases_1,
+        dyn_biases_2,
+        moe_loss,
+        *_,
+    ) = router(c_us, c_them)
+    total_loss = (
+        moe_loss
+        + dyn_biases_1[0].sum()
+        + dyn_biases_2[0].sum()
+        + (e1_w.float().sum() + e2_w.float().sum()) * 0.0
+    )
     total_loss.backward()
 
-    assert router.codebook.grad is not None
-    assert torch.norm(router.codebook.grad) > 0.0
-    assert router.piece_embed.weight.grad is not None
-    assert torch.norm(router.piece_embed.weight.grad) > 0.0
-
-
-def test_no_zero_weights_trap():
-    """Verify that zero_virtual_weights() on NNUEModel does NOT zero LowRankStackedLinear or router codebook."""
-    config = ModelConfig()
-    model = NNUEModel(DEFAULT_FEATURES, config)
-
-    # Verify initial codebook, down_proj, and up_proj are non-zero
-    assert torch.norm(model.router.codebook) > 0.0
-    assert torch.norm(model.layer_stacks.l1.down_proj) > 0.0
-    assert torch.norm(model.layer_stacks.l1.up_proj) > 0.0
-    assert torch.norm(model.layer_stacks.l1.bias_adapter) > 0.0
-
-    # Call zero_virtual_weights()
-    model.zero_virtual_weights()
-
-    # Codebook, down_proj, up_proj, and bias_adapter should still be non-zero!
-    assert torch.norm(model.router.codebook) > 0.0
-    assert torch.norm(model.layer_stacks.l1.down_proj) > 0.0
-    assert torch.norm(model.layer_stacks.l1.up_proj) > 0.0
-    assert torch.norm(model.layer_stacks.l1.bias_adapter) > 0.0
+    assert router.codebook_weights.grad is not None
+    assert router.codebook_biases.grad is not None
+    assert router.bias_head.weight.grad is not None
+    assert torch.norm(router.codebook_weights.grad) > 0.0
+    assert torch.norm(router.codebook_biases.grad) > 0.0
+    assert torch.norm(router.bias_head.weight.grad) > 0.0

@@ -265,3 +265,32 @@ class QuantizationManager:
         weight = weight.divide(self.weight_scales_dict[weight_key])
 
         return bias, weight
+
+    def get_dynamic_bias_scales(
+        self,
+        device: torch.device | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        s1 = self.weight_scales_dict["ls_l1_bias"]
+        s2 = self.weight_scales_dict["ls_l2_bias"]
+        return torch.cat(
+            [
+                torch.full((64,), s1, device=device, dtype=dtype),
+                torch.full((64,), s2, device=device, dtype=dtype),
+            ]
+        )
+
+    def quantize_dynamic_bias(
+        self,
+        biases: torch.Tensor,
+        callback: Callable | None = None,
+    ) -> torch.Tensor:
+        scales = self.get_dynamic_bias_scales(device=biases.device, dtype=biases.dtype)
+        q_biases = _safe_convert(biases.mul(scales), torch.int32)
+        if callback is not None:
+            callback("dynamic_bias", q_biases)
+        return q_biases
+
+    def dequantize_dynamic_bias(self, biases: torch.Tensor) -> torch.Tensor:
+        scales = self.get_dynamic_bias_scales(device=biases.device, dtype=biases.dtype)
+        return biases.divide(scales)

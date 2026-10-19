@@ -3,7 +3,10 @@ import sys
 import numpy as np
 import torch
 
-from ..modules.router import decompose_router_index
+from ..modules.router import (
+    NUM_WEIGHT_EXPERTS,
+    decompose_router_index,
+)
 
 
 def king_sq_name(k: int) -> str:
@@ -36,11 +39,12 @@ def print_routing_profile(model, file=None) -> None:
     total_contexts = lut.numel()
 
     all_ctx = torch.arange(total_contexts, device=lut.device)
-    p, q, k_us, k_them = decompose_router_index(all_ctx)
+    mat_id, k_us, k_them = decompose_router_index(all_ctx)
+    mat_feats = router.material_decode_table[mat_id]
 
-    lut_np = lut.cpu().numpy()
-    p_np = p.cpu().numpy() + 1  # 1..16
-    q_np = q.cpu().numpy()  # 0 or 1
+    lut_np = (lut & 0x1F).cpu().numpy()  # Extract 5 bits for weight experts
+    t_np = mat_feats[:, 0].cpu().numpy() + 1  # 1..16 pieces
+    q_np = mat_feats[:, 2].cpu().numpy()  # 0 or 1
     k_us_np = k_us.cpu().numpy()  # 0..32
     k_them_np = k_them.cpu().numpy()  # 0..64
 
@@ -50,7 +54,7 @@ def print_routing_profile(model, file=None) -> None:
     if is_coalesced:
         for layer in [layer_stacks.l1, layer_stacks.l2, layer_stacks.output]:
             w = layer.coalesced_weight.reshape(
-                router.num_experts, layer.out_features, -1
+                NUM_WEIGHT_EXPERTS, layer.out_features, -1
             )
             w_mean = w.mean(dim=0, keepdim=True)
             coalesced_deltas.append(w - w_mean)
@@ -63,7 +67,7 @@ def print_routing_profile(model, file=None) -> None:
     w_kth = 22
     w_dw = 8
 
-    print("\nExpert Routing Profile (68,640 contexts):", file=file)
+    print(f"\nExpert Routing Profile ({total_contexts:,} contexts):", file=file)
     header = (
         f"{'Expert':^{w_exp}} | {'Contexts (%)':^{w_ctx}} | {'PC (mean/mode)':^{w_pc}} | "
         f"{'Queen %':^{w_q}} | {'Top King (Our)':^{w_kus}} | {'Top King (Enemy)':^{w_kth}} | "
@@ -76,13 +80,13 @@ def print_routing_profile(model, file=None) -> None:
     print(header, file=file)
     print(sep, file=file)
 
-    for k in range(router.num_experts):
+    for k in range(NUM_WEIGHT_EXPERTS):
         mask = lut_np == k
         count = int(np.sum(mask))
         pct = (count / float(total_contexts)) * 100.0
 
         if count > 0:
-            pc_subset = p_np[mask]
+            pc_subset = t_np[mask]
             pc_mean = float(np.mean(pc_subset))
             pc_mode = int(np.bincount(pc_subset).argmax())
             queen_pct = float(np.mean(q_np[mask])) * 100.0

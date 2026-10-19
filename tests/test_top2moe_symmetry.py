@@ -6,37 +6,52 @@ from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
 from model.modules.router import (
+    NUM_MATERIAL_STATES,
     ROUTER_TABLE_SIZE,
-    VQCodebookRouter,
+    DualVQCodebookRouter,
+    decode_material_state,
     decompose_router_index,
+    encode_material_state,
     make_router_index,
 )
 
 
 def get_context_indices(board: chess.Board) -> tuple[int, int]:
-    stm = board.turn  # True for White, False for Black
-    white_pieces = sum(1 for p in board.piece_map().values() if p.color == chess.WHITE)
-    black_pieces = sum(1 for p in board.piece_map().values() if p.color == chess.BLACK)
+    stm = board.turn
+    non_stm = not stm
 
-    our_pieces = min(max((white_pieces if stm else black_pieces) - 1, 0), 15)
-    their_pieces = min(max((black_pieces if stm else white_pieces) - 1, 0), 15)
+    # STM material features
+    stm_pieces = [p for p in board.piece_map().values() if p.color == stm]
+    T_us = min(max(len(stm_pieces) - 1, 0), 15)
+    pawns_us = sum(1 for p in stm_pieces if p.piece_type == chess.PAWN)
+    P_us = min(max(pawns_us, 0), min(8, T_us))
+    has_queen_us = any(p.piece_type == chess.QUEEN for p in stm_pieces)
+    Q_us = 1 if (T_us - P_us >= 1 and has_queen_us) else 0
 
-    our_queen = (
-        1 if bool(board.pieces(chess.QUEEN, chess.WHITE if stm else chess.BLACK)) else 0
+    bishops_us = [
+        sq
+        for sq, p in board.piece_map().items()
+        if p.color == stm and p.piece_type == chess.BISHOP
+    ]
+    has_dark_us = any(
+        (chess.BB_SQUARES[sq] & 0x55AA55AA55AA55AA) != 0 for sq in bishops_us
     )
-    their_queen = (
-        1 if bool(board.pieces(chess.QUEEN, chess.BLACK if stm else chess.WHITE)) else 0
+    has_light_us = any(
+        (chess.BB_SQUARES[sq] & ~0x55AA55AA55AA55AA) != 0 for sq in bishops_us
     )
+    BP_us = 1 if (T_us - P_us - Q_us >= 2 and has_dark_us and has_light_us) else 0
+    mat_id_us = encode_material_state(T_us, P_us, Q_us, BP_us)
 
-    our_ksq = board.king(chess.WHITE if stm else chess.BLACK)
-    enemy_ksq = board.king(chess.BLACK if stm else chess.WHITE)
+    # King features
+    our_ksq = board.king(stm)
+    enemy_ksq = board.king(non_stm)
 
     stm_flip = 0 if stm else 56
     our_ksq_oriented = our_ksq ^ stm_flip
     enemy_ksq_oriented = enemy_ksq ^ stm_flip
 
-    our_castling = board.has_castling_rights(chess.WHITE if stm else chess.BLACK)
-    enemy_castling = board.has_castling_rights(chess.BLACK if stm else chess.WHITE)
+    our_castling = board.has_castling_rights(stm)
+    enemy_castling = board.has_castling_rights(non_stm)
 
     if our_castling and our_ksq_oriented == chess.E1:
         our_king_bucket = 32
@@ -50,7 +65,31 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
     else:
         enemy_king_bucket = enemy_ksq_oriented
 
-    c_us = make_router_index(our_pieces, our_queen, our_king_bucket, enemy_king_bucket)
+    c_us = make_router_index(mat_id_us, our_king_bucket, enemy_king_bucket)
+
+    # Non-STM material features
+    non_stm_pieces = [p for p in board.piece_map().values() if p.color == non_stm]
+    T_them = min(max(len(non_stm_pieces) - 1, 0), 15)
+    pawns_them = sum(1 for p in non_stm_pieces if p.piece_type == chess.PAWN)
+    P_them = min(max(pawns_them, 0), min(8, T_them))
+    has_queen_them = any(p.piece_type == chess.QUEEN for p in non_stm_pieces)
+    Q_them = 1 if (T_them - P_them >= 1 and has_queen_them) else 0
+
+    bishops_them = [
+        sq
+        for sq, p in board.piece_map().items()
+        if p.color == non_stm and p.piece_type == chess.BISHOP
+    ]
+    has_dark_them = any(
+        (chess.BB_SQUARES[sq] & 0x55AA55AA55AA55AA) != 0 for sq in bishops_them
+    )
+    has_light_them = any(
+        (chess.BB_SQUARES[sq] & ~0x55AA55AA55AA55AA) != 0 for sq in bishops_them
+    )
+    BP_them = (
+        1 if (T_them - P_them - Q_them >= 2 and has_dark_them and has_light_them) else 0
+    )
+    mat_id_them = encode_material_state(T_them, P_them, Q_them, BP_them)
 
     non_stm_flip = 56 if stm else 0
     their_ksq_oriented = enemy_ksq ^ non_stm_flip
@@ -67,34 +106,35 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
     else:
         our_king_bucket_them = our_ksq_oriented_them
 
-    c_them = make_router_index(
-        their_pieces, their_queen, their_king_bucket, our_king_bucket_them
-    )
-
+    c_them = make_router_index(mat_id_them, their_king_bucket, our_king_bucket_them)
     return c_us, c_them
 
 
 def test_router_bijection():
-    """Verify that decomposition of context indices is exact and bijective."""
-    for p in [0, 7, 15]:
-        for q in [0, 1]:
-            for k1 in [0, 16, 32]:
-                for k2 in [0, 31, 64]:
-                    idx = make_router_index(p, q, k1, k2)
-                    assert 0 <= idx < ROUTER_TABLE_SIZE
-                    p_rec, q_rec, k1_rec, k2_rec = decompose_router_index(
-                        torch.tensor([idx])
-                    )
-                    assert p_rec.item() == p
-                    assert q_rec.item() == q
-                    assert k1_rec.item() == k1
-                    assert k2_rec.item() == k2
+    """Verify that material state and context indices decomposition is exact and bijective."""
+    # 1. Material states bijection
+    assert NUM_MATERIAL_STATES == 378
+    for m in range(NUM_MATERIAL_STATES):
+        t, p, q, bp = decode_material_state(m)
+        m_rec = encode_material_state(t, p, q, bp)
+        assert m == m_rec
+
+    # 2. Context indexing bijection
+    for m in [0, 100, 250, 377]:
+        for k1 in [0, 16, 32]:
+            for k2 in [0, 31, 64]:
+                idx = make_router_index(m, k1, k2)
+                assert 0 <= idx < ROUTER_TABLE_SIZE
+                m_rec, k1_rec, k2_rec = decompose_router_index(torch.tensor([idx]))
+                assert m_rec.item() == m
+                assert k1_rec.item() == k1
+                assert k2_rec.item() == k2
 
 
 def test_board_symmetry_permutation():
     """Verify exact symmetry under color mirroring and perspective inversion."""
     torch.manual_seed(42)
-    router = VQCodebookRouter()
+    router = DualVQCodebookRouter()
     router.update_lookup_table()
 
     test_fens = [
@@ -132,16 +172,22 @@ def test_board_symmetry_permutation():
         )
 
         # 3. Router expert selection
-        e1, e2, *_ = router(torch.tensor([c_us]), torch.tensor([c_them]))
-        e1_tf, e2_tf, *_ = router(
+        e1, e2, dyn_b1, dyn_b2, *_ = router(
+            torch.tensor([c_us]), torch.tensor([c_them])
+        )
+        e1_tf, e2_tf, dyn_b1_tf, dyn_b2_tf, *_ = router(
             torch.tensor([c_us_tflip]), torch.tensor([c_them_tflip])
         )
         assert e1.item() == e2_tf.item(), (
-            f"Expert swap failed: e1={e1.item()} != e2_tf={e2_tf.item()}"
+            f"Weight expert swap failed: e1={e1.item()} != e2_tf={e2_tf.item()}"
         )
         assert e2.item() == e1_tf.item(), (
-            f"Expert swap failed: e2={e2.item()} != e1_tf={e1_tf.item()}"
+            f"Weight expert swap failed: e2={e2.item()} != e1_tf={e1_tf.item()}"
         )
+        for b_a, b_b in zip(dyn_b1, dyn_b2_tf, strict=True):
+            assert torch.allclose(b_a, b_b)
+        for b_a, b_b in zip(dyn_b2, dyn_b1_tf, strict=True):
+            assert torch.allclose(b_a, b_b)
 
 
 def test_model_dual_head_forward():
@@ -153,23 +199,30 @@ def test_model_dual_head_forward():
     x = torch.randn(4, config.L1)
     e1 = torch.tensor([0, 5, 12, 31])
     e2 = torch.tensor([31, 12, 5, 0])
+    b_dummy = torch.randn(4, 32)
+    dyn_b1 = (b_dummy, b_dummy, b_dummy, b_dummy)
+    dyn_b2 = (b_dummy, b_dummy, b_dummy, b_dummy)
 
     out = model.layer_stacks(
         x,
         model.router.codebook,
         e1,
         e2,
+        dyn_b1,
+        dyn_b2,
         fake_quantize_acts=False,
         fake_quantize_weights=False,
     )
     assert out.shape == (4, 1)
 
-    # Commutative symmetry: H_{e1} + H_{e2} == H_{e2} + H_{e1}
+    # Commutative symmetry: H_{e1, b1} + H_{e2, b2} == H_{e2, b2} + H_{e1, b1}
     out_rev = model.layer_stacks(
         x,
         model.router.codebook,
         e2,
         e1,
+        dyn_b2,
+        dyn_b1,
         fake_quantize_acts=False,
         fake_quantize_weights=False,
     )

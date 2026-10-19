@@ -86,6 +86,9 @@ class NNUEWriter:
 
         self.verbose = verbose
 
+        # Ensure lookup table is populated and valid upfront
+        router_table = model.router.get_lookup_table()
+
         fc_hash = self.fc_hash(model)
 
         # 1. Plaintext header
@@ -115,7 +118,6 @@ class NNUEWriter:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
-        router_table = model.router.get_lookup_table()
         self.write_tensor(router_table)
 
     @staticmethod

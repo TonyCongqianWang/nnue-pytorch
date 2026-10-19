@@ -762,3 +762,49 @@ class SimpleLineLogger(Callback):
             f"[{self.val_metric}={val_loss:.5f}]",
             flush=True,
         )
+
+
+class MoEDeadExpertReseeder(Callback):
+    """Periodically checks all 68,640 contexts and reseeds dead MoE experts."""
+
+    def __init__(self, reseed_interval: int = 1024):
+        super().__init__()
+        self.reseed_interval = reseed_interval
+
+    @torch.no_grad()
+    @torch.compiler.disable
+    def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
+        if (
+            self.reseed_interval > 0
+            and trainer.global_step > 0
+            and trainer.global_step % self.reseed_interval == 0
+        ):
+            from .engine import _unwrap_module
+
+            unwrapped = _unwrap_module(trainer.model)
+            router = unwrapped.model.router
+            reseeded = router.reseed_dead_experts_context_wide()
+            if reseeded:
+                if dist.is_available() and dist.is_initialized():
+                    dist.broadcast(router.codebook.data, src=0)
+                if trainer.rank == 0:
+                    print(
+                        f"[Step {trainer.global_step}] Reseeded {len(reseeded)} dead MoE expert(s): {reseeded}",
+                        flush=True,
+                    )
+                self._reset_optimizer_state(
+                    trainer.optimizer, router.codebook, reseeded
+                )
+
+    def _reset_optimizer_state(self, optimizer, param, reseeded_indices):
+        if optimizer is None:
+            return
+        state = optimizer.state.get(param, None)
+        if state is None:
+            return
+        idx_tensor = torch.tensor(
+            reseeded_indices, device=param.device, dtype=torch.long
+        )
+        for key in ("exp_avg", "exp_avg_sq"):
+            if key in state and state[key] is not None:
+                state[key].index_fill_(0, idx_tensor, 0.0)

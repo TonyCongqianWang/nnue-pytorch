@@ -97,6 +97,9 @@ class TrainingConfig:
     input_clipping_interval: int = 0
     """Clipping interval for input feature-transformer weights in iterations/steps. If > 0, clips every N steps instead of at the end of each epoch (default: 0, epoch-based)."""
 
+    moe_reseed_interval: int = 1024
+    """Interval in training steps for reseeding dead MoE experts across all contexts. Default: 1024 (<= 0 disables)."""
+
     dataloader_config: OmitArgPrefixes[DataloaderSkipConfig] = field(
         default_factory=DataloaderSkipConfig
     )

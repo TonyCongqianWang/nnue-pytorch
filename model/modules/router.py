@@ -51,8 +51,8 @@ class VQCodebookRouter(nn.Module):
         num_contexts: int = ROUTER_TABLE_SIZE,
         num_experts: int = NUM_EXPERTS,
         dim: int = 32,
-        commitment_cost: float = 0.25,
-        balance_cost: float = 0.02,
+        commitment_cost: float = 0.005,
+        balance_cost: float = 0.001,
         temperature: float = 1.0,
         reseed_dead_experts: bool = True,
     ):
@@ -75,9 +75,23 @@ class VQCodebookRouter(nn.Module):
         self.codebook = nn.Parameter(torch.empty(num_experts, dim))
         self.init_weights()
 
-        # Cached discrete LUT for zero-overhead inference
-        self.register_buffer("lut", torch.zeros(num_contexts, dtype=torch.uint8))
-        self.register_buffer("lut_valid", torch.tensor(False, dtype=torch.bool))
+        # Cached discrete LUT for zero-overhead inference (ephemeral runtime cache, not saved in checkpoints)
+        self.register_buffer(
+            "lut",
+            torch.zeros(num_contexts, dtype=torch.uint8),
+            persistent=False,
+        )
+        self.register_buffer(
+            "lut_valid",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=False,
+        )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            self.lut_valid.fill_(False)
+        return self
 
     def init_weights(self) -> None:
         val = 1.0 / math.sqrt(self.dim)
@@ -97,30 +111,6 @@ class VQCodebookRouter(nn.Module):
         )
         return z
 
-    @torch.no_grad()
-    def _reseed_dead_experts(
-        self, z: torch.Tensor, distances: torch.Tensor, f: torch.Tensor
-    ) -> None:
-        """Reseeds unassigned codebook vectors to the contexts with highest quantization error."""
-        if z.shape[0] < self.num_experts * 2:
-            return
-
-        dead_mask = f == 0.0
-        num_dead = int(dead_mask.sum().item())
-        if num_dead == 0:
-            return
-
-        dead_indices = torch.nonzero(dead_mask, as_tuple=True)[0]
-        min_dists, _ = torch.min(distances, dim=-1)
-        k_worst = min(num_dead, z.shape[0])
-        _, worst_ctx_indices = torch.topk(min_dists, k=k_worst)
-
-        for i, dead_idx in enumerate(dead_indices):
-            ctx_idx = worst_ctx_indices[i % k_worst]
-            noise = torch.randn_like(self.codebook[dead_idx]) * 0.01
-            self.codebook.data[dead_idx].copy_(z[ctx_idx].detach() + noise)
-        self.lut_valid.fill_(False)
-
     def quantize(
         self, z: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -134,12 +124,11 @@ class VQCodebookRouter(nn.Module):
         indices = torch.argmin(distances, dim=-1)  # (B,)
         z_q = F.embedding(indices, self.codebook)  # (B, D)
 
-        # Vector Quantization & Commitment loss
-        commit_loss = self.commitment_cost * F.mse_loss(z, z_q.detach()) + F.mse_loss(
-            z_q, z.detach()
-        )
+        # Vector Quantization & Commitment loss (calibrated to ~10^-4)
+        vq_loss = 0.25 * F.mse_loss(z, z_q.detach()) + F.mse_loss(z_q, z.detach())
+        commit_loss = self.commitment_cost * vq_loss
 
-        # Load-Balancing Auxiliary Loss (Switch Transformer / GShard formulation)
+        # Load-Balancing Auxiliary Loss (excess imbalance beyond uniform baseline)
         K = self.num_experts
         one_hot = F.one_hot(indices, num_classes=K).float()
         f = one_hot.mean(dim=0).detach()  # (K,) empirical dispatch fraction
@@ -148,11 +137,7 @@ class VQCodebookRouter(nn.Module):
         probs = F.softmax(scaled_neg_dist, dim=-1)  # (B, K) soft routing probabilities
         P = probs.mean(dim=0)  # (K,) batch-mean routing probability
 
-        balance_loss = K * torch.sum(f * P)
-
-        # Reseed dead experts if unassigned in this batch
-        if self.training and self.reseed_dead_experts:
-            self._reseed_dead_experts(z, distances, f)
+        balance_loss = K * torch.sum(f * P) - 1.0
 
         # Straight-Through Estimator (STE)
         z_q_ste = z + (z_q - z).detach()
@@ -161,7 +146,10 @@ class VQCodebookRouter(nn.Module):
 
     @torch.no_grad()
     def update_lookup_table(self) -> torch.Tensor:
-        """Evaluates all 68,640 contexts and caches the discrete nearest codebook expert IDs."""
+        """Evaluates all 68,640 contexts and caches the discrete nearest codebook expert IDs.
+
+        Strictly read-only and deterministic; does not mutate codebook parameters.
+        """
         device = self.codebook.device
         all_contexts = torch.arange(self.num_contexts, device=device, dtype=torch.int64)
         z = self.get_context_vector(all_contexts)
@@ -171,27 +159,43 @@ class VQCodebookRouter(nn.Module):
         distances = z_sq + c_sq - 2.0 * dot
         indices = torch.argmin(distances, dim=-1).to(torch.uint8)
 
-        # Ensure no expert has 0 contexts across the entire context space
-        if self.reseed_dead_experts:
-            counts = torch.bincount(indices.long(), minlength=self.num_experts)
-            dead_indices = torch.nonzero(counts == 0, as_tuple=True)[0]
-            if len(dead_indices) > 0:
-                min_dists, _ = torch.min(distances, dim=-1)
-                k_worst = min(len(dead_indices), z.shape[0])
-                _, worst_contexts = torch.topk(min_dists, k=k_worst)
-                for i, dead_idx in enumerate(dead_indices):
-                    ctx_idx = worst_contexts[i % k_worst]
-                    noise = torch.randn_like(self.codebook[dead_idx]) * 0.01
-                    self.codebook.data[dead_idx].copy_(z[ctx_idx].detach() + noise)
-                # Recompute lookup table with reseeded codebook
-                c_sq = torch.sum(self.codebook**2, dim=-1).unsqueeze(0)
-                dot = torch.matmul(z, self.codebook.t())
-                distances = z_sq + c_sq - 2.0 * dot
-                indices = torch.argmin(distances, dim=-1).to(torch.uint8)
-
         self.lut.copy_(indices)
         self.lut_valid.fill_(True)
         return self.lut
+
+    @torch.no_grad()
+    def reseed_dead_experts_context_wide(self) -> list[int]:
+        """Evaluates all 68,640 contexts across the board context space.
+
+        If any expert has 0 contexts mapped to it, reseeds its codebook vector
+        to the context with the highest quantization error (plus small Gaussian noise).
+        Returns the list of reseeded expert indices.
+        """
+        device = self.codebook.device
+        all_contexts = torch.arange(self.num_contexts, device=device, dtype=torch.int64)
+        z = self.get_context_vector(all_contexts)
+        z_sq = torch.sum(z**2, dim=-1, keepdim=True)
+        c_sq = torch.sum(self.codebook**2, dim=-1).unsqueeze(0)
+        dot = torch.matmul(z, self.codebook.t())
+        distances = z_sq + c_sq - 2.0 * dot
+        indices = torch.argmin(distances, dim=-1)
+
+        counts = torch.bincount(indices, minlength=self.num_experts)
+        dead_indices = torch.nonzero(counts == 0, as_tuple=True)[0]
+        if len(dead_indices) == 0:
+            return []
+
+        min_dists, _ = torch.min(distances, dim=-1)
+        k_worst = min(len(dead_indices), z.shape[0])
+        _, worst_contexts = torch.topk(min_dists, k=k_worst)
+
+        for i, dead_idx in enumerate(dead_indices):
+            ctx_idx = worst_contexts[i % k_worst]
+            noise = torch.randn_like(self.codebook[dead_idx]) * 0.01
+            self.codebook.data[dead_idx].copy_(z[ctx_idx].detach() + noise)
+
+        self.lut_valid.fill_(False)
+        return dead_indices.tolist()
 
     def get_lookup_table(self) -> torch.Tensor:
         if not bool(self.lut_valid.item()):

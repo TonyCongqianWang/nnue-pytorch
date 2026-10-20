@@ -193,6 +193,7 @@ class LowRankStackedLinear(nn.Module):
         out_features: int,
         count: int,
         rank: int = 32,
+        codebook_dim: int = 128,
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,
     ):
@@ -202,12 +203,14 @@ class LowRankStackedLinear(nn.Module):
         self.out_features = out_features
         self.count = count
         self.rank = rank
+        self.codebook_dim = codebook_dim
         self.quantization = quantization
         self.layer_key = layer_key
         self.is_coalesced = False
 
         self.weight_base = nn.Parameter(torch.empty(out_features, in_features))
         self.bias_base = nn.Parameter(torch.empty(out_features))
+        self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
         self.down_proj = nn.Parameter(torch.empty(rank, in_features))
         self.up_proj = nn.Parameter(torch.empty(out_features, rank))
         self.bias_adapter = nn.Parameter(torch.empty(out_features, rank))
@@ -227,6 +230,8 @@ class LowRankStackedLinear(nn.Module):
         bound_base = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
         nn.init.uniform_(self.weight_base, -bound_base, bound_base)
         nn.init.uniform_(self.bias_base, -bound_base, bound_base)
+        bound_cb = 1.0 / math.sqrt(self.codebook_dim) if self.codebook_dim > 0 else 0.0
+        nn.init.uniform_(self.adapter_down, -bound_cb, bound_cb)
         nn.init.uniform_(self.down_proj, -bound_base, bound_base)
 
         bound_r = 1.0 / math.sqrt(self.rank) if self.rank > 0 else 0.0
@@ -234,16 +239,19 @@ class LowRankStackedLinear(nn.Module):
         nn.init.uniform_(self.bias_adapter, -bound_r, bound_r)
 
     def get_delta_weights(self, codebook: torch.Tensor) -> torch.Tensor:
-        # codebook: (count, rank)
-        # down_proj: (rank, in_features)
-        # up_proj: (out_features, rank)
-        c_v = codebook.unsqueeze(2) * self.down_proj.unsqueeze(0)
-        return torch.matmul(self.up_proj.unsqueeze(0), c_v)
+        # codebook: (count, codebook_dim)
+        act = F.gelu(codebook)
+        r = F.linear(act, self.adapter_down)  # (count, rank)
+        c_v = r.unsqueeze(2) * self.down_proj.unsqueeze(0)  # (count, rank, in_features)
+        return torch.matmul(
+            self.up_proj.unsqueeze(0), c_v
+        )  # (count, out_features, in_features)
 
     def get_delta_biases(self, codebook: torch.Tensor) -> torch.Tensor:
-        # codebook: (count, rank)
-        # bias_adapter: (out_features, rank)
-        return torch.matmul(codebook, self.bias_adapter.t())
+        # codebook: (count, codebook_dim)
+        act = F.gelu(codebook)
+        r = F.linear(act, self.adapter_down)  # (count, rank)
+        return torch.matmul(r, self.bias_adapter.t())  # (count, out_features)
 
     def get_merged_weights_and_biases(
         self, codebook: torch.Tensor | None = None
@@ -254,7 +262,7 @@ class LowRankStackedLinear(nn.Module):
         if codebook is None:
             codebook = torch.zeros(
                 self.count,
-                self.rank,
+                self.codebook_dim,
                 device=self.weight_base.device,
                 dtype=self.weight_base.dtype,
             )

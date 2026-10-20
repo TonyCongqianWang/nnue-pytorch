@@ -15,6 +15,7 @@ class LayerStacks(nn.Module):
         config: LayerStacksConfig,
         quantization: QuantizationManager,
         rank: int = 32,
+        codebook_dim: int = 128,
     ):
         super().__init__()
 
@@ -24,12 +25,14 @@ class LayerStacks(nn.Module):
         self.L3 = config.L3
         self.quantization = quantization
         self.rank = rank
+        self.codebook_dim = codebook_dim
 
         self.l1 = LowRankStackedLinear(
             2 * self.L1 // 2,
             self.L2,
             count,
             rank=rank,
+            codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l1",
         )
@@ -38,6 +41,7 @@ class LayerStacks(nn.Module):
             self.L3,
             count,
             rank=rank,
+            codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l2",
         )
@@ -46,6 +50,7 @@ class LayerStacks(nn.Module):
             1,
             count,
             rank=rank,
+            codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_output",
         )

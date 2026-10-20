@@ -48,7 +48,7 @@ def test_material_bijection_exhaustive():
 
 def test_structured_king_geometry():
     """Verify StructuredKingEmbedding dimensions, lookups, and Chebyshev opposition."""
-    emb = StructuredKingEmbedding(dim=32)
+    emb = StructuredKingEmbedding(dim=128)
 
     # Test our king bucket 32 (e1 with castling)
     assert emb.our_rank[32].item() == 0
@@ -69,7 +69,7 @@ def test_structured_king_geometry():
     kus = torch.tensor([0, 15, 32])
     kth = torch.tensor([0, 31, 64])
     z_k = emb(kus, kth)
-    assert z_k.shape == (3, 32)
+    assert z_k.shape == (3, 128)
 
 
 def test_dual_router_training_gradient_flow():
@@ -116,8 +116,9 @@ def test_dual_router_training_gradient_flow():
     # Verify gradients exist on all core parameters
     assert router.codebook_weights.grad is not None
     assert router.codebook_biases.grad is not None
-    assert router.bias_head.weight.grad is not None
-    assert router.bias_head.bias.grad is not None
+    assert router.bias_head_down.weight.grad is not None
+    assert router.bias_head_up.weight.grad is not None
+    assert router.bias_head_up.bias.grad is not None
     assert router.embed_T.weight.grad is not None
     assert router.embed_P.weight.grad is not None
     assert router.king_embed.embed_chebyshev.weight.grad is not None
@@ -183,8 +184,9 @@ def test_serialization_and_deserialization_roundtrip():
 
     # Initialize bias head with non-trivial values
     with torch.no_grad():
-        model.router.bias_head.weight.normal_(0, 0.05)
-        model.router.bias_head.bias.normal_(0, 0.05)
+        model.router.bias_head_down.weight.normal_(0, 0.05)
+        model.router.bias_head_up.weight.normal_(0, 0.05)
+        model.router.bias_head_up.bias.normal_(0, 0.05)
 
     writer = NNUEWriter(model, verbose=False)
     serialized_bytes = writer.buf

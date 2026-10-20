@@ -190,7 +190,9 @@ def test_router_gradient_flow():
 
     assert router.codebook_weights.grad is not None
     assert router.codebook_biases.grad is not None
-    assert router.bias_head.weight.grad is not None
+    assert router.bias_head_down.weight.grad is not None
+    assert router.bias_head_up.weight.grad is not None
     assert torch.norm(router.codebook_weights.grad) > 0.0
     assert torch.norm(router.codebook_biases.grad) > 0.0
-    assert torch.norm(router.bias_head.weight.grad) > 0.0
+    assert torch.norm(router.bias_head_down.weight.grad) > 0.0
+    assert torch.norm(router.bias_head_up.weight.grad) > 0.0

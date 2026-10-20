@@ -73,7 +73,7 @@ class StructuredKingEmbedding(nn.Module):
       - Chebyshev opposition distance: min Chebyshev distance between kings (0..7)
     """
 
-    def __init__(self, dim: int = 32):
+    def __init__(self, dim: int = 128):
         super().__init__()
         self.dim = dim
 
@@ -147,15 +147,18 @@ class StructuredKingEmbedding(nn.Module):
         nn.init.uniform_(self.embed_chebyshev.weight, -val, val)
 
     def forward(self, k_us: torch.Tensor, k_them: torch.Tensor) -> torch.Tensor:
-        return (
+        z_our = (
             self.embed_our_rank(self.our_rank[k_us])
             + self.embed_our_edge(self.our_edge[k_us])
             + self.embed_our_castling(self.our_castling[k_us])
-            + self.embed_enemy_rank(self.enemy_rank[k_them])
+        )
+        z_enemy = (
+            self.embed_enemy_rank(self.enemy_rank[k_them])
             + self.embed_enemy_edge(self.enemy_edge[k_them])
             + self.embed_enemy_castling(self.enemy_castling[k_them])
-            + self.embed_chebyshev(self.chebyshev[k_us, k_them])
         )
+        z_opp = self.embed_chebyshev(self.chebyshev[k_us, k_them])
+        return z_our + z_enemy + z_opp
 
 
 class DualVQCodebookRouter(nn.Module):
@@ -172,7 +175,7 @@ class DualVQCodebookRouter(nn.Module):
         num_contexts: int = ROUTER_TABLE_SIZE,
         num_weight_experts: int = NUM_WEIGHT_EXPERTS,
         num_bias_experts: int = NUM_BIAS_EXPERTS,
-        dim: int = 32,
+        dim: int = 128,
         bias_rank: int = BIAS_RANK,
         num_biases: int = NUM_BIASES,
         commitment_cost: float = 0.005,
@@ -203,12 +206,13 @@ class DualVQCodebookRouter(nn.Module):
         # Structured spatial King embedding table
         self.king_embed = StructuredKingEmbedding(dim=dim)
 
-        # Weight Router Codebook: 32 experts in R^32
+        # Weight Router Codebook: 32 experts in R^128
         self.codebook_weights = nn.Parameter(torch.empty(num_weight_experts, dim))
 
-        # Bias Router Codebook: 512 experts in R^32 (subspace rank 32)
-        self.codebook_biases = nn.Parameter(torch.empty(num_bias_experts, bias_rank))
-        self.bias_head = nn.Linear(bias_rank, num_biases)
+        # Bias Router Codebook: 512 experts in R^128
+        self.codebook_biases = nn.Parameter(torch.empty(num_bias_experts, dim))
+        self.bias_head_down = nn.Linear(dim, bias_rank, bias=False)
+        self.bias_head_up = nn.Linear(bias_rank, num_biases, bias=True)
 
         # Material decoding buffer on device
         self.register_buffer(
@@ -259,6 +263,10 @@ class DualVQCodebookRouter(nn.Module):
     def codebook(self) -> torch.Tensor:
         return self.codebook_weights
 
+    def bias_head(self, emb: torch.Tensor) -> torch.Tensor:
+        """Linear bottleneck on non-linearly activated codebook embeddings: Wup . Wdown . GELU(emb)."""
+        return self.bias_head_up(self.bias_head_down(F.gelu(emb)))
+
     def train(self, mode: bool = True):
         super().train(mode)
         if mode:
@@ -273,11 +281,12 @@ class DualVQCodebookRouter(nn.Module):
         nn.init.uniform_(self.embed_Q.weight, -val, val)
         nn.init.uniform_(self.embed_BP.weight, -val, val)
         nn.init.uniform_(self.codebook_weights, -val, val)
+        nn.init.uniform_(self.codebook_biases, -val, val)
 
-        val_bias = 1.0 / math.sqrt(self.bias_rank)
-        nn.init.uniform_(self.codebook_biases, -val_bias, val_bias)
-        nn.init.zeros_(self.bias_head.weight)
-        nn.init.zeros_(self.bias_head.bias)
+        val_bias_down = 1.0 / math.sqrt(self.dim)
+        nn.init.uniform_(self.bias_head_down.weight, -val_bias_down, val_bias_down)
+        nn.init.zeros_(self.bias_head_up.weight)
+        nn.init.zeros_(self.bias_head_up.bias)
 
     def get_context_vector(self, c: torch.Tensor) -> torch.Tensor:
         mat_id, k_us, k_them = decompose_router_index(c)
@@ -400,8 +409,9 @@ class DualVQCodebookRouter(nn.Module):
         self.lut_valid.fill_(True)
         self.codebook_weights.zero_()
         self.codebook_biases.zero_()
-        self.bias_head.weight.zero_()
-        self.bias_head.bias.zero_()
+        self.bias_head_down.weight.zero_()
+        self.bias_head_up.weight.zero_()
+        self.bias_head_up.bias.zero_()
         self.embed_T.weight.zero_()
         self.embed_P.weight.zero_()
         self.embed_Q.weight.zero_()

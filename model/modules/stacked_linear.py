@@ -377,6 +377,7 @@ class LowRankStackedLinear(nn.Module):
         self.coalesced_bias.zero_()
         self.weight_base.zero_()
         self.bias_base.zero_()
+        self.adapter_down.zero_()
         self.down_proj.zero_()
         self.up_proj.zero_()
         self.bias_adapter.zero_()

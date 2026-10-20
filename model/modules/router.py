@@ -285,7 +285,8 @@ class DualVQCodebookRouter(nn.Module):
 
         val_bias_down = 1.0 / math.sqrt(self.dim)
         nn.init.uniform_(self.bias_head_down.weight, -val_bias_down, val_bias_down)
-        nn.init.zeros_(self.bias_head_up.weight)
+        val_bias_up = 1.0 / math.sqrt(self.bias_rank)
+        nn.init.uniform_(self.bias_head_up.weight, -val_bias_up, val_bias_up)
         nn.init.zeros_(self.bias_head_up.bias)
 
     def get_context_vector(self, c: torch.Tensor) -> torch.Tensor:
@@ -407,15 +408,8 @@ class DualVQCodebookRouter(nn.Module):
             )
         self.lut.copy_(table.to(device=self.lut.device, dtype=torch.int32))
         self.lut_valid.fill_(True)
-        self.codebook_weights.zero_()
-        self.codebook_biases.zero_()
-        self.bias_head_down.weight.zero_()
-        self.bias_head_up.weight.zero_()
-        self.bias_head_up.bias.zero_()
-        self.embed_T.weight.zero_()
-        self.embed_P.weight.zero_()
-        self.embed_Q.weight.zero_()
-        self.embed_BP.weight.zero_()
+        for p in self.parameters():
+            p.zero_()
 
     @torch.no_grad()
     def reseed_dead_experts_context_wide(

@@ -365,7 +365,10 @@ def main():
             dirpath=os.path.join(tb_logger.log_dir, "checkpoints"),
         ),
         SimpleLineLogger(refresh_rate=refresh_rate),
-        MoEDeadExpertReseeder(reseed_interval=args.moe_reseed_interval),
+        MoEDeadExpertReseeder(
+            reseed_interval=args.moe_reseed_interval,
+            temperature=args.moe_reseed_sampling_temperature,
+        ),
         TimeLimit(args.max_time),
         nan_callback,
     ]

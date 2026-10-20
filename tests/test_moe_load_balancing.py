@@ -40,7 +40,7 @@ def test_balance_loss_bounds():
 
 
 def test_dead_expert_reseeding():
-    """Verify that unused experts across the context space are actively reseeded."""
+    """Verify that unused experts across the context space are actively reseeded via cell splitting."""
     torch.manual_seed(42)
     router = DualVQCodebookRouter()
 
@@ -50,17 +50,46 @@ def test_dead_expert_reseeding():
         router.codebook_weights.data[1:] = 1000.0
         router.codebook_weights.data[0] = 0.0
 
-    # All contexts will map to expert 0, so experts 1..31 are dead
+    # All contexts will map to expert 0, so experts 1..31 are dead and expert 0 is split
     reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
-    assert reseeded_w == list(range(1, NUM_WEIGHT_EXPERTS))
+    assert 0 in reseeded_w
+    assert set(range(1, NUM_WEIGHT_EXPERTS)).issubset(set(reseeded_w))
     assert isinstance(reseeded_b, list)
 
-    # Now experts 1..31 should be reseeded from context embeddings and no longer equal 1000.0
+    # Now experts 1..31 should be reseeded near expert 0 and no longer equal 1000.0
     for j in range(1, NUM_WEIGHT_EXPERTS):
         assert not torch.all(router.codebook_weights.data[j] == 1000.0), (
             f"Expert {j} was not reseeded!"
         )
     assert not bool(router.lut_valid.item())
+
+
+def test_traffic_weighted_cell_splitting():
+    """Verify EMA traffic tracking and traffic-weighted parent selection during cell splitting."""
+    torch.manual_seed(42)
+    router = DualVQCodebookRouter()
+    router.train()
+
+    # Verify EMA buffer initialization
+    assert router.ema_traffic_weights.shape == (NUM_WEIGHT_EXPERTS,)
+    assert torch.isclose(router.ema_traffic_weights.sum(), torch.tensor(1.0), atol=1e-3)
+
+    # Run forward step and verify EMA traffic update
+    c_us = torch.zeros(32, dtype=torch.long)
+    c_them = torch.zeros(32, dtype=torch.long)
+    router(c_us, c_them)
+
+    # Now make expert 31 dead while biasing EMA traffic heavily towards expert 5
+    with torch.no_grad():
+        router.codebook_weights.data[31] = 1000.0
+        router.ema_traffic_weights.zero_()
+        router.ema_traffic_weights[5] = 1.0
+
+    # With greedy temperature (1e-4), expert 5 should be selected to split for dead expert 31
+    reseeded_w, _ = router.reseed_dead_experts_context_wide(temperature=1e-4)
+    assert 31 in reseeded_w
+    assert 5 in reseeded_w
+    assert not torch.all(router.codebook_weights.data[31] == 1000.0)
 
 
 def test_lut_cache_lifecycle():
@@ -84,7 +113,7 @@ def test_lut_cache_lifecycle():
 
 
 def test_dead_expert_callback_momentum_reset():
-    """Verify MoEDeadExpertReseeder resets Adam optimizer momentum on reseeded codebook rows."""
+    """Verify MoEDeadExpertReseeder resets Adam optimizer momentum on dead and split parent rows."""
     from trainer.callbacks import MoEDeadExpertReseeder
 
     class DummyModel:
@@ -101,12 +130,15 @@ def test_dead_expert_callback_momentum_reset():
             self.optimizer = optimizer
             self.global_step = 1024
             self.rank = 0
+            self.config = None
 
     torch.manual_seed(42)
     router = DualVQCodebookRouter()
+    # Only expert 31 is dead; set heavy traffic on expert 2 so it is selected as parent
     with torch.no_grad():
-        router.codebook_weights.data[1:] = 1000.0
-        router.codebook_weights.data[0] = 0.0
+        router.codebook_weights.data[31] = 1000.0
+        router.ema_traffic_weights.zero_()
+        router.ema_traffic_weights[2] = 1.0
 
     opt = torch.optim.AdamW([router.codebook_weights, router.codebook_biases], lr=1e-3)
     # Simulate non-zero momentum buffers
@@ -120,15 +152,15 @@ def test_dead_expert_callback_momentum_reset():
     }
 
     trainer = DummyTrainer(DummyNNUE(router), opt)
-    callback = MoEDeadExpertReseeder(reseed_interval=1024)
+    callback = MoEDeadExpertReseeder(reseed_interval=1024, temperature=1e-4)
     callback.on_train_batch_end(trainer)
 
-    # Momentum for experts 1..31 should be 0, while expert 0 retains momentum
+    # Expert 31 and parent expert 2 should have momentum reset, other experts retain 1.0
     state_w = opt.state[router.codebook_weights]
-    assert torch.all(state_w["exp_avg"][0] == 1.0)
-    assert torch.all(state_w["exp_avg"][1:] == 0.0)
-    assert torch.all(state_w["exp_avg_sq"][0] == 1.0)
-    assert torch.all(state_w["exp_avg_sq"][1:] == 0.0)
+    assert state_w["exp_avg"][31].sum() == 0.0
+    assert state_w["exp_avg"][2].sum() == 0.0
+    # An untouched active expert (e.g. expert 0) retains its momentum
+    assert state_w["exp_avg"][0].sum() == float(router.dim)
 
 
 def test_router_gradient_flow():

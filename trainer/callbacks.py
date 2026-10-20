@@ -765,11 +765,12 @@ class SimpleLineLogger(Callback):
 
 
 class MoEDeadExpertReseeder(Callback):
-    """Periodically checks all 810,810 contexts and reseeds dead MoE experts across both codebooks."""
+    """Periodically checks all 810,810 contexts and reseeds dead MoE experts via traffic-weighted cell splitting."""
 
-    def __init__(self, reseed_interval: int = 1024):
+    def __init__(self, reseed_interval: int = 1024, temperature: float = 1.0):
         super().__init__()
         self.reseed_interval = reseed_interval
+        self.temperature = temperature
 
     @torch.no_grad()
     @torch.compiler.disable
@@ -783,7 +784,12 @@ class MoEDeadExpertReseeder(Callback):
 
             unwrapped = _unwrap_module(trainer.model)
             router = unwrapped.model.router
-            reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
+            temp = getattr(
+                trainer.config, "moe_reseed_sampling_temperature", self.temperature
+            )
+            reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide(
+                temperature=temp
+            )
             if reseeded_w:
                 if dist.is_available() and dist.is_initialized():
                     dist.broadcast(router.codebook_weights.data, src=0)

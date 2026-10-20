@@ -195,3 +195,96 @@ def test_router_gradient_flow():
     assert torch.norm(router.codebook_biases.grad) > 0.0
     assert torch.norm(router.bias_head_down.weight.grad) > 0.0
     assert torch.norm(router.bias_head_up.weight.grad) > 0.0
+
+
+def test_dead_expert_callback_ddp_synchronization(monkeypatch):
+    """Verify that under DDP, rank 0's reseeding decisions and weights are safely broadcast
+    and optimizer momentum is reset on all ranks without collective mismatch."""
+    import torch.distributed as dist
+    from trainer.callbacks import MoEDeadExpertReseeder
+
+    class DummyModel:
+        def __init__(self, router):
+            self.router = router
+
+    class DummyNNUE:
+        def __init__(self, router):
+            self.model = DummyModel(router)
+
+    class DummyTrainer:
+        def __init__(self, nnue, optimizer, rank, world_size=2):
+            self.model = nnue
+            self.optimizer = optimizer
+            self.global_step = 1024
+            self.rank = rank
+            self.world_size = world_size
+
+    # Setup Rank 0 with a dead expert 31
+    torch.manual_seed(42)
+    router_0 = DualVQCodebookRouter()
+    with torch.no_grad():
+        router_0.codebook_weights.data[31] = 1000.0
+        router_0.ema_traffic_weights.zero_()
+        router_0.ema_traffic_weights[2] = 1.0
+
+    opt_0 = torch.optim.AdamW([router_0.codebook_weights, router_0.codebook_biases], lr=1e-3)
+    opt_0.state[router_0.codebook_weights] = {
+        "exp_avg": torch.ones_like(router_0.codebook_weights),
+        "exp_avg_sq": torch.ones_like(router_0.codebook_weights),
+    }
+
+    # Setup Rank 1 (identical initial state, but no dead expert initially or different EMA)
+    router_1 = DualVQCodebookRouter()
+    with torch.no_grad():
+        router_1.codebook_weights.copy_(router_0.codebook_weights)
+        router_1.ema_traffic_weights.copy_(router_0.ema_traffic_weights)
+
+    opt_1 = torch.optim.AdamW([router_1.codebook_weights, router_1.codebook_biases], lr=1e-3)
+    opt_1.state[router_1.codebook_weights] = {
+        "exp_avg": torch.ones_like(router_1.codebook_weights),
+        "exp_avg_sq": torch.ones_like(router_1.codebook_weights),
+    }
+
+    trainer_0 = DummyTrainer(DummyNNUE(router_0), opt_0, rank=0, world_size=2)
+    trainer_1 = DummyTrainer(DummyNNUE(router_1), opt_1, rank=1, world_size=2)
+
+    broadcast_log = []
+    shared_storage = {}
+
+    def mock_broadcast(tensor, src=0):
+        key = (tensor.shape, tensor.dtype)
+        if trainer_current_rank == src:
+            shared_storage[key] = tensor.clone()
+        else:
+            tensor.copy_(shared_storage[key])
+        broadcast_log.append((trainer_current_rank, key))
+
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "broadcast", mock_broadcast)
+
+    callback = MoEDeadExpertReseeder(reseed_interval=1024, temperature=1e-4)
+
+    # Rank 0 runs
+    trainer_current_rank = 0
+    callback.on_train_batch_end(trainer_0)
+
+    # Rank 1 runs
+    trainer_current_rank = 1
+    callback.on_train_batch_end(trainer_1)
+
+    # Both ranks must have invoked the exact same broadcast sequence
+    calls_rank_0 = [k for r, k in broadcast_log if r == 0]
+    calls_rank_1 = [k for r, k in broadcast_log if r == 1]
+    assert len(calls_rank_0) == len(calls_rank_1)
+    assert calls_rank_0 == calls_rank_1
+
+    # Weights on Rank 1 must match Rank 0 exactly
+    assert torch.equal(router_0.codebook_weights, router_1.codebook_weights)
+
+    # Rank 1 optimizer momentum must be reset for the exact reseeded indices (31 and 2)
+    state_w_1 = opt_1.state[router_1.codebook_weights]
+    assert state_w_1["exp_avg"][31].sum() == 0.0
+    assert state_w_1["exp_avg"][2].sum() == 0.0
+    assert state_w_1["exp_avg"][0].sum() == float(router_1.dim)
+

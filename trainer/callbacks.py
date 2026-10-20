@@ -784,31 +784,76 @@ class MoEDeadExpertReseeder(Callback):
 
             unwrapped = _unwrap_module(trainer.model)
             router = unwrapped.model.router
-            reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide(
-                temperature=self.temperature
+            is_ddp = (
+                dist.is_available()
+                and dist.is_initialized()
+                and getattr(trainer, "world_size", 1) > 1
             )
-            if reseeded_w:
-                if dist.is_available() and dist.is_initialized():
+            rank = getattr(trainer, "rank", 0)
+
+            # In DDP, rank 0 determines dead experts and executes cell splitting.
+            # Other ranks wait for broadcast masks to avoid divergence and collective desync.
+            if not is_ddp or rank == 0:
+                reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide(
+                    temperature=self.temperature
+                )
+            else:
+                reseeded_w, reseeded_b = [], []
+
+            if is_ddp:
+                mask_w = torch.zeros(
+                    router.num_weight_experts,
+                    dtype=torch.bool,
+                    device=router.codebook_weights.device,
+                )
+                mask_b = torch.zeros(
+                    router.num_bias_experts,
+                    dtype=torch.bool,
+                    device=router.codebook_biases.device,
+                )
+                if rank == 0:
+                    if reseeded_w:
+                        mask_w[reseeded_w] = True
+                    if reseeded_b:
+                        mask_b[reseeded_b] = True
+
+                dist.broadcast(mask_w, src=0)
+                dist.broadcast(mask_b, src=0)
+
+                if mask_w.any():
                     dist.broadcast(router.codebook_weights.data, src=0)
-                if trainer.rank == 0:
+                    reseeded_w = torch.nonzero(mask_w).flatten().tolist()
+                    self._reset_optimizer_state(
+                        trainer.optimizer, router.codebook_weights, reseeded_w
+                    )
+
+                if mask_b.any():
+                    dist.broadcast(router.codebook_biases.data, src=0)
+                    reseeded_b = torch.nonzero(mask_b).flatten().tolist()
+                    self._reset_optimizer_state(
+                        trainer.optimizer, router.codebook_biases, reseeded_b
+                    )
+            else:
+                if reseeded_w:
+                    self._reset_optimizer_state(
+                        trainer.optimizer, router.codebook_weights, reseeded_w
+                    )
+                if reseeded_b:
+                    self._reset_optimizer_state(
+                        trainer.optimizer, router.codebook_biases, reseeded_b
+                    )
+
+            if rank == 0:
+                if reseeded_w:
                     print(
                         f"[Step {trainer.global_step}] Reseeded {len(reseeded_w)} dead weight expert(s): {reseeded_w}",
                         flush=True,
                     )
-                self._reset_optimizer_state(
-                    trainer.optimizer, router.codebook_weights, reseeded_w
-                )
-            if reseeded_b:
-                if dist.is_available() and dist.is_initialized():
-                    dist.broadcast(router.codebook_biases.data, src=0)
-                if trainer.rank == 0:
+                if reseeded_b:
                     print(
                         f"[Step {trainer.global_step}] Reseeded {len(reseeded_b)} dead bias expert(s): {reseeded_b}",
                         flush=True,
                     )
-                self._reset_optimizer_state(
-                    trainer.optimizer, router.codebook_biases, reseeded_b
-                )
 
     def _reset_optimizer_state(self, optimizer, param, reseeded_indices):
         if optimizer is None:

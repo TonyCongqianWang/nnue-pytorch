@@ -784,11 +784,8 @@ class MoEDeadExpertReseeder(Callback):
 
             unwrapped = _unwrap_module(trainer.model)
             router = unwrapped.model.router
-            temp = getattr(
-                trainer.config, "moe_reseed_sampling_temperature", self.temperature
-            )
             reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide(
-                temperature=temp
+                temperature=self.temperature
             )
             if reseeded_w:
                 if dist.is_available() and dist.is_initialized():

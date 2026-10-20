@@ -179,7 +179,7 @@ class DualVQCodebookRouter(nn.Module):
         bias_rank: int = BIAS_RANK,
         num_biases: int = NUM_BIASES,
         commitment_cost: float = 0.005,
-        balance_cost: float = 0.001,
+        balance_cost: float = 0.004,
         temperature: float = 1.0,
         reseed_dead_experts: bool = True,
         ema_decay: float = 0.999,

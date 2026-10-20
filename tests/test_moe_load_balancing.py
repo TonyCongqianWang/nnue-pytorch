@@ -130,7 +130,6 @@ def test_dead_expert_callback_momentum_reset():
             self.optimizer = optimizer
             self.global_step = 1024
             self.rank = 0
-            self.config = None
 
     torch.manual_seed(42)
     router = DualVQCodebookRouter()

@@ -13,3 +13,9 @@ class LayerStacksConfig:
     """Size of second hidden layer."""
     L3: Annotated[int, tyro.conf.arg(name="l3")] = 32
     """Size of third hidden layer."""
+    ft_dynamic_bias_dim: Annotated[int, tyro.conf.arg(name="ft-dynamic-bias-dim")] = 256
+    """Size of dynamic bias accumulator extension."""
+
+    @property
+    def ft_outputs(self) -> int:
+        return self.L1 + self.ft_dynamic_bias_dim

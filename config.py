@@ -97,6 +97,18 @@ class TrainingConfig:
     input_clipping_interval: int = 0
     """Clipping interval for input feature-transformer weights in iterations/steps. If > 0, clips every N steps instead of at the end of each epoch (default: 0, epoch-based)."""
 
+    moe_reseed_interval: int = 1024
+    """Interval in training steps for reseeding dead MoE experts across all contexts. Default: 1024 (<= 0 disables)."""
+
+    moe_reseed_sampling_temperature: float = 0.5
+    """Sampling temperature for traffic-weighted cell splitting when reseeding dead experts (default: 0.5, lower is greedier, higher is more uniform)."""
+
+    moe_reseed_ema_decay: float = 0.999
+    """EMA decay rate for tracking recent batch usage of codebook experts (default: 0.999)."""
+
+    moe_reseed_min_utilization: float = 0.001
+    """EMA utilization floor below which experts are flagged as dead and reseeded (default: 0.001 = 0.1%)."""
+
     dataloader_config: OmitArgPrefixes[DataloaderSkipConfig] = field(
         default_factory=DataloaderSkipConfig
     )

@@ -17,6 +17,7 @@ from data_loader.config import DataloaderDDPConfig
 from trainer.callbacks import (
     CheckpointManager,
     ExplicitSWA,
+    MoEDeadExpertReseeder,
     SimpleLineLogger,
     TerminateOnNaN,
     TimeLimit,
@@ -318,6 +319,9 @@ def main():
         # lambda scheduling and checkpointing in plain Python.
         torch._dynamo.config.cache_size_limit = 64
         nnue.model = torch.compile(nnue.model, backend=args.compile_backend)
+        # The loss itself is a long eager pointwise chain outside the model;
+        # compiling it fuses those kernels.
+        nnue.enable_compiled_loss()
 
     if accelerator == "cuda":
         device = torch.device(f"cuda:{local_rank}")
@@ -364,6 +368,11 @@ def main():
             dirpath=os.path.join(tb_logger.log_dir, "checkpoints"),
         ),
         SimpleLineLogger(refresh_rate=refresh_rate),
+        MoEDeadExpertReseeder(
+            reseed_interval=args.moe_reseed_interval,
+            temperature=args.moe_reseed_sampling_temperature,
+            min_utilization=args.moe_reseed_min_utilization,
+        ),
         TimeLimit(args.max_time),
         nan_callback,
     ]

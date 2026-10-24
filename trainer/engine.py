@@ -6,6 +6,7 @@ while keeping `model.NNUE` as a plain `torch.nn.Module`.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -42,7 +43,15 @@ def init_distributed(
                     backend = "gloo"
                 else:
                     backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend, init_method="env://")
+            kwargs = {}
+            if backend == "nccl":
+                # Bind the process group to this rank's GPU. This eagerly
+                # forms the NCCL communicator and lets device-less
+                # collectives (such as the epoch-end torchmetrics barrier)
+                # target the bound device instead of the current-context
+                # device, which torch warns about.
+                kwargs["device_id"] = torch.device("cuda", local_rank)
+            dist.init_process_group(backend, init_method="env://", **kwargs)
 
     if torch.cuda.is_available() and device_type != "cpu":
         torch.cuda.set_device(local_rank)
@@ -155,9 +164,12 @@ class SimpleTrainer:
                 "gradient_as_bucket_view": True,
                 "static_graph": True,
                 "find_unused_parameters": False,
-                "forward_sync_buffers": False,
                 "bucket_cap_mb": 50,
             }
+            if "forward_sync_buffers" in inspect.signature(DDP.__init__).parameters:
+                kwargs["forward_sync_buffers"] = False
+            else:
+                kwargs["broadcast_buffers"] = False
             if self.device.type == "cuda":
                 kwargs["device_ids"] = [self.local_rank]
                 kwargs["output_device"] = self.local_rank
@@ -210,13 +222,23 @@ class SimpleTrainer:
                 self.model.config.use_fake_act_quantization,
                 self.model.config.use_fake_weight_quantization,
             )
-            loss = _unwrap_module(self.model).compute_loss_with_scorenet(
-                scorenet, batch, self.global_step
+            total_loss, sf_loss, moe_loss, commit_loss, balance_loss = _unwrap_module(
+                self.model
+            ).compute_loss_with_scorenet(
+                scorenet, batch, self.global_step, return_details=True
             )
-            _unwrap_module(self.model).loss_metrics["train_loss_epoch"].update(
-                loss.detach()
-            )
-            outputs = {"loss": loss, "train_loss": loss.detach()}
+            unwrapped = _unwrap_module(self.model)
+            unwrapped.loss_metrics["train_loss_epoch"].update(total_loss.detach())
+            unwrapped.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
+            unwrapped.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
+            outputs = {
+                "loss": total_loss,
+                "train_loss": total_loss.detach(),
+                "sf_loss": sf_loss.detach(),
+                "moe_loss": moe_loss.detach(),
+                "commit_loss": commit_loss.detach(),
+                "balance_loss": balance_loss.detach(),
+            }
         else:
             outputs = self.model.train_step(batch, self.current_epoch, self.global_step)
         return outputs
@@ -350,6 +372,10 @@ class SimpleTrainer:
             # Store the raw loss tensor (GPU).  Only convert to float
             # when logging is due or when a callback needs the scalar.
             self.callback_metrics["train_loss"] = outputs["train_loss"].detach()
+            if "sf_loss" in outputs:
+                self.callback_metrics["sf_loss"] = outputs["sf_loss"].detach()
+            if "moe_loss" in outputs:
+                self.callback_metrics["moe_loss"] = outputs["moe_loss"].detach()
 
             if (batch_idx + 1) % self.log_every_n_steps == 0 or (
                 batch_idx + 1
@@ -357,8 +383,19 @@ class SimpleTrainer:
                 self.callback_metrics["train_loss"] = float(
                     self.callback_metrics["train_loss"]
                 )
+                step_metrics = {"train_loss": self.callback_metrics["train_loss"]}
+                if "sf_loss" in self.callback_metrics:
+                    self.callback_metrics["sf_loss"] = float(
+                        self.callback_metrics["sf_loss"]
+                    )
+                    step_metrics["sf_loss"] = self.callback_metrics["sf_loss"]
+                if "moe_loss" in self.callback_metrics:
+                    self.callback_metrics["moe_loss"] = float(
+                        self.callback_metrics["moe_loss"]
+                    )
+                    step_metrics["moe_loss"] = self.callback_metrics["moe_loss"]
                 self._log_metrics(
-                    {"train_loss": self.callback_metrics["train_loss"]},
+                    step_metrics,
                     step=self.global_step,
                 )
 
@@ -367,8 +404,24 @@ class SimpleTrainer:
         # Compute and log epoch-level training loss before the model resets it.
         train_loss_epoch = self.model.loss_metrics["train_loss_epoch"].compute().item()
         self.callback_metrics["train_loss_epoch"] = train_loss_epoch
+        epoch_metrics = {
+            "train_loss_epoch": train_loss_epoch,
+            "epoch": self.current_epoch,
+        }
+        if "train_sf_loss_epoch" in self.model.loss_metrics:
+            train_sf_loss_epoch = (
+                self.model.loss_metrics["train_sf_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+            epoch_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+        if "train_moe_loss_epoch" in self.model.loss_metrics:
+            train_moe_loss_epoch = (
+                self.model.loss_metrics["train_moe_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
+            epoch_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
         self._log_metrics(
-            {"train_loss_epoch": train_loss_epoch, "epoch": self.current_epoch},
+            epoch_metrics,
             step=self.global_step,
         )
 
@@ -399,7 +452,7 @@ class SimpleTrainer:
             self.model.on_validation_epoch_start()
         self._call_callbacks("on_validation_epoch_start", self)
 
-        total_val_loss = 0.0
+        total_val_loss = None
         num_val_batches = 0
 
         with torch.no_grad():
@@ -413,16 +466,24 @@ class SimpleTrainer:
                 outputs = self.model.val_step(
                     batch, self.current_epoch, self.global_step
                 )
-                total_val_loss += float(outputs["val_loss"])
+                # Accumulate on the device: a per-batch float() would force a
+                # GPU-to-CPU sync in every iteration.
+                val_loss = outputs["val_loss"]
+                if not torch.is_tensor(val_loss):
+                    val_loss = torch.tensor(val_loss, device=self.device)
+                total_val_loss = (
+                    val_loss if total_val_loss is None else (total_val_loss + val_loss)
+                )
                 num_val_batches += 1
 
                 self._call_callbacks(
                     "on_validation_batch_end", self, batch, batch_idx, outputs
                 )
 
-        mean_val_loss = (
-            total_val_loss / num_val_batches if num_val_batches > 0 else float("nan")
-        )
+        if total_val_loss is None or num_val_batches == 0:
+            mean_val_loss = float("nan")
+        else:
+            mean_val_loss = (total_val_loss / num_val_batches).item()
 
         if self.world_size > 1:
             mean_tensor = torch.tensor(mean_val_loss, device=self.device)

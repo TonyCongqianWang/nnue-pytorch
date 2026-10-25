@@ -362,6 +362,112 @@ struct FullThreatsExtractor: IFeatureExtractor {
     }
 };
 
+// Geometry matches Stockfish: white pieces then black, Pawn through King.
+struct GhostPawnThreats {
+    static constexpr int EDGES = 7504;
+    static constexpr int INPUTS = 2 * EDGES;
+    static constexpr int MAX_ACTIVE_FEATURES = 2048;
+    struct Offsets {
+        int squares[2][6][64]{};
+        int total = 0;
+    };
+    static constexpr auto PseudoAttacks = bb::detail::generatePseudoAttacks();
+    static constexpr Bitboard geometry(Color c, PieceType pt, Square from) {
+        return pt == PieceType::Pawn ? bb::pawnAttacks(Bitboard::square(from), c)
+                                     : PseudoAttacks[pt][from];
+    }
+    static const Offsets& offsets() {
+        static constexpr auto table = [] {
+            Offsets t;
+            for (int c = 0; c < 2; ++c)
+                for (int pt = 0; pt < 6; ++pt)
+                    for (int from = 0; from < 64; ++from)
+                    {
+                        t.squares[c][pt][from] = t.total;
+                        if (pt != int(PieceType::Pawn) || (from >= int(a2) && from <= int(h7)))
+                            t.total += geometry(Color(c), PieceType(pt), Square(from)).count();
+                    }
+            return t;
+        }();
+        static_assert(table.total == EDGES);
+        return table;
+    }
+    static int index(Color perspective, Color ghostColor, Piece attacker,
+                     Square from, Square to, Square king) {
+        const int orient = int(FullThreats::OrientTBL[int(perspective)][int(king)]);
+        from = Square(int(from) ^ orient);
+        to = Square(int(to) ^ orient);
+        const Color c = Color(int(attacker.color()) ^ int(perspective));
+        return (int(ghostColor) ^ int(perspective)) * EDGES
+             + offsets().squares[int(c)][int(attacker.type())][int(from)]
+             + (geometry(c, attacker.type(), from)
+                & Bitboard::fromBits((1ULL << int(to)) - 1)).count();
+    }
+    static std::array<Bitboard, 2> destinations(const chess::Position& pos) {
+        std::array<Bitboard, 2> result{};
+        const Bitboard empty = ~pos.piecesBB();
+        for (Color c : {Color::White, Color::Black})
+        {
+            const Bitboard pawns = pos.piecesBB(Piece(PieceType::Pawn, c));
+            const Bitboard enemies = pos.piecesBB(!c);
+            const Bitboard pinned = pos.blockersForKing(c) & pawns;
+            const Bitboard free = pawns & ~pinned;
+            const Offset up(0, c == Color::White ? 1 : -1);
+            const int delta = c == Color::White ? 8 : -8;
+            const Bitboard single = free.shifted(up) & empty;
+            const Bitboard rank = Bitboard::fromBits(c == Color::White ? 0xFF0000ULL : 0xFF0000000000ULL);
+            Bitboard ghosts = single | ((single & rank).shifted(up) & empty)
+                            | (bb::pawnAttacks(free, c) & enemies);
+            for (Square from : pinned)
+            {
+                const Bitboard ray = bb::line(pos.kingSquare(c), from);
+                const Square one(int(from) + delta);
+                if (ray.isSet(one) && empty.isSet(one))
+                {
+                    ghosts |= Bitboard::square(one);
+                    if (from.rank() == (c == Color::White ? rank2 : rank7))
+                    {
+                        const Square two(int(one) + delta);
+                        if (ray.isSet(two) && empty.isSet(two)) ghosts |= Bitboard::square(two);
+                    }
+                }
+                ghosts |= bb::pawnAttacks(Bitboard::square(from), c) & enemies & ray;
+            }
+            const Square ep = pos.epSquare();
+            if (ep != Square::none() && c == pos.sideToMove())
+                for (Square from : bb::pawnAttacks(Bitboard::square(ep), !c) & pawns)
+                    if (pos.isPseudoLegalMoveLegal(Move::enPassant(from, ep)))
+                        ghosts |= Bitboard::square(ep);
+            result[int(c)] = ghosts;
+        }
+        return result;
+    }
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        const auto ghosts = destinations(e.pos);
+        const Square king = e.pos.kingSquare(color);
+        int count = 0;
+        for (Square from : e.pos.piecesBB())
+        {
+            const Bitboard attacks = e.pos.attacks(from);
+            for (Color gc : {Color::White, Color::Black})
+                for (Square to : attacks & ghosts[int(gc)])
+                {
+                    assert(count < MAX_ACTIVE_FEATURES);
+                    features[count++] = index(color, gc, e.pos.pieceAt(from), from, to, king);
+                }
+        }
+        return {count, INPUTS};
+    }
+};
+
+struct GhostPawnThreatsExtractor: IFeatureExtractor {
+    int inputs() const override { return GhostPawnThreats::INPUTS; }
+    int max_active_features() const override { return GhostPawnThreats::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) const override {
+        return GhostPawnThreats::fill_features_sparse(e, features, color);
+    }
+};
+
 struct PP_3Wide {
     static constexpr std::string_view NAME = "PP_3Wide";
 
@@ -491,6 +597,8 @@ static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view
         return std::make_unique<K32Q2Extractor>();
     if (name == "Full_Threats")
         return std::make_unique<FullThreatsExtractor>();
+    if (name == "Ghost_Pawn_Threats")
+        return std::make_unique<GhostPawnThreatsExtractor>();
     if (name == "PP_3Wide")
         return std::make_unique<PP_3WideExtractor>();
     return nullptr;

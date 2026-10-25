@@ -101,3 +101,35 @@ logging. Direct `train.py` usage is documented in the
 * https://github.com/DanielUranga/TensorFlowNNUE
 * https://hxim.github.io/Stockfish-Evaluation-Guide/
 * dkappe - Suggesting ranger (https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer)
+
+## Ghost pawn threats
+
+The default feature set on this branch is
+`Full_Threats+PP_3Wide+Ghost_Pawn_Threats+K32Q2^`.
+`Ghost_Pawn_Threats` adds 15,008 unfactorized, int8-exported input rows for
+individual pieces attacking or supporting candidate pawn destinations. Both
+ghost colors and all attacker types, including kings, are represented.
+
+Destinations include unobstructed pushes, captures and legal en passant, with
+pinned pawns restricted to their king's pin line. Destinations shared by pawns of
+the same color are deduplicated. Relationships use current occupancy; they do not
+simulate the board after the hypothetical pawn move. Extraction is attacker
+oriented and uses full recomputation, without persistent ghost maintenance.
+
+The native loader, Python model and Stockfish use the same king-dependent square
+orientation and feature hash. The serialization order is the feature order above:
+ghost weights follow pawn-pair weights and precede the int16 piece-square rows.
+Networks for this feature set require the compatible Stockfish revision pinned
+in `.github/workflows/cpu-testrun.yml`; older networks are incompatible with that
+engine. No trained playing-strength network is supplied by this experiment.
+
+To validate exact feature indices, build Stockfish's `ghost-feature-probe` target
+and run:
+
+```sh
+STOCKFISH_GHOST_FEATURE_PROBE=/path/to/Stockfish/src/ghost_feature_probe \
+  pytest -q tests/test_ghost_pawn_threats.py
+```
+
+Without that environment variable, the exact Stockfish bridge test is skipped;
+the independent Python reference, reflection and gradient tests still run.

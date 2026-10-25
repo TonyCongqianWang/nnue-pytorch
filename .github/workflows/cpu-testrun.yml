@@ -31,17 +31,18 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
-      - name: Checkout Stockfish Master
+      - name: Checkout compatible Stockfish
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: TonyCongqianWang/Stockfish
+          ref: e3b50ca73c141d9f5f3827dbdf3f2cda6e2b7372
           path: Stockfish
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          make -j build
+          CXXFLAGS=-DNNUE_EMBEDDING_OFF make -j2 all ghost-feature-probe ARCH=x86-64
 
       - name: Perform Test Run of entire Training Pipeline on CPU
         run: |
@@ -75,20 +76,26 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
-      - name: Checkout Stockfish Master
+      - name: Checkout compatible Stockfish
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: TonyCongqianWang/Stockfish
+          ref: e3b50ca73c141d9f5f3827dbdf3f2cda6e2b7372
           path: Stockfish
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          make -j build
+          CXXFLAGS=-DNNUE_EMBEDDING_OFF make -j2 all ghost-feature-probe ARCH=x86-64
 
       - name: Perform Cross-Check Evaluation on Random Net
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
             python -u cross_check_eval.py --random-weights --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' --count 1024 --seed 42 --max-error 5
 
+      - name: Verify exact ghost pawn feature indices
+        run: |
+          ./run_docker.sh CPU ${{ github.workspace }} --skip-build --skip-setup --non-interactive --exec \
+            env STOCKFISH_GHOST_FEATURE_PROBE=/data/Stockfish/src/ghost_feature_probe \
+            pytest -q tests/test_ghost_pawn_threats.py

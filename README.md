@@ -123,13 +123,10 @@ Networks for this feature set require the compatible Stockfish revision pinned
 in `.github/workflows/cpu-testrun.yml`; older networks are incompatible with that
 engine. No trained playing-strength network is supplied by this experiment.
 
-To validate exact feature indices, build Stockfish's `ghost-feature-probe` target
-and run:
+Run the independent feature-index reference, reflection and gradient tests with:
 
 ```sh
-STOCKFISH_GHOST_FEATURE_PROBE=/path/to/Stockfish/src/ghost_feature_probe \
-  pytest -q tests/test_ghost_pawn_threats.py
+pytest -q tests/test_ghost_pawn_threats.py
 ```
 
-Without that environment variable, the exact Stockfish bridge test is skipped;
-the independent Python reference, reflection and gradient tests still run.
+The CPU CI workflow also validates exported-network evaluations against Stockfish.

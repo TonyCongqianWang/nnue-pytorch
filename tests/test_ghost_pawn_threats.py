@@ -1,9 +1,8 @@
-"""Independent move/attack reference, exact native parity, and training coverage."""
+"""Independent move/attack reference, reflection, and training coverage."""
 
 import functools
 import os
 import random
-import subprocess
 import sys
 
 import chess
@@ -149,28 +148,6 @@ def test_random_reference():
         board = chess.Board(fen)
         assert sorted(w) == reference(board, chess.WHITE), fen
         assert sorted(b) == reference(board, chess.BLACK), fen
-
-
-def test_stockfish_exact_indices():
-    probe = os.environ.get("STOCKFISH_GHOST_FEATURE_PROBE")
-    if not probe:
-        pytest.skip("Set STOCKFISH_GHOST_FEATURE_PROBE to the Stockfish feature probe")
-    fens = random_fens()
-    result = subprocess.run(
-        [probe],
-        input="\n".join(fens) + "\n",
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lines = result.stdout.splitlines()
-    assert len(lines) == 2 * len(fens)
-    white, black = native(fens)
-    for index, (w, b) in enumerate(zip(white, black)):
-        for perspective, expected in enumerate((w, b)):
-            values = [int(i) for i in lines[2 * index + perspective].split()]
-            assert values[0] == len(expected)
-            assert values[1:] == sorted(expected), fens[index]
 
 
 def test_ghost_weights_receive_gradients():

@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: e3b50ca73c141d9f5f3827dbdf3f2cda6e2b7372
+          ref: 7633f22b3ea008ac562b29475c4309aee145cea1
           path: Stockfish
           persist-credentials: false
 
@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: e3b50ca73c141d9f5f3827dbdf3f2cda6e2b7372
+          ref: 7633f22b3ea008ac562b29475c4309aee145cea1
           path: Stockfish
           persist-credentials: false
 

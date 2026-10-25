@@ -3,6 +3,7 @@ from .feature_transformer import (
     ComposedFeatureTransformer,
 )
 from .features import (
+    K32H3,
     K32Q2,
     FeatureConfig,
     FullThreats,
@@ -31,6 +32,7 @@ from .router import (
 __all__ = [
     "BIAS_RANK",
     "CODEBOOK_DIM",
+    "K32H3",
     "K32Q2",
     "NUM_BIASES",
     "NUM_BIAS_EXPERTS",

@@ -20,28 +20,25 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
     stm = board.turn
     non_stm = not stm
 
-    # STM material features
-    stm_pieces = [p for p in board.piece_map().values() if p.color == stm]
-    T_us = min(max(len(stm_pieces) - 1, 0), 15)
-    pawns_us = sum(1 for p in stm_pieces if p.piece_type == chess.PAWN)
-    P_us = min(max(pawns_us, 0), min(8, T_us))
-    has_queen_us = any(p.piece_type == chess.QUEEN for p in stm_pieces)
-    Q_us = 1 if (T_us - P_us >= 1 and has_queen_us) else 0
+    def material_id(color):
+        pieces = board.occupied_co[color]
+        t = min(max(chess.popcount(pieces) - 1, 0), 15)
+        p = min(chess.popcount(board.pawns & pieces), 8, t)
+        bishops = board.bishops & pieces
+        h = (
+            0
+            if t - p >= 1 and board.queens & pieces
+            else 1
+            if t - p >= 1 and board.rooks & pieces
+            else 2
+            if t - p >= 2
+            and bishops & chess.BB_DARK_SQUARES
+            and bishops & chess.BB_LIGHT_SQUARES
+            else 3
+        )
+        return encode_material_state(t, p, h)
 
-    bishops_us = [
-        sq
-        for sq, p in board.piece_map().items()
-        if p.color == stm and p.piece_type == chess.BISHOP
-    ]
-    has_dark_us = any(
-        (chess.BB_SQUARES[sq] & 0x55AA55AA55AA55AA) != 0 for sq in bishops_us
-    )
-    has_light_us = any(
-        (chess.BB_SQUARES[sq] & ~0x55AA55AA55AA55AA) != 0 for sq in bishops_us
-    )
-    BP_us = 1 if (T_us - P_us - Q_us >= 2 and has_dark_us and has_light_us) else 0
-    mat_id_us = encode_material_state(T_us, P_us, Q_us, BP_us)
-
+    mat_id_us = material_id(stm)
     # King features
     our_ksq = board.king(stm)
     enemy_ksq = board.king(non_stm)
@@ -67,29 +64,7 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
 
     c_us = make_router_index(mat_id_us, our_king_bucket, enemy_king_bucket)
 
-    # Non-STM material features
-    non_stm_pieces = [p for p in board.piece_map().values() if p.color == non_stm]
-    T_them = min(max(len(non_stm_pieces) - 1, 0), 15)
-    pawns_them = sum(1 for p in non_stm_pieces if p.piece_type == chess.PAWN)
-    P_them = min(max(pawns_them, 0), min(8, T_them))
-    has_queen_them = any(p.piece_type == chess.QUEEN for p in non_stm_pieces)
-    Q_them = 1 if (T_them - P_them >= 1 and has_queen_them) else 0
-
-    bishops_them = [
-        sq
-        for sq, p in board.piece_map().items()
-        if p.color == non_stm and p.piece_type == chess.BISHOP
-    ]
-    has_dark_them = any(
-        (chess.BB_SQUARES[sq] & 0x55AA55AA55AA55AA) != 0 for sq in bishops_them
-    )
-    has_light_them = any(
-        (chess.BB_SQUARES[sq] & ~0x55AA55AA55AA55AA) != 0 for sq in bishops_them
-    )
-    BP_them = (
-        1 if (T_them - P_them - Q_them >= 2 and has_dark_them and has_light_them) else 0
-    )
-    mat_id_them = encode_material_state(T_them, P_them, Q_them, BP_them)
+    mat_id_them = material_id(non_stm)
 
     non_stm_flip = 56 if stm else 0
     their_ksq_oriented = enemy_ksq ^ non_stm_flip
@@ -113,14 +88,14 @@ def get_context_indices(board: chess.Board) -> tuple[int, int]:
 def test_router_bijection():
     """Verify that material state and context indices decomposition is exact and bijective."""
     # 1. Material states bijection
-    assert NUM_MATERIAL_STATES == 378
+    assert NUM_MATERIAL_STATES == 396
     for m in range(NUM_MATERIAL_STATES):
-        t, p, q, bp = decode_material_state(m)
-        m_rec = encode_material_state(t, p, q, bp)
+        t, p, h = decode_material_state(m)
+        m_rec = encode_material_state(t, p, h)
         assert m == m_rec
 
     # 2. Context indexing bijection
-    for m in [0, 100, 250, 377]:
+    for m in [0, 100, 250, 395]:
         for k1 in [0, 16, 32]:
             for k2 in [0, 31, 64]:
                 idx = make_router_index(m, k1, k2)
@@ -191,7 +166,7 @@ def test_board_symmetry_permutation():
 
 
 def test_model_dual_head_forward():
-    """Verify LayerStacks evaluates sum of heads with gradient flow."""
+    """Verify LayerStacks mixes both heads at every layer with gradient flow."""
     config = ModelConfig()
     model = NNUEModel(feature_name=DEFAULT_FEATURES, config=config)
     init_random_weights(model)

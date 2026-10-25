@@ -765,7 +765,7 @@ class SimpleLineLogger(Callback):
 
 
 class MoEDeadExpertReseeder(Callback):
-    """Periodically checks all 810,810 contexts and reseeds dead MoE experts via traffic-weighted cell splitting."""
+    """Periodically checks all 849,420 contexts and reseeds dead MoE experts via traffic-weighted cell splitting."""
 
     def __init__(
         self,

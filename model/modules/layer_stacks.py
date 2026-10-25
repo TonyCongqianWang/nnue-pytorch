@@ -68,68 +68,24 @@ class LayerStacks(nn.Module):
 
     def forward_head(
         self,
-        x: torch.Tensor,
-        codebook: torch.Tensor | None,
-        expert_indices: torch.Tensor,
-        dyn_biases: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        fake_quantize_acts: bool = True,
-        fake_quantize_weights: bool = True,
-    ) -> torch.Tensor:
-        b1_sqr, b1_lin, b2_sqr, b2_lin = dyn_biases
-        l1c_ = self.l1(x, codebook, expert_indices, fake_quantize_weights)
-
-        # Extract the short-path skip connection before fake quantization and dynamic biases
-        l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-
-        l1x_sqr = l1c_ + b1_sqr
-        l1x_lin = l1c_ + b1_lin
-
-        l1_sqr = torch.pow(l1x_sqr, 2.0)
-        if fake_quantize_acts:
-            l1_sqr = self.quantization.fake_quantize_ls_act(l1_sqr)
-
-        l1_sqr = l1_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        l1x_ = l1x_lin
-        if fake_quantize_acts:
-            l1x_ = self.quantization.fake_quantize_ls_act(l1x_)
-
-        l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
-        l1x_ = self.quantization.clip_ls_act(l1x_)
-
-        l2c_ = self.l2(l1x_, codebook, expert_indices, fake_quantize_weights)
-
-        l2x_sqr = l2c_ + b2_sqr
-        l2x_lin = l2c_ + b2_lin
-
-        l2_sqr = torch.pow(l2x_sqr, 2.0)
-        if fake_quantize_acts:
-            l2_sqr = self.quantization.fake_quantize_ls_act(l2_sqr)
-
-        l2_sqr = l2_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        l2x_ = l2x_lin
-        if fake_quantize_acts:
-            l2x_ = self.quantization.fake_quantize_ls_act(l2x_)
-
-        l2x_ = torch.cat([l2_sqr, l2x_], dim=1)
-        l2x_ = self.quantization.clip_ls_act(l2x_)
-
-        l3_input = torch.cat([l1x_, l2x_], dim=1)
-
-        l3c_ = self.output(l3_input, codebook, expert_indices, fake_quantize_weights)
-
-        if fake_quantize_acts:
-            l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
-
-        l3x_ = l3c_ + l1x_out
-        if fake_quantize_acts:
-            l3x_ = self.quantization.fake_quantize_output(l3x_)
-
-        assert l3x_.shape[1] == 1, (
-            f"Expected output shape (batch_size, 1), got {l3x_.shape}"
+        x,
+        codebook,
+        expert_indices,
+        dyn_biases,
+        fake_quantize_acts=True,
+        fake_quantize_weights=True,
+    ):
+        """Counterfactual with the same complete route on both sides."""
+        return self.forward(
+            x,
+            codebook,
+            expert_indices,
+            expert_indices,
+            dyn_biases,
+            dyn_biases,
+            fake_quantize_acts,
+            fake_quantize_weights,
         )
-        return l3x_
 
     def forward(
         self,
@@ -142,23 +98,49 @@ class LayerStacks(nn.Module):
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ) -> torch.Tensor:
-        out1 = self.forward_head(
-            x,
-            codebook,
-            e1,
-            dyn_biases_1,
-            fake_quantize_acts=fake_quantize_acts,
-            fake_quantize_weights=fake_quantize_weights,
+        def average(a, b, layer_key):
+            value = (a + b) * 0.5
+            if fake_quantize_acts:
+                # C++ averages integer affine accumulators with truncation toward zero.
+                # Round each operand first to remove floating-point matmul noise.
+                scale = self.quantization.weight_scales_dict[f"{layer_key}_bias"]
+                quantized = (
+                    torch.trunc((torch.round(a * scale) + torch.round(b * scale)) * 0.5)
+                    / scale
+                )
+                value = value + (quantized - value).detach()
+            return value
+
+        def activate(sqr, lin):
+            sqr = sqr.square()
+            if fake_quantize_acts:
+                sqr = self.quantization.fake_quantize_ls_act(sqr)
+                lin = self.quantization.fake_quantize_ls_act(lin)
+            sqr = sqr * self.quantization.sqr_crelu_correction_factor
+            return self.quantization.clip_ls_act(torch.cat([sqr, lin], dim=1))
+
+        a = self.l1(x, codebook, e1, fake_quantize_weights)
+        b = self.l1(x, codebook, e2, fake_quantize_weights)
+        skip = average(a[:, -2:-1] - a[:, -1:], b[:, -2:-1] - b[:, -1:], "ls_l1")
+        h1 = activate(
+            average(a + dyn_biases_1[0], b + dyn_biases_2[0], "ls_l1"),
+            average(a + dyn_biases_1[1], b + dyn_biases_2[1], "ls_l1"),
         )
-        out2 = self.forward_head(
-            x,
-            codebook,
-            e2,
-            dyn_biases_2,
-            fake_quantize_acts=fake_quantize_acts,
-            fake_quantize_weights=fake_quantize_weights,
+        a = self.l2(h1, codebook, e1, fake_quantize_weights)
+        b = self.l2(h1, codebook, e2, fake_quantize_weights)
+        h2 = activate(
+            average(a + dyn_biases_1[2], b + dyn_biases_2[2], "ls_l2"),
+            average(a + dyn_biases_1[3], b + dyn_biases_2[3], "ls_l2"),
         )
-        return out1 + out2
+        combined = torch.cat([h1, h2], dim=1)
+        a = self.output(combined, codebook, e1, fake_quantize_weights)
+        b = self.output(combined, codebook, e2, fake_quantize_weights)
+        value = average(a, b, "ls_output") + skip
+        return (
+            self.quantization.fake_quantize_output(value)
+            if fake_quantize_acts
+            else value
+        )
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(

@@ -118,14 +118,14 @@ class NNUEWriter:
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
 
-        # 3. Downstream Top-2 MoE Dual Router Lookup Table (810,810 uint16 = 1,621,620 bytes)
+        # 3. Downstream Top-2 MoE Dual Router Lookup Table (849,420 uint16 = 1,698,840 bytes)
         if self.verbose:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
         self.write_tensor(router_table.to(torch.uint16))
 
-        # 4. Dynamic Biases Table (512 experts x 128 int32 values = 262,144 bytes)
+        # 4. Dynamic Biases Table (64 experts x 128 int32 values = 32,768 bytes)
         coalesced_biases = model.router.get_coalesced_bias_table()
         q_biases = model.quantization.quantize_dynamic_bias(
             coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)

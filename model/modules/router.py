@@ -31,16 +31,16 @@ def ieee_matmul_precision():
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32
 
 
-NUM_MATERIAL_STATES = 378
+NUM_MATERIAL_STATES = 396
 NUM_OUR_KINGS = 33
 NUM_ENEMY_KINGS = 65
-ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 810,810
+ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
 NUM_WEIGHT_EXPERTS = 64
-NUM_BIAS_EXPERTS = 256
+NUM_BIAS_EXPERTS = 64
 NUM_BIASES = 128
 BIAS_RANK = 32
 CODEBOOK_DIM = 256
-ROUTER_HASH = 0x4475616C  # 'Dual'
+ROUTER_HASH = 0x4D6F4534  # 'MoE4'
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 
 
@@ -83,42 +83,36 @@ def get_router_hash(
     return ROUTER_HASH ^ ((num_bias_experts << 16) | num_weight_experts)
 
 
-# Precompute bijective mapping for the 378 legal material states
-_MATERIAL_STATES: list[tuple[int, int, int, int]] = []
-for _t in range(16):
-    for _p in range(min(8, _t) + 1):
-        for _q in range(2):
-            if _q == 1 and _t - _p < 1:
-                continue
-            for _bp in range(2):
-                if _bp == 1 and (_t - _p - _q < 2):
-                    continue
-                _MATERIAL_STATES.append((_t, _p, _q, _bp))
-
+# Shared enumeration with the loader and Stockfish: queen, rook, bishop pair, else.
+_MATERIAL_STATES = [
+    (t, p, h)
+    for t in range(16)
+    for p in range(min(8, t) + 1)
+    for h in range(4)
+    if t - p >= (1 if h < 2 else 2 if h == 2 else 0)
+]
 assert len(_MATERIAL_STATES) == NUM_MATERIAL_STATES
-
-_MATERIAL_ENCODE_TABLE = torch.full((16, 9, 2, 2), -1, dtype=torch.long)
-for _idx, (_t, _p, _q, _bp) in enumerate(_MATERIAL_STATES):
-    _MATERIAL_ENCODE_TABLE[_t, _p, _q, _bp] = _idx
-
+_MATERIAL_ENCODE_TABLE = torch.full((16, 9, 4), -1, dtype=torch.long)
+for _idx, (_t, _p, _h) in enumerate(_MATERIAL_STATES):
+    _MATERIAL_ENCODE_TABLE[_t, _p, _h] = _idx
 _MATERIAL_DECODE_TABLE = torch.tensor(_MATERIAL_STATES, dtype=torch.long)
 
 
-def encode_material_state(t: int, p: int, q: int, bp: int) -> int:
-    """Encodes (T, P, Q, BP) into material ID in [0, 377]."""
-    mat_id = int(_MATERIAL_ENCODE_TABLE[t, p, q, bp].item())
+def encode_material_state(t: int, p: int, h: int) -> int:
+    if not (0 <= t < 16 and 0 <= p <= min(8, t) and 0 <= h < 4):
+        raise ValueError(f"Illegal material state: T={t}, P={p}, H={h}")
+    mat_id = int(_MATERIAL_ENCODE_TABLE[t, p, h].item())
     if mat_id < 0:
-        raise ValueError(f"Illegal material state: T={t}, P={p}, Q={q}, BP={bp}")
+        raise ValueError(f"Illegal material state: T={t}, P={p}, H={h}")
     return mat_id
 
 
-def decode_material_state(mat_id: int) -> tuple[int, int, int, int]:
-    """Decodes material ID in [0, 377] into (T, P, Q, BP)."""
-    return tuple(_MATERIAL_STATES[mat_id])  # type: ignore[return-value]
+def decode_material_state(mat_id: int) -> tuple[int, int, int]:
+    return _MATERIAL_STATES[mat_id]
 
 
 def make_router_index(mat_id: int, our_king: int, enemy_king: int) -> int:
-    """Computes the 1D context index in [0, 810809]."""
+    """Computes the 1D context index in [0, 849419]."""
     return (mat_id * NUM_OUR_KINGS + our_king) * NUM_ENEMY_KINGS + enemy_king
 
 
@@ -255,7 +249,7 @@ class DualVQCodebookRouter(nn.Module):
     Dual Discrete Vector Quantization (VQ) Codebook Router for Top-2 Downstream MoE:
     - Weight Router: K1 = 64 discrete experts (6 bits) selecting layer stack weights
     - Bias Router: K2 = 256 discrete experts (8 bits) selecting 128 dynamic threshold biases via rank-32 subspace
-    - Single packed uint16 LUT of size 810,810 (1.55 MB)
+    - Single packed uint16 LUT of size 849,420 (1.55 MB)
     - 256 coalesced 128-element dynamic bias vectors (128 KB)
     """
 
@@ -277,6 +271,8 @@ class DualVQCodebookRouter(nn.Module):
         codebook_target_norm: float = DEFAULT_CODEBOOK_TARGET_NORM,
     ):
         super().__init__()
+        if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 64):
+            raise ValueError("The router LUT reserves six bits per expert ID")
         self.num_contexts = num_contexts
         self.num_weight_experts = num_weight_experts
         self.num_bias_experts = num_bias_experts
@@ -295,16 +291,15 @@ class DualVQCodebookRouter(nn.Module):
         # Material feature embedding tables
         self.embed_T = nn.Embedding(16, dim)
         self.embed_P = nn.Embedding(9, dim)
-        self.embed_Q = nn.Embedding(2, dim)
-        self.embed_BP = nn.Embedding(2, dim)
+        self.embed_H = nn.Embedding(4, dim)
 
         # Structured spatial King embedding table
         self.king_embed = StructuredKingEmbedding(dim=dim)
 
-        # Weight Router Codebook: 64 experts in R^128
+        # Weight Router Codebook: 64 experts in R^256
         self.codebook_weights = nn.Parameter(torch.empty(num_weight_experts, dim))
 
-        # Bias Router Codebook: 512 experts in R^128
+        # Bias Router Codebook: 64 experts in R^256
         self.codebook_biases = nn.Parameter(torch.empty(num_bias_experts, dim))
         self.bias_head_down = nn.Linear(dim, bias_rank, bias=False)
         self.bias_head_up = nn.Linear(bias_rank, num_biases, bias=True)
@@ -381,8 +376,7 @@ class DualVQCodebookRouter(nn.Module):
         val = 1.0 / math.sqrt(self.dim)
         nn.init.uniform_(self.embed_T.weight, -val, val)
         nn.init.uniform_(self.embed_P.weight, -val, val)
-        nn.init.uniform_(self.embed_Q.weight, -val, val)
-        nn.init.uniform_(self.embed_BP.weight, -val, val)
+        nn.init.uniform_(self.embed_H.weight, -val, val)
         nn.init.uniform_(self.codebook_weights, -val, val)
         nn.init.uniform_(self.codebook_biases, -val, val)
 
@@ -395,28 +389,26 @@ class DualVQCodebookRouter(nn.Module):
     def get_context_vector(self, c: torch.Tensor) -> torch.Tensor:
         """Computes, mean-centers, and RMS-normalizes context vector for batch of context indices c."""
         mat_id, k_us, k_them = decompose_router_index(c)
-        mat_feats = self.material_decode_table[mat_id]  # (B, 4)
+        mat_feats = self.material_decode_table[mat_id]  # (B, 3)
         t = mat_feats[:, 0]
         p = mat_feats[:, 1]
-        q = mat_feats[:, 2]
-        bp = mat_feats[:, 3]
+        h = mat_feats[:, 2]
 
-        z_mat = self.embed_T(t) + self.embed_P(p) + self.embed_Q(q) + self.embed_BP(bp)
+        z_mat = self.embed_T(t) + self.embed_P(p) + self.embed_H(h)
         z_king = self.king_embed(k_us, k_them)
         return center_and_rms_norm(z_mat + z_king, self.codebook_target_norm)
 
     def get_all_context_vectors(self) -> torch.Tensor:
-        """Computes, mean-centers, and RMS-normalizes context vectors for all 810,810 contexts."""
+        """Computes, mean-centers, and RMS-normalizes context vectors for all 849,420 contexts."""
         device = self.codebook_weights.device
 
-        # Compute z_mat for all 378 material states
-        mat_feats = self.material_decode_table  # (378, 4)
+        # Compute z_mat for all 396 material states
+        mat_feats = self.material_decode_table  # (396, 3)
         z_mat = (
             self.embed_T(mat_feats[:, 0])
             + self.embed_P(mat_feats[:, 1])
-            + self.embed_Q(mat_feats[:, 2])
-            + self.embed_BP(mat_feats[:, 3])
-        )  # (378, dim)
+            + self.embed_H(mat_feats[:, 2])
+        )  # (396, dim)
 
         # Compute z_king for all 33 x 65 = 2,145 king pairs
         all_kus = torch.arange(NUM_OUR_KINGS, device=device).repeat_interleave(
@@ -425,7 +417,7 @@ class DualVQCodebookRouter(nn.Module):
         all_kth = torch.arange(NUM_ENEMY_KINGS, device=device).repeat(NUM_OUR_KINGS)
         z_king = self.king_embed(all_kus, all_kth)  # (2145, dim)
 
-        # Outer sum: (378, 2145, dim) -> (810810, dim)
+        # Outer sum: (396, 2145, dim) -> (849420, dim)
         z_all = (z_mat.unsqueeze(1) + z_king.unsqueeze(0)).reshape(
             self.num_contexts, self.dim
         )
@@ -486,7 +478,7 @@ class DualVQCodebookRouter(nn.Module):
 
     @torch.no_grad()
     def update_lookup_table(self) -> torch.Tensor:
-        """Evaluates all 810,810 contexts and bit-packs (idx_w, idx_b) into uint16 lookup table."""
+        """Evaluates all 849,420 contexts and bit-packs (idx_w, idx_b) into uint16 lookup table."""
         with ieee_matmul_precision():
             z_all = self.get_all_context_vectors()
 
@@ -504,12 +496,12 @@ class DualVQCodebookRouter(nn.Module):
                 dist_w = z_sq + cb_w_sq - 2.0 * torch.matmul(z_chunk, cb_w.t())
                 idx_w = torch.argmin(dist_w, dim=-1)
 
-                # Bias routing (256 experts)
+                # Bias routing (64 experts)
                 dist_b = z_sq + cb_b_sq - 2.0 * torch.matmul(z_chunk, cb_b.t())
                 idx_b = torch.argmin(dist_b, dim=-1)
 
-                # Bit packing: 6 bits weight | 8 bits bias
-                packed = (idx_w & 0x3F) | ((idx_b & 0xFF) << 6)
+                # Bit packing: 6 bits weight | 6 bits bias
+                packed = (idx_w & 0x3F) | ((idx_b & 0x3F) << 6)
                 self.lut[i : i + chunk_size] = packed
 
             self.lut_valid = True
@@ -782,8 +774,8 @@ class DualVQCodebookRouter(nn.Module):
 
             e1_w = (packed_1 & 0x3F).long()
             e2_w = (packed_2 & 0x3F).long()
-            e1_b = ((packed_1 >> 6) & 0xFF).long()
-            e2_b = ((packed_2 >> 6) & 0xFF).long()
+            e1_b = ((packed_1 >> 6) & 0x3F).long()
+            e2_b = ((packed_2 >> 6) & 0x3F).long()
 
             coalesced = self.get_coalesced_bias_table()
             dyn_bias_1 = coalesced[e1_b]

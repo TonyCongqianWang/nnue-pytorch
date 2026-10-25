@@ -24,28 +24,26 @@ from model.utils.serialize import NNUEReader, NNUEWriter
 
 
 def test_material_bijection_exhaustive():
-    """Verify that all 378 valid legal material states map bijectively to [0, 377]."""
+    """Verify that all 396 valid legal material states map bijectively to [0, 395]."""
     seen_ids = set()
     for m in range(NUM_MATERIAL_STATES):
-        t, p, q, bp = decode_material_state(m)
+        t, p, h = decode_material_state(m)
         assert 0 <= t <= 15
         assert 0 <= p <= min(8, t)
-        if q == 1:
-            assert t - p >= 1
-        if bp == 1:
-            assert t - p - q >= 2
+        assert 0 <= h < 4
+        assert t - p >= (1 if h < 2 else 2 if h == 2 else 0)
 
-        encoded_id = encode_material_state(t, p, q, bp)
+        encoded_id = encode_material_state(t, p, h)
         assert encoded_id == m
         seen_ids.add(encoded_id)
 
-    assert len(seen_ids) == 378
+    assert len(seen_ids) == 396
 
     # Verify illegal states raise ValueError
     with pytest.raises(ValueError):
-        encode_material_state(0, 0, 1, 0)  # Q=1 but T-P=0
+        encode_material_state(0, 0, 0)  # Queen requires a non-pawn
     with pytest.raises(ValueError):
-        encode_material_state(1, 0, 0, 1)  # BP=1 but T-P-Q=1
+        encode_material_state(1, 0, 2)  # Bishop pair requires two non-pawns
 
 
 def test_structured_king_geometry():
@@ -145,11 +143,11 @@ def test_dual_router_eval_mode_and_bit_packing():
     lut = router.get_lookup_table()
     assert lut.shape == (ROUTER_TABLE_SIZE,)
 
-    c_sample = torch.tensor([0, 12345, 810809], dtype=torch.long)
+    c_sample = torch.tensor([0, 12345, ROUTER_TABLE_SIZE - 1], dtype=torch.long)
     packed = lut[c_sample]
 
     e_w = packed & 0x3F
-    e_b = (packed >> 6) & 0xFF
+    e_b = (packed >> 6) & 0x3F
 
     assert all(0 <= w.item() < NUM_WEIGHT_EXPERTS for w in e_w)
     assert all(0 <= b.item() < NUM_BIAS_EXPERTS for b in e_b)

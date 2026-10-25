@@ -274,7 +274,10 @@ def test_dead_expert_callback_ddp_synchronization(monkeypatch):
     shared_storage = {}
 
     def mock_broadcast(tensor, src=0):
-        key = (tensor.shape, tensor.dtype)
+        # Equal expert counts give the two parent maps identical shapes.
+        # Collectives are matched by call order, not by tensor shape.
+        ordinal = sum(rank == trainer_current_rank for rank, _ in broadcast_log)
+        key = (ordinal, tensor.shape, tensor.dtype)
         if trainer_current_rank == src:
             shared_storage[key] = tensor.clone()
         else:

@@ -141,6 +141,67 @@ struct K32Q2Extractor: IFeatureExtractor {
     }
 };
 
+struct K32H3 {
+    static constexpr std::string_view NAME = "K32H3";
+
+    static constexpr int NUM_SQ              = 64;
+    static constexpr int NUM_PT              = 12;
+    static constexpr int NUM_PLANES          = NUM_SQ * NUM_PT;
+    static constexpr int NUM_KING_BUCKETS    = NUM_SQ / 2;
+    static constexpr int NUM_HEAVY_BUCKETS   = 3;
+    static constexpr int NUM_BUCKETS         = NUM_KING_BUCKETS * NUM_HEAVY_BUCKETS;
+    static constexpr int INPUTS              = NUM_PLANES * NUM_BUCKETS;
+    static constexpr int MAX_ACTIVE_FEATURES = 32;
+
+    // clang-format off
+    static constexpr int KingBuckets[64] = {
+      -1, -1, -1, -1, 31, 30, 29, 28,
+      -1, -1, -1, -1, 27, 26, 25, 24,
+      -1, -1, -1, -1, 23, 22, 21, 20,
+      -1, -1, -1, -1, 19, 18, 17, 16,
+      -1, -1, -1, -1, 15, 14, 13, 12,
+      -1, -1, -1, -1, 11, 10, 9, 8,
+      -1, -1, -1, -1, 7, 6, 5, 4,
+      -1, -1, -1, -1, 3, 2, 1, 0
+    };
+    // clang-format on
+
+    static int feature_index(Color color, Square ksq, int heavy, Square sq, Piece p) {
+        Square o_ksq  = orient_flip_2(color, ksq, ksq);
+        auto   p_idx  = static_cast<int>(p.type()) * 2 + (p.color() != color);
+        int    bucket = KingBuckets[static_cast<int>(o_ksq)] * 3 + heavy;
+        return static_cast<int>(orient_flip_2(color, sq, ksq)) + p_idx * NUM_SQ
+             + bucket * NUM_PLANES;
+    }
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) {
+        auto& pos       = e.pos;
+        auto  pieces    = pos.piecesBB();
+        auto  ksq       = pos.kingSquare(color);
+        int heavy = pos.piecesBB(Piece(PieceType::Queen, !color)).any() ? 0
+                  : pos.piecesBB(Piece(PieceType::Rook, !color)).any() ? 1 : 2;
+
+        int j = 0;
+        for (Square sq : pieces)
+        {
+            auto p      = pos.pieceAt(sq);
+            features[j] = feature_index(color, ksq, heavy, sq, p);
+            ++j;
+        }
+        return {j, INPUTS};
+    }
+};
+
+struct K32H3Extractor: IFeatureExtractor {
+    int inputs() const override { return K32H3::INPUTS; }
+    int max_active_features() const override { return K32H3::MAX_ACTIVE_FEATURES; }
+    std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color color) const override {
+        return K32H3::fill_features_sparse(e, features, color);
+    }
+};
+
 // Pawn attackers no longer target pawns; those relationships are represented by PP_3Wide.
 constexpr int numvalidtargets[6] = {4, 10, 8, 8, 10, 0};
 
@@ -487,6 +548,8 @@ struct ComposedFeatureExtractor: IFeatureExtractor {
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
     if (name == "HalfKAv2_hm")
         return std::make_unique<HalfKAv2_hmExtractor>();
+    if (name == "K32H3")
+        return std::make_unique<K32H3Extractor>();
     if (name == "K32Q2")
         return std::make_unique<K32Q2Extractor>();
     if (name == "Full_Threats")
@@ -637,21 +700,15 @@ SparseBatch::~SparseBatch() {
     }
 }
 
-// Static lookup table mapping (T, P, Q, BP) -> mat_id in [0, 377]
-static const auto MAT_ID_TABLE = []() {
-    std::array<std::array<std::array<std::array<uint16_t, 2>, 2>, 9>, 16> table{};
-    uint16_t current_id = 0;
-    for (int t = 0; t < 16; ++t) {
-        for (int p = 0; p <= std::min(8, t); ++p) {
-            for (int q = 0; q < 2; ++q) {
-                if (q == 1 && t - p < 1) continue;
-                for (int bp = 0; bp < 2; ++bp) {
-                    if (bp == 1 && (t - p - q < 2)) continue;
-                    table[t][p][q][bp] = current_id++;
-                }
-            }
-        }
-    }
+// Legal (non-king pieces, pawns, cascading material category) states.
+static const auto MAT_ID_TABLE = [] {
+    std::array<std::array<std::array<uint16_t, 4>, 9>, 16> table{};
+    uint16_t id = 0;
+    for (int t = 0; t < 16; ++t)
+        for (int p = 0; p <= std::min(8, t); ++p)
+            for (int h = 0; h < 4; ++h)
+                if (t - p >= (h < 2 ? 1 : h == 2 ? 2 : 0))
+                    table[t][p][h] = id++;
     return table;
 }();
 
@@ -666,12 +723,12 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     // Perspective 1 (STM):
     const int T_us = std::clamp(static_cast<int>(e.pos.piecesBB(stm).count()) - 1, 0, 15);
     const int P_us = std::clamp(static_cast<int>(e.pos.piecesBB(Piece(PieceType::Pawn, stm)).count()), 0, std::min(8, T_us));
-    const int Q_us = (T_us - P_us >= 1 && e.pos.piecesBB(Piece(PieceType::Queen, stm)).any()) ? 1 : 0;
     const auto b_us = e.pos.piecesBB(Piece(PieceType::Bishop, stm));
-    const int BP_us = (T_us - P_us - Q_us >= 2 &&
-                       (b_us.bits() & 0x55AA55AA55AA55AAULL) != 0 &&
-                       (b_us.bits() & ~0x55AA55AA55AA55AAULL) != 0) ? 1 : 0;
-    const uint16_t mat_id_us = MAT_ID_TABLE[T_us][P_us][Q_us][BP_us];
+    const int H_us = T_us - P_us >= 1 && e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 0
+                     : T_us - P_us >= 1 && e.pos.piecesBB(Piece(PieceType::Rook, stm)).any() ? 1
+                     : T_us - P_us >= 2 && (b_us.bits() & 0x55AA55AA55AA55AAULL)
+                       && (b_us.bits() & ~0x55AA55AA55AA55AAULL) ? 2 : 3;
+    const uint16_t mat_id_us = MAT_ID_TABLE[T_us][P_us][H_us];
 
     const Square ourKsq = e.pos.kingSquare(stm);
     const Square ourKsqOriented = (stm == Color::Black) ? ourKsq.flippedVertically() : ourKsq;
@@ -704,12 +761,12 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     // Perspective 2 (Non-STM):
     const int T_them = std::clamp(static_cast<int>(e.pos.piecesBB(non_stm).count()) - 1, 0, 15);
     const int P_them = std::clamp(static_cast<int>(e.pos.piecesBB(Piece(PieceType::Pawn, non_stm)).count()), 0, std::min(8, T_them));
-    const int Q_them = (T_them - P_them >= 1 && e.pos.piecesBB(Piece(PieceType::Queen, non_stm)).any()) ? 1 : 0;
     const auto b_them = e.pos.piecesBB(Piece(PieceType::Bishop, non_stm));
-    const int BP_them = (T_them - P_them - Q_them >= 2 &&
-                         (b_them.bits() & 0x55AA55AA55AA55AAULL) != 0 &&
-                         (b_them.bits() & ~0x55AA55AA55AA55AAULL) != 0) ? 1 : 0;
-    const uint16_t mat_id_them = MAT_ID_TABLE[T_them][P_them][Q_them][BP_them];
+    const int H_them = T_them - P_them >= 1 && e.pos.piecesBB(Piece(PieceType::Queen, non_stm)).any() ? 0
+                     : T_them - P_them >= 1 && e.pos.piecesBB(Piece(PieceType::Rook, non_stm)).any() ? 1
+                     : T_them - P_them >= 2 && (b_them.bits() & 0x55AA55AA55AA55AAULL)
+                       && (b_them.bits() & ~0x55AA55AA55AA55AAULL) ? 2 : 3;
+    const uint16_t mat_id_them = MAT_ID_TABLE[T_them][P_them][H_them];
 
     const Square theirKsqOriented = (non_stm == Color::Black) ? enemyKsq.flippedVertically() : enemyKsq;
     int theirKingBucket;

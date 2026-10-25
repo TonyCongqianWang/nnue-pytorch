@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -106,6 +107,10 @@ class LossParams:
     """lambda configuration parameters"""
     pow_exp: float = 2.5
     """exponent of the power law used for the mean error (default=2.5)"""
+    pow_exp_endgame_reduction: float = 0.0
+    """Maximum exponent reduction: full at <=8 pieces, smoothly zero at >=24 pieces, including kings (default=0.0, disabled)."""
+    pow_exp_reference_error: float = 0.1
+    """Probability residual where the endgame loss preserves the original gradient magnitude (default=0.1)."""
     qp_asymmetry: float = 0.0
     """Adjust loss if q (prediction) > p (reference) (default=0.0)"""
     w1: float = 0.0
@@ -118,6 +123,25 @@ class LossParams:
     """Tablebase score remapping scale value (default=20000.0)"""
     tb_remap_decay: float = 0.85
     """Tablebase score remapping decay parameter (default=0.8)"""
+
+    def __post_init__(self):
+        if (
+            not math.isfinite(self.pow_exp_endgame_reduction)
+            or self.pow_exp_endgame_reduction < 0
+        ):
+            raise ValueError(
+                "pow_exp_endgame_reduction must be finite and non-negative."
+            )
+        if self.pow_exp_endgame_reduction > 0:
+            if (
+                not math.isfinite(self.pow_exp)
+                or self.pow_exp - self.pow_exp_endgame_reduction < 1
+            ):
+                raise ValueError(
+                    "The reduced loss exponent must be finite and at least 1."
+                )
+            if not 0 < self.pow_exp_reference_error <= 1:
+                raise ValueError("pow_exp_reference_error must be in (0, 1].")
 
 
 @dataclass(kw_only=True)

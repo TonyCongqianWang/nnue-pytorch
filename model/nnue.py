@@ -47,7 +47,9 @@ def remap_tablebase_score(
     return torch.where(is_mate, remapped_score, score)
 
 
-def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
+def calculate_sf_loss(
+    scorenet, score, outcome, loss_params, actual_lambda, piece_count=None
+):
     score = remap_tablebase_score(
         score,
         base=loss_params.tb_remap_base,
@@ -71,7 +73,25 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     pt = pf * actual_lambda + t * (1.0 - actual_lambda)
 
     # use a MSE-like loss function
-    loss = torch.pow(torch.abs(pt - qf), loss_params.pow_exp)
+    error = torch.abs(pt - qf)
+    if loss_params.pow_exp_endgame_reduction == 0.0:
+        loss = torch.pow(error, loss_params.pow_exp)
+    else:
+        if piece_count is None:
+            raise ValueError(
+                "piece_count is required for the endgame exponent reduction."
+            )
+        # Counts include both kings. Smoothstep avoids sharp changes at the endpoints.
+        counts = piece_count.reshape_as(scorenet).to(dtype=scorenet.dtype)
+        phase = ((24.0 - counts) / 16.0).clamp(0.0, 1.0)
+        phase = phase.square() * (3.0 - 2.0 * phase)
+        exponent = loss_params.pow_exp - loss_params.pow_exp_endgame_reduction * phase
+        # Match the original dL/d|error| at the reference residual. Lowering the
+        # exponent then redistributes pressure rather than simply boosting endgames.
+        normalization = (loss_params.pow_exp / exponent) * torch.pow(
+            loss_params.pow_exp_reference_error, loss_params.pow_exp - exponent
+        )
+        loss = normalization * torch.pow(error, exponent)
     if loss_params.qp_asymmetry != 0.0:
         loss = loss * ((qf > pt) * loss_params.qp_asymmetry + 1)
 
@@ -374,7 +394,8 @@ class NNUE(nn.Module):
             _black_indices,
             outcome,
             score,
-            *_rest,
+            piece_count,
+            _queen_bucket,
         ) = batch
 
         scorenet = scorenet * self.model.quantization.nnue2score
@@ -388,7 +409,12 @@ class NNUE(nn.Module):
         )
 
         sf_loss = calculate_sf_loss(
-            scorenet, score, outcome, self.config.loss_params, actual_lambda
+            scorenet,
+            score,
+            outcome,
+            self.config.loss_params,
+            actual_lambda,
+            piece_count,
         )
 
         return sf_loss

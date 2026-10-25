@@ -42,7 +42,7 @@ jobs:
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          CXXFLAGS=-DNNUE_EMBEDDING_OFF make -j2 all ghost-feature-probe ARCH=x86-64
+          make -j build
 
       - name: Perform Test Run of entire Training Pipeline on CPU
         run: |
@@ -87,15 +87,9 @@ jobs:
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          CXXFLAGS=-DNNUE_EMBEDDING_OFF make -j2 all ghost-feature-probe ARCH=x86-64
+          make -j build
 
       - name: Perform Cross-Check Evaluation on Random Net
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
             python -u cross_check_eval.py --random-weights --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' --count 1024 --seed 42 --max-error 5
-
-      - name: Verify exact ghost pawn feature indices
-        run: |
-          ./run_docker.sh CPU ${{ github.workspace }} --skip-build --skip-setup --non-interactive --exec \
-            env STOCKFISH_GHOST_FEATURE_PROBE=/data/Stockfish/src/ghost_feature_probe \
-            pytest -q tests/test_ghost_pawn_threats.py

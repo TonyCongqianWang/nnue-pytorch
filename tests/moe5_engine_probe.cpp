@@ -52,10 +52,32 @@ int main(int argc, char** argv) {
                 return false;
             }
             auto trace = net->trace_evaluate(pos, *fresh, *freshCache);
-            if (trace.positional[0] != incremental || trace.positional[0] != trace.positional[3])
+            if (trace.positional[0] != incremental)
             {
-                std::cerr << "Trace/symmetry mismatch at " << pos.fen() << '\n';
+                std::cerr << "Trace mismatch at " << pos.fen() << '\n';
                 return false;
+            }
+            if (!pos.checkers())
+            {
+                std::string oppositeFen = pos.fen();
+                const auto turn = oppositeFen.find(' ') + 1;
+                oppositeFen[turn] = oppositeFen[turn] == 'w' ? 'b' : 'w';
+                // A turn toggle is a view test, not a legal null move with EP.
+                const auto ep = oppositeFen.find(' ', oppositeFen.find(' ', turn) + 1) + 1;
+                oppositeFen.replace(ep, oppositeFen.find(' ', ep) - ep, "-");
+                Position opposite;
+                StateInfo oppositeState;
+                if (opposite.set(oppositeFen, false, &oppositeState))
+                {
+                    std::cerr << "Cannot invert perspective at " << pos.fen() << '\n';
+                    return false;
+                }
+                fresh->reset();
+                if (net->evaluate(opposite, *fresh, *freshCache) != -incremental)
+                {
+                    std::cerr << "Perspective sign mismatch at " << pos.fen() << '\n';
+                    return false;
+                }
             }
             ++checked;
             return true;
@@ -86,5 +108,5 @@ int main(int argc, char** argv) {
                 return 9;
         }
     }
-    std::cout << "Verified " << checked << " incremental/fresh positions and trace symmetry\n";
+    std::cout << "Verified " << checked << " incremental/fresh positions and actual-route tracing / perspective inversion\n";
 }

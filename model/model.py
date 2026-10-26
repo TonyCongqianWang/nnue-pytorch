@@ -25,7 +25,8 @@ class NNUEModel(nn.Module):
         self.L3 = config.L3
 
         self.quantize_config = config.quantize_config
-        self.quantization = QuantizationManager(config.quantize_config)
+        hidden_sizes = (config.L2 // 2, config.L3 // 2)
+        self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = 64
 
@@ -35,6 +36,8 @@ class NNUEModel(nn.Module):
         self.feature_hash = self.input.HASH
         self.router = DualVQCodebookRouter(
             quantization=self.quantization,
+            hidden_sizes=hidden_sizes,
+            num_biases=2 * sum(hidden_sizes),
             balance_cost=config.moe_weight_balance_cost,
             bias_balance_cost=config.moe_bias_balance_cost,
             diversity_cost=config.moe_weight_diversity_cost,

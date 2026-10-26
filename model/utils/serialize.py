@@ -65,7 +65,6 @@ def get_histogram_callback(hist_title: str, verbose: bool):
 
 from ..modules.router import (
     NUM_BIAS_EXPERTS,
-    NUM_BIASES,
     ROUTER_TABLE_SIZE,
     get_router_hash,
 )
@@ -125,7 +124,7 @@ class NNUEWriter:
             print_routing_profile(model)
         self.write_tensor(router_table.to(torch.uint16))
 
-        # 4. Dynamic Biases Table (256 experts x 128 int32 values = 131,072 bytes)
+        # 4. Dynamic Biases Table (256 experts x 64 int32 values = 65,536 bytes)
         coalesced_biases = model.router.get_coalesced_bias_table()
         q_biases = model.quantization.quantize_dynamic_bias(
             coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)
@@ -280,7 +279,9 @@ class NNUEReader:
             )
         self.model.router.load_lookup_table(raw_router)
 
-        raw_biases = self.tensor(np.int32, [NUM_BIAS_EXPERTS, NUM_BIASES])
+        raw_biases = self.tensor(
+            np.int32, [NUM_BIAS_EXPERTS, self.model.router.num_biases]
+        )
         biases = self.model.quantization.dequantize_dynamic_bias(raw_biases)
         self.model.router.load_coalesced_biases(biases)
 

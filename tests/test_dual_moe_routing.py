@@ -107,7 +107,7 @@ def test_dual_router_training_gradient_flow():
     assert all(0 <= idx.item() < NUM_WEIGHT_EXPERTS for idx in e2_w)
 
     for b in dyn_biases_1 + dyn_biases_2:
-        assert b.shape == (4, 32)
+        assert b.shape == (4, 16)
 
     assert moe_loss.ndim == 0
     assert commit_loss.ndim == 0
@@ -161,14 +161,14 @@ def test_dual_router_eval_mode_and_bit_packing():
     e1_w, e2_w, dyn_b1, dyn_b2, *_ = router(c_sample, c_sample)
     assert torch.equal(e1_w, e_w)
     assert torch.equal(e2_w, e_w)
-    assert torch.equal(dyn_b1[0], coalesced_biases[e_b, 0:32])
-    assert torch.equal(dyn_b1[1], coalesced_biases[e_b, 32:64])
-    assert torch.equal(dyn_b1[2], coalesced_biases[e_b, 64:96])
-    assert torch.equal(dyn_b1[3], coalesced_biases[e_b, 96:128])
-    assert torch.equal(dyn_b2[0], coalesced_biases[e_b, 0:32])
-    assert torch.equal(dyn_b2[1], coalesced_biases[e_b, 32:64])
-    assert torch.equal(dyn_b2[2], coalesced_biases[e_b, 64:96])
-    assert torch.equal(dyn_b2[3], coalesced_biases[e_b, 96:128])
+    assert torch.equal(dyn_b1[0], coalesced_biases[e_b, 0:16])
+    assert torch.equal(dyn_b1[1], coalesced_biases[e_b, 16:32])
+    assert torch.equal(dyn_b1[2], coalesced_biases[e_b, 32:48])
+    assert torch.equal(dyn_b1[3], coalesced_biases[e_b, 48:64])
+    assert torch.equal(dyn_b2[0], coalesced_biases[e_b, 0:16])
+    assert torch.equal(dyn_b2[1], coalesced_biases[e_b, 16:32])
+    assert torch.equal(dyn_b2[2], coalesced_biases[e_b, 32:48])
+    assert torch.equal(dyn_b2[3], coalesced_biases[e_b, 48:64])
 
 
 def test_dead_expert_reseeding():
@@ -277,8 +277,8 @@ def test_bias_lut_preserves_highest_eight_bit_id():
     indices = torch.tensor([0, ROUTER_TABLE_SIZE - 1])
     e1, e2, b1, b2, *_ = router(indices, indices)
     assert torch.all(e1 == 63) and torch.all(e2 == 63)
-    assert torch.equal(b1[0], biases[255, :32].expand(2, -1))
-    assert torch.equal(b2[3], biases[255, 96:128].expand(2, -1))
+    assert torch.equal(b1[0], biases[255, :16].expand(2, -1))
+    assert torch.equal(b2[3], biases[255, 48:64].expand(2, -1))
 
 
 def test_unit_l2_basis_initialization_preserves_layer_variance():

@@ -10,6 +10,6 @@ class LayerStacksConfig:
     L1: Annotated[int, tyro.conf.arg(name="l1")] = 1024
     """Size of first hidden layer."""
     L2: Annotated[int, tyro.conf.arg(name="l2")] = 32
-    """Size of second hidden layer."""
+    """Total raw second-layer width across both MoE5 perspectives."""
     L3: Annotated[int, tyro.conf.arg(name="l3")] = 32
-    """Size of third hidden layer."""
+    """Total raw third-layer width across both MoE5 perspectives."""

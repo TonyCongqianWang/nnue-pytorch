@@ -660,6 +660,12 @@ class SimpleLineLogger(Callback):
             loss_val = trainer.callback_metrics.get(
                 self.train_metric_step, float("nan")
             )
+            sf_val = trainer.callback_metrics.get("sf_loss", None)
+            moe_val = trainer.callback_metrics.get("moe_loss", None)
+            if sf_val is not None and moe_val is not None:
+                loss_str = f"{self.train_metric_step}={loss_val:.5f} (sf={sf_val:.5f}, moe={moe_val:.5f})"
+            else:
+                loss_str = f"{self.train_metric_step}={loss_val:.5f}"
 
             print(
                 f"Epoch {trainer.current_epoch:>2} (Train): "
@@ -667,7 +673,7 @@ class SimpleLineLogger(Callback):
                 f"{current_step:>5}/{total_batches:<5} "
                 f"[{self._format_time(elapsed_total)}<{self._format_time(remaining)}, "
                 f"{rate:>6.2f}it/s, "
-                f"{self.train_metric_step}={loss_val:.5f}, "
+                f"{loss_str}, "
                 f"v_num={trainer.logger.version}]",
                 flush=True,
             )
@@ -681,9 +687,16 @@ class SimpleLineLogger(Callback):
             return
 
         train_loss = trainer.callback_metrics.get(self.train_metric_epoch, float("nan"))
+        sf_loss_epoch = trainer.callback_metrics.get("train_sf_loss_epoch", None)
+        moe_loss_epoch = trainer.callback_metrics.get("train_moe_loss_epoch", None)
         unique_val = trainer.callback_metrics.get("unique", None)
         total_val = trainer.callback_metrics.get("total", None)
         preskip_val = trainer.callback_metrics.get("preskip", None)
+
+        if sf_loss_epoch is not None and moe_loss_epoch is not None:
+            loss_str = f"{self.train_metric_epoch}={train_loss:.5f} (sf={sf_loss_epoch:.5f}, moe={moe_loss_epoch:.5f})"
+        else:
+            loss_str = f"{self.train_metric_epoch}={train_loss:.5f}"
 
         unique_str = f", unique={unique_val:.0f}" if unique_val is not None else ""
         total_str = f", total={total_val:.0f}" if total_val is not None else ""
@@ -691,7 +704,7 @@ class SimpleLineLogger(Callback):
 
         print(
             f"Epoch {trainer.current_epoch:>2} (Train): "
-            f"[{self.train_metric_epoch}={train_loss:.5f}"
+            f"[{loss_str}"
             f"{unique_str}{total_str}{preskip_str}]",
             flush=True,
         )
@@ -749,3 +762,216 @@ class SimpleLineLogger(Callback):
             f"[{self.val_metric}={val_loss:.5f}]",
             flush=True,
         )
+
+
+class MoEDeadExpertReseeder(Callback):
+    """Periodically reseeds experts with low traffic EMA via traffic-weighted cell splitting."""
+
+    def __init__(
+        self,
+        reseed_interval: int = 1024,
+        temperature: float = 0.5,
+        min_relative_utilization: float = 0.064,
+    ):
+        super().__init__()
+        self.reseed_interval = reseed_interval
+        self.temperature = temperature
+        self.min_relative_utilization = min_relative_utilization
+
+    @torch.no_grad()
+    @torch.compiler.disable
+    def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
+        if (
+            self.reseed_interval > 0
+            and trainer.global_step > 0
+            and trainer.global_step % self.reseed_interval == 0
+        ):
+            from .engine import _unwrap_module
+
+            unwrapped = _unwrap_module(trainer.model)
+            router = unwrapped.model.router
+            is_ddp = (
+                dist.is_available()
+                and dist.is_initialized()
+                and getattr(trainer, "world_size", 1) > 1
+            )
+            rank = getattr(trainer, "rank", 0)
+
+            # In DDP, rank 0 determines dead experts and executes cell splitting.
+            # Other ranks wait for broadcast parent tensors to avoid divergence and collective desync.
+            if not is_ddp or rank == 0:
+                router.reseed_dead_experts_from_traffic(
+                    temperature=self.temperature,
+                    min_relative_utilization=self.min_relative_utilization,
+                )
+
+                parent_map_w = getattr(router, "last_reseed_parents_w", {})
+                parent_map_b = getattr(router, "last_reseed_parents_b", {})
+            else:
+                parent_map_w, parent_map_b = {}, {}
+
+            parent_tensor_w = torch.full(
+                (router.num_weight_experts,),
+                -1,
+                dtype=torch.long,
+                device=router.codebook_weights.device,
+            )
+            parent_tensor_b = torch.full(
+                (router.num_bias_experts,),
+                -1,
+                dtype=torch.long,
+                device=router.codebook_biases.device,
+            )
+            if rank == 0:
+                for child, parent in parent_map_w.items():
+                    parent_tensor_w[child] = parent
+                for child, parent in parent_map_b.items():
+                    parent_tensor_b[child] = parent
+
+            if is_ddp:
+                dist.broadcast(parent_tensor_w, src=0)
+                dist.broadcast(parent_tensor_b, src=0)
+
+                if (parent_tensor_w >= 0).any():
+                    dist.broadcast(router.codebook_weights.data, src=0)
+                    self._copy_optimizer_state(
+                        trainer.optimizer, router.codebook_weights, parent_tensor_w
+                    )
+
+                if (parent_tensor_b >= 0).any():
+                    dist.broadcast(router.codebook_biases.data, src=0)
+                    self._copy_optimizer_state(
+                        trainer.optimizer, router.codebook_biases, parent_tensor_b
+                    )
+            else:
+                if (parent_tensor_w >= 0).any():
+                    self._copy_optimizer_state(
+                        trainer.optimizer, router.codebook_weights, parent_tensor_w
+                    )
+                if (parent_tensor_b >= 0).any():
+                    self._copy_optimizer_state(
+                        trainer.optimizer, router.codebook_biases, parent_tensor_b
+                    )
+
+            if rank == 0:
+                if parent_map_w:
+                    print(
+                        f"[Step {trainer.global_step}] Reseeded {len(parent_map_w)} dead weight expert(s): "
+                        f"{self._reseed_description(router, 'weights', parent_map_w)}",
+                        flush=True,
+                    )
+                if parent_map_b:
+                    print(
+                        f"[Step {trainer.global_step}] Reseeded {len(parent_map_b)} dead bias expert(s): "
+                        f"{self._reseed_description(router, 'biases', parent_map_b)}",
+                        flush=True,
+                    )
+
+    @torch.compiler.disable
+    def on_validation_epoch_start(self, trainer):
+        from .engine import _unwrap_module
+
+        router = _unwrap_module(trainer.model).model.router
+        router.collect_lut_diagnostics = getattr(
+            trainer, "rank", 0
+        ) == 0 and not getattr(trainer, "sanity_checking", False)
+
+    @torch.no_grad()
+    @torch.compiler.disable
+    def on_validation_epoch_end(self, trainer):
+        if getattr(trainer, "rank", 0) != 0 or getattr(
+            trainer, "sanity_checking", False
+        ):
+            return
+        from model.modules.router import MOE_LOSS_COMPONENTS, ieee_matmul_precision
+
+        from .engine import _unwrap_module
+
+        router = _unwrap_module(trainer.model).model.router
+        # These are training snapshots. Validation must not alter traffic EMAs.
+        for name in ("weights", "biases"):
+            hard = getattr(router, f"ema_traffic_{name}").detach().float().cpu()
+            soft = getattr(router, f"ema_soft_{name}").detach().float().cpu()
+            codebook = router.codebook_w if name == "weights" else router.codebook_b
+            with ieee_matmul_precision():
+                normalized = torch.nn.functional.normalize(codebook, dim=1)
+                cosine = normalized @ normalized.T
+            cosine.fill_diagonal_(-torch.inf)
+            k = hard.numel()
+            max_pair = cosine.flatten().argmax().item()
+            pair = (max_pair // k, max_pair % k)
+            max_cosine = cosine[pair].item()
+            floor = self.min_relative_utilization / k
+            mass = hard / hard.sum().clamp_min(1e-12)
+            effective = torch.exp(-(mass * mass.clamp_min(1e-12).log()).sum()).item()
+            lowest = hard.argsort()[:5].tolist()
+            tail = "; ".join(
+                f"{i}:hard={hard[i]:.3g},K*hard={k * hard[i]:.3g},soft={soft[i]:.3g}"
+                for i in lowest
+            )
+            print(
+                f"[Routing {name}, rank-0 training EMA] min={hard.min():.3g} "
+                f"max={hard.max():.3g} effective={effective:.1f}/{k} "
+                f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
+                flush=True,
+            )
+            geometry = f"max_cos={max_cosine:.5f} pair={pair}"
+            if router.lut_margin_valid:
+                row = 0 if name == "weights" else 1
+                gap_min, gap_mean, near_ties = (
+                    router.lut_margin_stats[row].cpu().tolist()
+                )
+                geometry += (
+                    f"; LUT margin sample n={router.lut_margin_samples} "
+                    f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
+                )
+            print(f"[Routing geometry {name}] {geometry}", flush=True)
+        router.collect_lut_diagnostics = False
+        terms = [
+            f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
+            for name in MOE_LOSS_COMPONENTS
+            if f"train_moe_{name}_epoch" in trainer.callback_metrics
+        ]
+        if terms:
+            print("[MoE weighted epoch losses] " + ", ".join(terms), flush=True)
+
+    @staticmethod
+    def _reseed_description(router, name, parents):
+        descriptions = []
+        for child, parent in sorted(parents.items()):
+            detail = router.last_reseed_details[name][child]
+            descriptions.append(
+                f"{child}<-{parent} (low EMA; "
+                f"traffic={detail['traffic']:.3g}, floor={detail['floor']:.3g})"
+            )
+        return "; ".join(descriptions)
+
+    def _copy_optimizer_state(self, optimizer, param, parent_tensor):
+        """Copies optimizer momentum and second moments from parent to child for reseeded experts.
+
+        The parent cell retains its momentum buffers intact.
+        """
+        if optimizer is None:
+            return
+        state = optimizer.state.get(param, None)
+        if state is None:
+            return
+        children = torch.nonzero(parent_tensor >= 0).flatten()
+        for child_idx in children:
+            parent_idx = parent_tensor[child_idx]
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key in state and state[key] is not None:
+                    state[key][child_idx].copy_(state[key][parent_idx])
+
+    def _reset_optimizer_state(self, optimizer, param, reseeded_indices):
+        if optimizer is None:
+            return
+        state = optimizer.state.get(param, None)
+        if state is None:
+            return
+        idx_tensor = torch.tensor(
+            reseeded_indices, device=param.device, dtype=torch.long
+        )
+        for key in ("exp_avg", "exp_avg_sq"):
+            if key in state and state[key] is not None:
+                state[key].index_fill_(0, idx_tensor, 0.0)

@@ -1,5 +1,8 @@
 # MoE4 experiment
 
+Historical architecture, preserved by the first commit on `moe5`. See
+[MoE5](moe5.md) for the current dimensions, perspective ordering and checks.
+
 The network uses 64 layer-stack experts and 256 bias experts. Each perspective's
 uint16 router entry packs the weight ID in bits 0–5 and bias ID in bits 6–13;
 bits 14–15 are zero. Downstream weights and biases remain coalesced on disk.

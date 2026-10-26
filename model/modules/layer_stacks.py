@@ -20,6 +20,17 @@ class LayerStacks(nn.Module):
     ):
         super().__init__()
 
+        if (
+            config.L1 <= 0
+            or config.L1 % 2
+            or config.L2 < 4
+            or config.L2 % 2
+            or config.L3 < 2
+            or config.L3 % 2
+        ):
+            raise ValueError(
+                "MoE5 requires even widths and at least four total L2 neurons"
+            )
         self.count = count
         self.L1 = config.L1
         self.L2 = config.L2
@@ -30,7 +41,7 @@ class LayerStacks(nn.Module):
 
         self.l1 = MoeLinear(
             2 * self.L1 // 2,
-            self.L2,
+            self.L2 // 2,
             count,
             rank=rank,
             codebook_dim=codebook_dim,
@@ -39,7 +50,7 @@ class LayerStacks(nn.Module):
         )
         self.l2 = MoeLinear(
             self.L2 * 2,
-            self.L3,
+            self.L3 // 2,
             count,
             rank=rank,
             codebook_dim=codebook_dim,
@@ -119,23 +130,36 @@ class LayerStacks(nn.Module):
             sqr = sqr * self.quantization.sqr_crelu_correction_factor
             return self.quantization.clip_ls_act(torch.cat([sqr, lin], dim=1))
 
+        # FT is [STM, opponent]. Hidden activations are grouped by activation
+        # kind, then perspective: [A_sq, B_sq, A_lin, B_lin].
+        def swap_ft(value):
+            return torch.cat(value.chunk(2, dim=1)[::-1], dim=1)
+
+        def swap_hidden(value):
+            return value.view(value.shape[0], 2, 2, -1).flip(2).reshape_as(value)
+
         a = self.l1(x, codebook, e1, fake_quantize_weights)
-        b = self.l1(x, codebook, e2, fake_quantize_weights)
-        skip = average(a[:, -2:-1] - a[:, -1:], b[:, -2:-1] - b[:, -1:], "ls_l1")
+        b = self.l1(swap_ft(x), codebook, e2, fake_quantize_weights)
+        skip = average(a[:, -2:-1] - a[:, -1:], b[:, -1:] - b[:, -2:-1], "ls_l1")
         h1 = activate(
-            average(a + dyn_biases_1[0], b + dyn_biases_2[0], "ls_l1"),
-            average(a + dyn_biases_1[1], b + dyn_biases_2[1], "ls_l1"),
+            torch.cat([a + dyn_biases_1[0], b + dyn_biases_2[0]], dim=1),
+            torch.cat([a + dyn_biases_1[1], b + dyn_biases_2[1]], dim=1),
         )
         a = self.l2(h1, codebook, e1, fake_quantize_weights)
-        b = self.l2(h1, codebook, e2, fake_quantize_weights)
+        b = self.l2(swap_hidden(h1), codebook, e2, fake_quantize_weights)
         h2 = activate(
-            average(a + dyn_biases_1[2], b + dyn_biases_2[2], "ls_l2"),
-            average(a + dyn_biases_1[3], b + dyn_biases_2[3], "ls_l2"),
+            torch.cat([a + dyn_biases_1[2], b + dyn_biases_2[2]], dim=1),
+            torch.cat([a + dyn_biases_1[3], b + dyn_biases_2[3]], dim=1),
         )
-        combined = torch.cat([h1, h2], dim=1)
-        a = self.output(combined, codebook, e1, fake_quantize_weights)
-        b = self.output(combined, codebook, e2, fake_quantize_weights)
-        value = average(a, b, "ls_output") + skip
+        a = self.output(torch.cat([h1, h2], dim=1), codebook, e1, fake_quantize_weights)
+        b = self.output(
+            torch.cat([swap_hidden(h1), swap_hidden(h2)], dim=1),
+            codebook,
+            e2,
+            fake_quantize_weights,
+        )
+        # B predicts in opponent coordinates. Convert to STM before averaging.
+        value = average(a, -b, "ls_output") + skip
         return (
             self.quantization.fake_quantize_output(value)
             if fake_quantize_acts

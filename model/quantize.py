@@ -83,7 +83,10 @@ class QuantizationConfig:
 
 
 class QuantizationManager:
-    def __init__(self, config: QuantizationConfig):
+    def __init__(
+        self, config: QuantizationConfig, hidden_sizes: tuple[int, int] = (16, 16)
+    ):
+        self.hidden_sizes = hidden_sizes
         self.config = config
         self.nnue2score = config.nnue2score
         self.weight_scale_hidden = [
@@ -262,8 +265,8 @@ class QuantizationManager:
         s2 = self.weight_scales_dict["ls_l2_bias"]
         return torch.cat(
             [
-                torch.full((64,), s1, device=device, dtype=dtype),
-                torch.full((64,), s2, device=device, dtype=dtype),
+                torch.full((2 * self.hidden_sizes[0],), s1, device=device, dtype=dtype),
+                torch.full((2 * self.hidden_sizes[1],), s2, device=device, dtype=dtype),
             ]
         )
 

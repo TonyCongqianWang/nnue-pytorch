@@ -174,7 +174,7 @@ def test_model_dual_head_forward():
     x = torch.randn(4, config.L1)
     e1 = torch.tensor([0, 5, 12, 31])
     e2 = torch.tensor([31, 12, 5, 0])
-    b_dummy = torch.randn(4, 32)
+    b_dummy = torch.randn(4, 16)
     dyn_b1 = (b_dummy, b_dummy, b_dummy, b_dummy)
     dyn_b2 = (b_dummy, b_dummy, b_dummy, b_dummy)
 
@@ -190,9 +190,9 @@ def test_model_dual_head_forward():
     )
     assert out.shape == (4, 1)
 
-    # Commutative symmetry: H_{e1, b1} + H_{e2, b2} == H_{e2, b2} + H_{e1, b1}
+    # Exchange perspective views and complete routes: the STM score negates.
     out_rev = model.layer_stacks(
-        x,
+        torch.cat(x.chunk(2, dim=1)[::-1], dim=1),
         model.router.codebook,
         e2,
         e1,
@@ -201,4 +201,4 @@ def test_model_dual_head_forward():
         fake_quantize_acts=False,
         fake_quantize_weights=False,
     )
-    assert torch.allclose(out, out_rev, atol=1e-6)
+    assert torch.allclose(out, -out_rev, atol=1e-6)

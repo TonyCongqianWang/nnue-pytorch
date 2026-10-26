@@ -37,10 +37,10 @@ NUM_ENEMY_KINGS = 65
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
 NUM_WEIGHT_EXPERTS = 64
 NUM_BIAS_EXPERTS = 256
-NUM_BIASES = 128
+NUM_BIASES = 64
 BIAS_RANK = 32
 CODEBOOK_DIM = 256
-ROUTER_HASH = 0x4D6F4534  # 'MoE4'
+ROUTER_HASH = 0x4D6F4535  # 'MoE5'
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 # Weighted contributions, ordered by router, for inexpensive epoch accumulation.
 MOE_LOSS_COMPONENTS = tuple(
@@ -86,7 +86,7 @@ def get_router_hash(
     num_weight_experts: int = NUM_WEIGHT_EXPERTS,
     num_bias_experts: int = NUM_BIAS_EXPERTS,
 ) -> int:
-    """Computes the effective 32-bit router hash combining base 'Dual' and expert counts."""
+    """Combines the architecture tag and expert counts into a 32-bit router hash."""
     return ROUTER_HASH ^ ((num_bias_experts << 16) | num_weight_experts)
 
 
@@ -255,9 +255,9 @@ class DualVQCodebookRouter(nn.Module):
     """
     Dual Discrete Vector Quantization (VQ) Codebook Router for Top-2 Downstream MoE:
     - Weight Router: K1 = 64 discrete experts (6 bits) selecting layer stack weights
-    - Bias Router: K2 = 256 discrete experts (8 bits) selecting 128 dynamic threshold biases via rank-32 subspace
+    - Bias Router: K2 = 256 discrete experts (8 bits) selecting 64 dynamic threshold biases via rank-32 subspace
     - Single packed uint16 LUT of size 849,420 (1.55 MB)
-    - 256 coalesced 128-element dynamic bias vectors (128 KB)
+    - 256 coalesced 64-element dynamic bias vectors (64 KB)
     """
 
     def __init__(
@@ -279,6 +279,7 @@ class DualVQCodebookRouter(nn.Module):
         bias_balance_cost: float = 0.004,
         bias_temperature: float = 0.2,
         bias_diversity_cost: float = 0.02,
+        hidden_sizes: tuple[int, int] = (16, 16),
     ):
         super().__init__()
         if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 256):
@@ -290,6 +291,11 @@ class DualVQCodebookRouter(nn.Module):
         self.num_bias_experts = num_bias_experts
         self.dim = dim
         self.bias_rank = bias_rank
+        if num_biases != 2 * sum(hidden_sizes):
+            raise ValueError(
+                "Dynamic biases must match the two half-width hidden layers"
+            )
+        self.hidden_sizes = hidden_sizes
         self.num_biases = num_biases
         self.commitment_cost = commitment_cost
         self.balance_cost = balance_cost
@@ -745,17 +751,9 @@ class DualVQCodebookRouter(nn.Module):
             dyn_bias_1 = dyn_bias[:half]
             dyn_bias_2 = dyn_bias[half:]
 
-            b1_sqr = dyn_bias_1[:, 0:32]
-            b1_lin = dyn_bias_1[:, 32:64]
-            b2_sqr = dyn_bias_1[:, 64:96]
-            b2_lin = dyn_bias_1[:, 96:128]
-            dyn_biases_1 = (b1_sqr, b1_lin, b2_sqr, b2_lin)
-
-            b1_sqr_2 = dyn_bias_2[:, 0:32]
-            b1_lin_2 = dyn_bias_2[:, 32:64]
-            b2_sqr_2 = dyn_bias_2[:, 64:96]
-            b2_lin_2 = dyn_bias_2[:, 96:128]
-            dyn_biases_2 = (b1_sqr_2, b1_lin_2, b2_sqr_2, b2_lin_2)
+            chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
+            dyn_biases_1 = dyn_bias_1.split(chunks, dim=1)
+            dyn_biases_2 = dyn_bias_2.split(chunks, dim=1)
 
             return (
                 e1_w,
@@ -781,18 +779,9 @@ class DualVQCodebookRouter(nn.Module):
             dyn_bias_1 = coalesced[e1_b]
             dyn_bias_2 = coalesced[e2_b]
 
-            dyn_biases_1 = (
-                dyn_bias_1[:, 0:32],
-                dyn_bias_1[:, 32:64],
-                dyn_bias_1[:, 64:96],
-                dyn_bias_1[:, 96:128],
-            )
-            dyn_biases_2 = (
-                dyn_bias_2[:, 0:32],
-                dyn_bias_2[:, 32:64],
-                dyn_bias_2[:, 64:96],
-                dyn_bias_2[:, 96:128],
-            )
+            chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
+            dyn_biases_1 = dyn_bias_1.split(chunks, dim=1)
+            dyn_biases_2 = dyn_bias_2.split(chunks, dim=1)
 
             zero = torch.tensor(0.0, device=c_us.device)
             return e1_w, e2_w, dyn_biases_1, dyn_biases_2, zero, zero, zero

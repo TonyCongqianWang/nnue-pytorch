@@ -316,3 +316,30 @@ def test_dead_expert_callback_ddp_synchronization(monkeypatch):
     assert state_w_1["exp_avg"][0].sum() == float(router_1.dim)
     assert torch.equal(state_w_1["exp_avg"], state_w_0["exp_avg"])
     assert torch.equal(state_w_1["exp_avg_sq"], state_w_0["exp_avg_sq"])
+
+
+def test_bias_reseeding_floor_scales_with_capacity():
+    """A live 256-way bias cell must not inherit the 64-way absolute floor."""
+    torch.manual_seed(7)
+    router = DualVQCodebookRouter(num_contexts=256, dim=16)
+    # Give every bias expert exactly one LUT context, independent of material.
+    router.get_all_context_vectors = lambda: router.codebook_b.detach().clone()
+    router.ema_traffic_biases[0] = 0.0004
+    _, changed = router.reseed_dead_experts_context_wide()
+    assert not changed
+
+    router.ema_traffic_biases[0] = 0.0001
+    router.reseed_dead_experts_context_wide()
+    detail = router.last_reseed_details["biases"][0]
+    assert detail["low_traffic"] and not detail["zero_contexts"]
+    assert detail["floor"] == 0.00025
+    assert abs(detail["traffic"] - 0.0001) < 1e-9
+
+
+def test_zero_context_reseeding_remains_independent_of_traffic():
+    torch.manual_seed(7)
+    router = DualVQCodebookRouter(num_contexts=255, dim=16)
+    router.get_all_context_vectors = lambda: router.codebook_b[:-1].detach().clone()
+    router.reseed_dead_experts_context_wide()
+    detail = router.last_reseed_details["biases"][255]
+    assert detail["zero_contexts"] and not detail["low_traffic"]

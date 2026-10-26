@@ -147,7 +147,7 @@ def test_dual_router_eval_mode_and_bit_packing():
     packed = lut[c_sample]
 
     e_w = packed & 0x3F
-    e_b = (packed >> 6) & 0x3F
+    e_b = (packed >> 6) & 0xFF
 
     assert all(0 <= w.item() < NUM_WEIGHT_EXPERTS for w in e_w)
     assert all(0 <= b.item() < NUM_BIAS_EXPERTS for b in e_b)
@@ -261,3 +261,34 @@ def test_cpp_data_loader_parity():
         )
 
     destroy_sparse_batch(batch_ptr)
+
+
+def test_bias_lut_preserves_highest_eight_bit_id():
+    router = DualVQCodebookRouter()
+    table = torch.full((ROUTER_TABLE_SIZE,), 63 | (255 << 6), dtype=torch.int32)
+    router.load_lookup_table(table)
+    biases = (
+        torch.arange(NUM_BIAS_EXPERTS * NUM_BIASES)
+        .reshape(NUM_BIAS_EXPERTS, NUM_BIASES)
+        .float()
+    )
+    router.load_coalesced_biases(biases)
+    router.eval()
+    indices = torch.tensor([0, ROUTER_TABLE_SIZE - 1])
+    e1, e2, b1, b2, *_ = router(indices, indices)
+    assert torch.all(e1 == 63) and torch.all(e2 == 63)
+    assert torch.equal(b1[0], biases[255, :32].expand(2, -1))
+    assert torch.equal(b2[3], biases[255, 96:128].expand(2, -1))
+
+
+def test_unit_l2_basis_initialization_preserves_layer_variance():
+    """Generated weights should start at an ordinary layer's variance."""
+    from model.modules.moe_linear import MoeLinear
+
+    torch.manual_seed(7)
+    router = DualVQCodebookRouter(num_weight_experts=4, num_bias_experts=4)
+    for rank in (8, 32):
+        layer = MoeLinear(256, 64, 4, rank=rank)
+        weights = layer.get_delta_weights(router.codebook_w)
+        expected_rms = (1.0 / (3 * layer.in_features)) ** 0.5
+        assert abs(weights.square().mean().sqrt().item() / expected_rms - 1) < 0.1

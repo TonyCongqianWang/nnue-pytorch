@@ -125,7 +125,7 @@ class NNUEWriter:
             print_routing_profile(model)
         self.write_tensor(router_table.to(torch.uint16))
 
-        # 4. Dynamic Biases Table (64 experts x 128 int32 values = 32,768 bytes)
+        # 4. Dynamic Biases Table (256 experts x 128 int32 values = 131,072 bytes)
         coalesced_biases = model.router.get_coalesced_bias_table()
         q_biases = model.quantization.quantize_dynamic_bias(
             coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)

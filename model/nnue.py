@@ -251,7 +251,10 @@ class NNUE(nn.Module):
 
     def on_train_epoch_end(self):
         self.optimizer_wrapper.on_train_epoch_end(self)
-        self.loss_metrics["train_loss_epoch"].reset()
+        for name in ("train_loss_epoch", "train_sf_loss_epoch", "train_moe_loss_epoch"):
+            self.loss_metrics[name].reset()
+        self.model.router.loss_component_sum.zero_()
+        self.model.router.loss_component_batches.zero_()
 
     def on_validation_epoch_start(self):
         self.optimizer_wrapper.on_validation_epoch_start(self)

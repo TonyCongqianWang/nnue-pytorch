@@ -60,11 +60,9 @@ class MoeLinear(nn.Module):
         bound_cb = 1.0 / math.sqrt(self.codebook_dim) if self.codebook_dim > 0 else 0.0
         nn.init.uniform_(self.adapter_down, -bound_cb, bound_cb)
 
-        bound_up = (
-            1.0 / math.sqrt(self.in_features * self.rank)
-            if self.in_features > 0 and self.rank > 0
-            else 0.0
-        )
+        # Each column is a complete layer basis. The unit-L2 bottleneck
+        # preserves its variance when blending bases; no extra rank factor.
+        bound_up = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
         nn.init.uniform_(self.adapter_up, -bound_up, bound_up)
 
         bound_bias = 1.0 / math.sqrt(self.rank) if self.rank > 0 else 0.0

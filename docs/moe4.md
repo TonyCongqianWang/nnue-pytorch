@@ -1,8 +1,8 @@
 # MoE4 experiment
 
-The network uses 64 layer-stack experts and 64 bias experts. Each perspective's
-uint16 router entry packs the weight ID in bits 0–5 and bias ID in bits 6–11;
-bits 12–15 are zero. Downstream weights and biases remain coalesced on disk.
+The network uses 64 layer-stack experts and 256 bias experts. Each perspective's
+uint16 router entry packs the weight ID in bits 0–5 and bias ID in bits 6–13;
+bits 14–15 are zero. Downstream weights and biases remain coalesced on disk.
 
 Material context retains non-king piece count T and pawn count P. A four-way
 category replaces the independent queen and bishop-pair flags:
@@ -37,6 +37,39 @@ not additive per-head contributions.
 
 The router and PSQ hashes changed. Previous architecture networks/checkpoints
 are incompatible; no automatic checkpoint migration is provided.
+
+## Initialization and routing diagnostics
+
+Each layer-stack rank column is a full layer basis initialized uniformly within
+`+/-1/sqrt(in_features)`. The unit-L2 bottleneck already preserves the variance
+of independent bases; an additional rank factor would shrink initial weights.
+Only fresh initialization changes. Output bias remains zero, and normalization,
+static/dynamic bias initialization, and quantization scales stay unchanged.
+
+Weight/bias balancing costs are independently configurable with
+`--moe-weight-balance-cost` (0.001) and `--moe-bias-balance-cost` (0.004).
+Both balancing temperatures remain 0.2, with independent
+`--moe-weight-temperature` and `--moe-bias-temperature` options. Commitment and
+diversity costs remain unchanged.
+
+`--moe-reseed-min-relative-utilization` replaces the old absolute-utilization
+option. Its default 0.064 sets the traffic floor to 0.064/K: 0.001 for 64 weight
+experts and 0.00025 for 256 bias experts. Zero LUT contexts remain a separate
+reseeding criterion. Events log both reasons and pre-split traffic/floors.
+`--moe-reseed-ema-decay` is now wired to the router; its default remains 0.999.
+
+Epoch metrics include all six weighted MoE contributions (commitment, balancing,
+diversity, separately for weights and biases). All epoch loss accumulators reset
+at each epoch boundary. Validation summaries print these contributions and
+rank-0 training hard/soft traffic EMAs, effective usage, below-floor counts, and
+five lowest-traffic experts. Loss contributions are averaged across ranks at the
+epoch boundary. Traffic summaries are explicitly rank-local; no new
+per-step collective, CPU synchronization, full-context sweep, or weight scan is
+introduced. Existing assignment means and device-side loss sums are reused.
+Validation does not update training traffic EMAs.
+
+The expert count changes the network hash; earlier 64-bias networks/checkpoints
+are incompatible with this iteration.
 
 ## CPU validation without training
 

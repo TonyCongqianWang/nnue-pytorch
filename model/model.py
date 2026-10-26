@@ -33,7 +33,13 @@ class NNUEModel(nn.Module):
         self.feature_name = self.input.FEATURE_NAME
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
-        self.router = DualVQCodebookRouter(quantization=self.quantization)
+        self.router = DualVQCodebookRouter(
+            quantization=self.quantization,
+            balance_cost=config.moe_weight_balance_cost,
+            bias_balance_cost=config.moe_bias_balance_cost,
+            temperature=config.moe_weight_temperature,
+            bias_temperature=config.moe_bias_temperature,
+        )
         self.layer_stacks = LayerStacks(
             self.num_ls_buckets,
             config,

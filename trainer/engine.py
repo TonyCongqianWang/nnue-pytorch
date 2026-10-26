@@ -420,6 +420,23 @@ class SimpleTrainer:
             )
             self.callback_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
             epoch_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
+        from model.modules.router import MOE_LOSS_COMPONENTS
+
+        router = _unwrap_module(self.model).model.router
+        component_means = (
+            (router.loss_component_sum / router.loss_component_batches.clamp_min(1))
+            .detach()
+            .clone()
+        )
+        if self.world_size > 1:
+            # One six-value collective at the epoch boundary, never per step.
+            dist.all_reduce(component_means, op=dist.ReduceOp.SUM)
+            component_means /= self.world_size
+        component_means = component_means.cpu().tolist()
+        for name, value in zip(MOE_LOSS_COMPONENTS, component_means):
+            key = f"train_moe_{name}_epoch"
+            epoch_metrics[key] = value
+            self.callback_metrics[key] = value
         self._log_metrics(
             epoch_metrics,
             step=self.global_step,

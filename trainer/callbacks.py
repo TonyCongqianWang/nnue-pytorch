@@ -771,12 +771,12 @@ class MoEDeadExpertReseeder(Callback):
         self,
         reseed_interval: int = 1024,
         temperature: float = 0.5,
-        min_utilization: float = 0.001,
+        min_relative_utilization: float = 0.064,
     ):
         super().__init__()
         self.reseed_interval = reseed_interval
         self.temperature = temperature
-        self.min_utilization = min_utilization
+        self.min_relative_utilization = min_relative_utilization
 
     @torch.no_grad()
     @torch.compiler.disable
@@ -802,7 +802,7 @@ class MoEDeadExpertReseeder(Callback):
             if not is_ddp or rank == 0:
                 router.reseed_dead_experts_context_wide(
                     temperature=self.temperature,
-                    min_utilization=self.min_utilization,
+                    min_relative_utilization=self.min_relative_utilization,
                 )
 
                 parent_map_w = getattr(router, "last_reseed_parents_w", {})
@@ -857,15 +857,70 @@ class MoEDeadExpertReseeder(Callback):
                 if parent_map_w:
                     print(
                         f"[Step {trainer.global_step}] Reseeded {len(parent_map_w)} dead weight expert(s): "
-                        f"{[f'{c}<-{p}' for c, p in sorted(parent_map_w.items())]}",
+                        f"{self._reseed_description(router, 'weights', parent_map_w)}",
                         flush=True,
                     )
                 if parent_map_b:
                     print(
                         f"[Step {trainer.global_step}] Reseeded {len(parent_map_b)} dead bias expert(s): "
-                        f"{[f'{c}<-{p}' for c, p in sorted(parent_map_b.items())]}",
+                        f"{self._reseed_description(router, 'biases', parent_map_b)}",
                         flush=True,
                     )
+
+    @torch.no_grad()
+    @torch.compiler.disable
+    def on_validation_epoch_end(self, trainer):
+        if getattr(trainer, "rank", 0) != 0 or getattr(
+            trainer, "sanity_checking", False
+        ):
+            return
+        from model.modules.router import MOE_LOSS_COMPONENTS
+
+        from .engine import _unwrap_module
+
+        router = _unwrap_module(trainer.model).model.router
+        # These are training snapshots. Validation must not alter traffic EMAs.
+        for name in ("weights", "biases"):
+            hard = getattr(router, f"ema_traffic_{name}").detach().float().cpu()
+            soft = getattr(router, f"ema_soft_{name}").detach().float().cpu()
+            k = hard.numel()
+            floor = self.min_relative_utilization / k
+            mass = hard / hard.sum().clamp_min(1e-12)
+            effective = torch.exp(-(mass * mass.clamp_min(1e-12).log()).sum()).item()
+            lowest = hard.argsort()[:5].tolist()
+            tail = "; ".join(
+                f"{i}:hard={hard[i]:.3g},K*hard={k * hard[i]:.3g},soft={soft[i]:.3g}"
+                for i in lowest
+            )
+            print(
+                f"[Routing {name}, rank-0 training EMA] min={hard.min():.3g} "
+                f"max={hard.max():.3g} effective={effective:.1f}/{k} "
+                f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
+                flush=True,
+            )
+        terms = [
+            f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
+            for name in MOE_LOSS_COMPONENTS
+            if f"train_moe_{name}_epoch" in trainer.callback_metrics
+        ]
+        if terms:
+            print("[MoE weighted epoch losses] " + ", ".join(terms), flush=True)
+
+    @staticmethod
+    def _reseed_description(router, name, parents):
+        descriptions = []
+        for child, parent in sorted(parents.items()):
+            detail = router.last_reseed_details[name][child]
+            reasons = []
+            if detail["zero_contexts"]:
+                reasons.append("zero LUT contexts")
+            if detail["low_traffic"]:
+                reasons.append("low EMA")
+            descriptions.append(
+                f"{child}<-{parent} ({' + '.join(reasons)}; "
+                f"traffic={detail['traffic']:.3g}, floor={detail['floor']:.3g})"
+            )
+        return "; ".join(descriptions)
 
     def _copy_optimizer_state(self, optimizer, param, parent_tensor):
         """Copies optimizer momentum and second moments from parent to child for reseeded experts.

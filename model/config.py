@@ -12,6 +12,15 @@ from .quantize import QuantizationConfig
 # 3 layer fully connected network
 @dataclass(kw_only=True)
 class ModelConfig(LayerStacksConfig):
+    moe_weight_balance_cost: float = 0.001
+    """Weight-router balancing coefficient."""
+    moe_bias_balance_cost: float = 0.004
+    """Bias-router balancing coefficient (4x weight balancing for 256 experts)."""
+    moe_weight_temperature: float = 0.2
+    """Weight-router balancing softmax temperature."""
+    moe_bias_temperature: float = 0.2
+    """Bias-router balancing softmax temperature."""
+
     @staticmethod
     def add_model_args(parser):
         parser.add_argument(

@@ -36,12 +36,19 @@ NUM_OUR_KINGS = 33
 NUM_ENEMY_KINGS = 65
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
 NUM_WEIGHT_EXPERTS = 64
-NUM_BIAS_EXPERTS = 64
+NUM_BIAS_EXPERTS = 256
 NUM_BIASES = 128
 BIAS_RANK = 32
 CODEBOOK_DIM = 256
 ROUTER_HASH = 0x4D6F4534  # 'MoE4'
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
+# Weighted contributions, ordered by router, for inexpensive epoch accumulation.
+MOE_LOSS_COMPONENTS = tuple(
+    f"{router}_{term}"
+    for router in ("weights", "biases")
+    for term in ("commitment", "balance", "diversity")
+)
+DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 
 
 def rms_norm(
@@ -269,10 +276,14 @@ class DualVQCodebookRouter(nn.Module):
         ema_decay: float = 0.999,
         quantization: QuantizationManager | None = None,
         codebook_target_norm: float = DEFAULT_CODEBOOK_TARGET_NORM,
+        bias_balance_cost: float = 0.004,
+        bias_temperature: float = 0.2,
     ):
         super().__init__()
-        if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 64):
-            raise ValueError("The router LUT reserves six bits per expert ID")
+        if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 256):
+            raise ValueError(
+                "The router LUT reserves six weight bits and eight bias bits"
+            )
         self.num_contexts = num_contexts
         self.num_weight_experts = num_weight_experts
         self.num_bias_experts = num_bias_experts
@@ -281,7 +292,9 @@ class DualVQCodebookRouter(nn.Module):
         self.num_biases = num_biases
         self.commitment_cost = commitment_cost
         self.balance_cost = balance_cost
+        self.bias_balance_cost = bias_balance_cost
         self.temperature = temperature
+        self.bias_temperature = bias_temperature
         self.diversity_cost = diversity_cost
         self.reseed_dead_experts = reseed_dead_experts
         self.ema_decay = ema_decay
@@ -299,7 +312,7 @@ class DualVQCodebookRouter(nn.Module):
         # Weight Router Codebook: 64 experts in R^256
         self.codebook_weights = nn.Parameter(torch.empty(num_weight_experts, dim))
 
-        # Bias Router Codebook: 64 experts in R^256
+        # Bias Router Codebook: 256 experts in R^256
         self.codebook_biases = nn.Parameter(torch.empty(num_bias_experts, dim))
         self.bias_head_down = nn.Linear(dim, bias_rank, bias=False)
         self.bias_head_up = nn.Linear(bias_rank, num_biases, bias=True)
@@ -325,6 +338,18 @@ class DualVQCodebookRouter(nn.Module):
             persistent=False,
         )
 
+        for name, count in (
+            ("weights", num_weight_experts),
+            ("biases", num_bias_experts),
+        ):
+            self.register_buffer(
+                f"ema_soft_{name}", torch.full((count,), 1.0 / count), persistent=False
+            )
+        self.register_buffer("loss_component_sum", torch.zeros(6), persistent=False)
+        self.register_buffer(
+            "loss_component_batches", torch.zeros(()), persistent=False
+        )
+
         # Ephemeral runtime cache for inference & Stockfish export
         self.register_buffer(
             "lut",
@@ -339,6 +364,7 @@ class DualVQCodebookRouter(nn.Module):
         )
         self.coalesced_valid: bool = False
 
+        self.last_reseed_details: dict[str, dict[int, dict]] = {}
         self.last_reseed_parents_w: dict[int, int] = {}
         self.last_reseed_parents_b: dict[int, int] = {}
 
@@ -424,7 +450,13 @@ class DualVQCodebookRouter(nn.Module):
         return center_and_rms_norm(z_all, self.codebook_target_norm)
 
     def quantize(
-        self, z: torch.Tensor, codebook: torch.Tensor, num_experts: int
+        self,
+        z: torch.Tensor,
+        codebook: torch.Tensor,
+        num_experts: int,
+        temperature: float | None = None,
+        traffic_ema: torch.Tensor | None = None,
+        soft_ema: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with ieee_matmul_precision():
             z_sq = torch.sum(z**2, dim=-1, keepdim=True)
@@ -444,11 +476,16 @@ class DualVQCodebookRouter(nn.Module):
             one_hot = F.one_hot(indices, num_classes=k_exp).float()
             f = one_hot.mean(dim=0).detach()
 
-            scaled_neg_dist = -distances / max(self.temperature, 1e-4)
+            temperature = self.temperature if temperature is None else temperature
+            scaled_neg_dist = -distances / max(temperature, 1e-4)
             probs = F.softmax(scaled_neg_dist, dim=-1)
             prob_mean = probs.mean(dim=0)
 
             balance_loss = k_exp * torch.sum(f * prob_mean) - 1.0
+            if traffic_ema is not None and soft_ema is not None:
+                with torch.no_grad():
+                    traffic_ema.lerp_(f, 1.0 - self.ema_decay)
+                    soft_ema.lerp_(prob_mean.detach(), 1.0 - self.ema_decay)
 
             # Straight-Through Estimator
             z_q_ste = z + (z_q - z).detach()
@@ -496,12 +533,12 @@ class DualVQCodebookRouter(nn.Module):
                 dist_w = z_sq + cb_w_sq - 2.0 * torch.matmul(z_chunk, cb_w.t())
                 idx_w = torch.argmin(dist_w, dim=-1)
 
-                # Bias routing (64 experts)
+                # Bias routing (256 experts)
                 dist_b = z_sq + cb_b_sq - 2.0 * torch.matmul(z_chunk, cb_b.t())
                 idx_b = torch.argmin(dist_b, dim=-1)
 
-                # Bit packing: 6 bits weight | 6 bits bias
-                packed = (idx_w & 0x3F) | ((idx_b & 0x3F) << 6)
+                # Bit packing: 6 bits weight | 8 bits bias
+                packed = (idx_w & 0x3F) | ((idx_b & 0xFF) << 6)
                 self.lut[i : i + chunk_size] = packed
 
             self.lut_valid = True
@@ -537,13 +574,16 @@ class DualVQCodebookRouter(nn.Module):
         self,
         temperature: float = 0.5,
         perturbation_scale: float = 0.02,
-        min_utilization: float = 0.001,
+        min_relative_utilization: float = DEFAULT_MIN_RELATIVE_UTILIZATION,
     ) -> tuple[list[int], list[int]]:
         """Evaluates contexts across the board context space and reseeds dead experts
         via traffic-weighted cell splitting of active experts.
         """
         self.last_reseed_parents_w = {}
         self.last_reseed_parents_b = {}
+        self.last_reseed_details = {}
+        min_utilization_w = min_relative_utilization / self.num_weight_experts
+        min_utilization_b = min_relative_utilization / self.num_bias_experts
 
         device = self.codebook_weights.device
         with ieee_matmul_precision():
@@ -575,9 +615,25 @@ class DualVQCodebookRouter(nn.Module):
 
         counts_w = torch.bincount(idx_w, minlength=self.num_weight_experts)
         dead_w = torch.nonzero(
-            (counts_w == 0) | (self.ema_traffic_weights < min_utilization),
+            (counts_w == 0) | (self.ema_traffic_weights < min_utilization_w),
             as_tuple=True,
         )[0]
+        details = (
+            torch.stack(
+                (counts_w[dead_w].float(), self.ema_traffic_weights[dead_w]), dim=1
+            )
+            .cpu()
+            .tolist()
+        )
+        self.last_reseed_details["weights"] = {
+            int(idx): {
+                "zero_contexts": count == 0,
+                "low_traffic": traffic < min_utilization_w,
+                "traffic": traffic,
+                "floor": min_utilization_w,
+            }
+            for idx, (count, traffic) in zip(dead_w.tolist(), details)
+        }
         reseeded_w: list[int] = []
         if len(dead_w) > 0:
             floor_w = (1.0 / self.num_weight_experts) - 1e-5
@@ -627,9 +683,25 @@ class DualVQCodebookRouter(nn.Module):
 
         counts_b = torch.bincount(idx_b, minlength=self.num_bias_experts)
         dead_b = torch.nonzero(
-            (counts_b == 0) | (self.ema_traffic_biases < min_utilization),
+            (counts_b == 0) | (self.ema_traffic_biases < min_utilization_b),
             as_tuple=True,
         )[0]
+        details = (
+            torch.stack(
+                (counts_b[dead_b].float(), self.ema_traffic_biases[dead_b]), dim=1
+            )
+            .cpu()
+            .tolist()
+        )
+        self.last_reseed_details["biases"] = {
+            int(idx): {
+                "zero_contexts": count == 0,
+                "low_traffic": traffic < min_utilization_b,
+                "traffic": traffic,
+                "floor": min_utilization_b,
+            }
+            for idx, (count, traffic) in zip(dead_b.tolist(), details)
+        }
         reseeded_b: list[int] = []
         if len(dead_b) > 0:
             floor_b = (1.0 / self.num_bias_experts) - 1e-5
@@ -702,24 +774,21 @@ class DualVQCodebookRouter(nn.Module):
             z = self.get_context_vector(c_combined)
 
             e_w, _, commit_loss_w, balance_loss_w = self.quantize(
-                z, self.codebook_w, self.num_weight_experts
+                z,
+                self.codebook_w,
+                self.num_weight_experts,
+                self.temperature,
+                self.ema_traffic_weights,
+                self.ema_soft_weights,
             )
-            idx_b, z_q_ste_b, commit_loss_b, balance_loss_b = self.quantize(
-                z, self.codebook_b, self.num_bias_experts
+            _idx_b, z_q_ste_b, commit_loss_b, balance_loss_b = self.quantize(
+                z,
+                self.codebook_b,
+                self.num_bias_experts,
+                self.bias_temperature,
+                self.ema_traffic_biases,
+                self.ema_soft_biases,
             )
-
-            # Update recent batch usage EMA buffers
-            with torch.no_grad():
-                freq_w = (
-                    torch.bincount(e_w, minlength=self.num_weight_experts).float()
-                    / e_w.numel()
-                )
-                freq_b = (
-                    torch.bincount(idx_b, minlength=self.num_bias_experts).float()
-                    / idx_b.numel()
-                )
-                self.ema_traffic_weights.lerp_(freq_w, 1.0 - self.ema_decay)
-                self.ema_traffic_biases.lerp_(freq_b, 1.0 - self.ema_decay)
 
             dyn_bias = self.bias_head(z_q_ste_b)
             if fake_quantize and self.quantization is not None:
@@ -727,14 +796,20 @@ class DualVQCodebookRouter(nn.Module):
 
             commit_loss = commit_loss_w + commit_loss_b
             balance_loss = balance_loss_w + balance_loss_b
-            div_loss = codebook_diversity_loss(
-                self.codebook_w
-            ) + codebook_diversity_loss(self.codebook_b)
-            moe_loss = (
-                commit_loss
-                + self.balance_cost * balance_loss
-                + self.diversity_cost * div_loss
+            parts = torch.stack(
+                (
+                    commit_loss_w,
+                    self.balance_cost * balance_loss_w,
+                    self.diversity_cost * codebook_diversity_loss(self.codebook_w),
+                    commit_loss_b,
+                    self.bias_balance_cost * balance_loss_b,
+                    self.diversity_cost * codebook_diversity_loss(self.codebook_b),
+                )
             )
+            moe_loss = parts.sum()
+            with torch.no_grad():
+                self.loss_component_sum.add_(parts.detach())
+                self.loss_component_batches.add_(1)
 
             self.lut_valid = False
             self.coalesced_valid = False
@@ -774,8 +849,8 @@ class DualVQCodebookRouter(nn.Module):
 
             e1_w = (packed_1 & 0x3F).long()
             e2_w = (packed_2 & 0x3F).long()
-            e1_b = ((packed_1 >> 6) & 0x3F).long()
-            e2_b = ((packed_2 >> 6) & 0x3F).long()
+            e1_b = ((packed_1 >> 6) & 0xFF).long()
+            e2_b = ((packed_2 >> 6) & 0xFF).long()
 
             coalesced = self.get_coalesced_bias_table()
             dyn_bias_1 = coalesced[e1_b]

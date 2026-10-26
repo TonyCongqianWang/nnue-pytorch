@@ -17,6 +17,7 @@ from data_loader.config import DataloaderDDPConfig
 from trainer.callbacks import (
     CheckpointManager,
     ExplicitSWA,
+    MoEDeadExpertReseeder,
     SimpleLineLogger,
     TerminateOnNaN,
     TimeLimit,
@@ -258,6 +259,8 @@ def main():
         nnue.config = args.nnue_config
         nnue.param_index = args.dataloader_config.param_index
 
+    nnue.model.router.ema_decay = args.moe_reseed_ema_decay
+
     input_feature_name = nnue.model.input_feature_name
 
     torch.manual_seed(args.seed)
@@ -367,6 +370,11 @@ def main():
             dirpath=os.path.join(tb_logger.log_dir, "checkpoints"),
         ),
         SimpleLineLogger(refresh_rate=refresh_rate),
+        MoEDeadExpertReseeder(
+            reseed_interval=args.moe_reseed_interval,
+            temperature=args.moe_reseed_sampling_temperature,
+            min_relative_utilization=args.moe_reseed_min_relative_utilization,
+        ),
         TimeLimit(args.max_time),
         nan_callback,
     ]

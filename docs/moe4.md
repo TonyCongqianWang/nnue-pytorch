@@ -49,14 +49,26 @@ static/dynamic bias initialization, and quantization scales stay unchanged.
 Weight/bias balancing costs are independently configurable with
 `--moe-weight-balance-cost` (0.001) and `--moe-bias-balance-cost` (0.004).
 Both balancing temperatures remain 0.2, with independent
-`--moe-weight-temperature` and `--moe-bias-temperature` options. Commitment and
-diversity costs remain unchanged.
+`--moe-weight-temperature` and `--moe-bias-temperature` options. Commitment is
+unchanged. Diversity coefficients are separately configurable using
+`--moe-weight-diversity-cost` (0.01) and `--moe-bias-diversity-cost` (0.02).
 
 `--moe-reseed-min-relative-utilization` replaces the old absolute-utilization
 option. Its default 0.064 sets the traffic floor to 0.064/K: 0.001 for 64 weight
-experts and 0.00025 for 256 bias experts. Zero LUT contexts remain a separate
-reseeding criterion. Events log both reasons and pre-split traffic/floors.
-`--moe-reseed-ema-decay` is now wired to the router; its default remains 0.999.
+experts and 0.00025 for 256 bias experts. Reseeding uses hard-traffic EMA alone;
+a momentarily empty LUT cell does not trigger it. Events log pre-split traffic
+and floors. No context enumeration or LUT construction runs during reseeding.
+`--moe-reseed-ema-decay` defaults to 0.998, giving roughly 1,373 zero-traffic steps
+from uniform usage to the floor. Checks remain every 1,024 steps.
+
+LUT construction stays lazy: validation/inference or export builds it once when
+invalid and reuses the result until training or reseeding invalidates it. At
+validation only, an existing necessary LUT build samples one in 256 contexts'
+nearest/runner-up squared-distance gaps. Logging never requests another build;
+export performs no margin top-k work. Validation also reports maximum pairwise
+codebook cosine and the expert pair, plus sampled margin minimum, mean and
+fraction at most 1e-6 when available. These are uniform context samples, not
+training-frequency-weighted statistics.
 
 Epoch metrics include all six weighted MoE contributions (commitment, balancing,
 diversity, separately for weights and biases). All epoch loss accumulators reset

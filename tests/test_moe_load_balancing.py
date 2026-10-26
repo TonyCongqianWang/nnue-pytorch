@@ -42,7 +42,7 @@ def test_balance_loss_bounds():
 
 
 def test_dead_expert_reseeding():
-    """Verify that unused experts across the context space are actively reseeded via cell splitting."""
+    """Verify sustained low-traffic experts are reseeded without a context scan."""
     torch.manual_seed(42)
     router = DualVQCodebookRouter()
 
@@ -52,13 +52,19 @@ def test_dead_expert_reseeding():
         router.codebook_weights.data[1:] = 1000.0
         router.codebook_weights.data[0] = 0.0
 
-    # All contexts will map to expert 0, so experts 1..31 are dead and expert 0 is split
-    reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
+    router.ema_traffic_weights.zero_()
+    router.ema_traffic_weights[0] = 1.0
+
+    def unexpected_context_scan():
+        raise AssertionError("Reseeding must not enumerate contexts")
+
+    router.get_all_context_vectors = unexpected_context_scan
+    reseeded_w, reseeded_b = router.reseed_dead_experts_from_traffic()
     assert 0 in reseeded_w
     assert set(range(1, NUM_WEIGHT_EXPERTS)).issubset(set(reseeded_w))
     assert isinstance(reseeded_b, list)
 
-    # Now experts 1..31 should be reseeded near expert 0 and no longer equal 1000.0
+    # Low-traffic experts should be reseeded near expert 0.
     for j in range(1, NUM_WEIGHT_EXPERTS):
         assert not torch.all(router.codebook_weights.data[j] == 1000.0), (
             f"Expert {j} was not reseeded!"
@@ -88,7 +94,7 @@ def test_traffic_weighted_cell_splitting():
         router.ema_traffic_weights[5] = 1.0
 
     # With greedy temperature (1e-4), expert 5 should be selected to split for dead expert 31
-    reseeded_w, _ = router.reseed_dead_experts_context_wide(temperature=1e-4)
+    reseeded_w, _ = router.reseed_dead_experts_from_traffic(temperature=1e-4)
     assert 31 in reseeded_w
     assert 5 in reseeded_w
     assert not torch.all(router.codebook_weights.data[31] == 1000.0)
@@ -322,24 +328,71 @@ def test_bias_reseeding_floor_scales_with_capacity():
     """A live 256-way bias cell must not inherit the 64-way absolute floor."""
     torch.manual_seed(7)
     router = DualVQCodebookRouter(num_contexts=256, dim=16)
-    # Give every bias expert exactly one LUT context, independent of material.
-    router.get_all_context_vectors = lambda: router.codebook_b.detach().clone()
     router.ema_traffic_biases[0] = 0.0004
-    _, changed = router.reseed_dead_experts_context_wide()
+    _, changed = router.reseed_dead_experts_from_traffic()
     assert not changed
 
     router.ema_traffic_biases[0] = 0.0001
-    router.reseed_dead_experts_context_wide()
+    router.reseed_dead_experts_from_traffic()
     detail = router.last_reseed_details["biases"][0]
-    assert detail["low_traffic"] and not detail["zero_contexts"]
     assert detail["floor"] == 0.00025
     assert abs(detail["traffic"] - 0.0001) < 1e-9
 
 
-def test_zero_context_reseeding_remains_independent_of_traffic():
+def test_empty_lut_cells_with_healthy_traffic_do_not_trigger_reseeding():
     torch.manual_seed(7)
-    router = DualVQCodebookRouter(num_contexts=255, dim=16)
-    router.get_all_context_vectors = lambda: router.codebook_b[:-1].detach().clone()
-    router.reseed_dead_experts_context_wide()
-    detail = router.last_reseed_details["biases"][255]
-    assert detail["zero_contexts"] and not detail["low_traffic"]
+    router = DualVQCodebookRouter(num_contexts=2, dim=16)
+    with torch.no_grad():
+        router.codebook_biases[:] = router.codebook_biases[0].clone()
+    router.get_all_context_vectors = lambda: router.codebook_b[:2].detach().clone()
+    lut = router.get_lookup_table().clone()
+    assert torch.all((lut >> 6) == 0)  # Experts 1..255 have no LUT contexts.
+    original = router.codebook_biases.clone()
+
+    def unexpected_context_scan():
+        raise AssertionError("Healthy traffic must not trigger any LUT work")
+
+    router.get_all_context_vectors = unexpected_context_scan
+    assert router.reseed_dead_experts_from_traffic() == ([], [])
+    assert router.lut_valid
+    assert torch.equal(router.lut, lut)
+    assert torch.equal(router.codebook_biases, original)
+
+
+def test_lut_margin_diagnostics_reuse_one_cached_build():
+    router = DualVQCodebookRouter(num_contexts=2, dim=16)
+    router.collect_lut_diagnostics = True
+    contexts = router.codebook_b[:2].detach().clone()
+    calls = []
+
+    def contexts_once():
+        calls.append(1)
+        return contexts
+
+    router.get_all_context_vectors = contexts_once
+    expected_w = torch.cdist(contexts, router.codebook_w).argmin(dim=1)
+    expected_b = torch.cdist(contexts, router.codebook_b).argmin(dim=1)
+    expected = expected_w | (expected_b << 6)
+    assert torch.equal(router.get_lookup_table(), expected)
+    assert router.lut_margin_valid
+    assert router.lut_margin_samples == 1
+    assert (router.lut_margin_stats >= 0).all()
+    router.get_lookup_table()
+    assert len(calls) == 1
+    router.train()
+    assert not router.lut_margin_valid
+
+
+def test_bias_diversity_coefficient_is_independent():
+    torch.manual_seed(7)
+    router = DualVQCodebookRouter(dim=16)
+    contexts = torch.tensor([0, 1, 2, 3])
+    first = router(contexts, contexts)[4].detach()
+    parts = router.loss_component_sum.clone()
+    router.bias_diversity_cost *= 2
+    second = router(contexts, contexts)[4].detach()
+    # Only the bias diversity contribution changes; no optimization runs.
+    torch.testing.assert_close(second - first, parts[5], atol=1e-8, rtol=1e-4)
+    second_parts = router.loss_component_sum - parts
+    torch.testing.assert_close(second_parts[:5], parts[:5])
+    torch.testing.assert_close(second_parts[5], 2 * parts[5])

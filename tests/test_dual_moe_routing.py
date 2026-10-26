@@ -183,7 +183,7 @@ def test_dead_expert_reseeding():
         router.ema_traffic_weights[0] = 0.0
         router.ema_traffic_biases[0] = 0.0
 
-    reseeded_w, reseeded_b = router.reseed_dead_experts_context_wide()
+    reseeded_w, reseeded_b = router.reseed_dead_experts_from_traffic()
     assert 0 in reseeded_w
     assert 0 in reseeded_b
     assert not torch.allclose(router.codebook_weights[0], torch.tensor(1000.0))

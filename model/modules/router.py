@@ -273,11 +273,12 @@ class DualVQCodebookRouter(nn.Module):
         temperature: float = 0.2,
         diversity_cost: float = 0.01,
         reseed_dead_experts: bool = True,
-        ema_decay: float = 0.999,
+        ema_decay: float = 0.998,
         quantization: QuantizationManager | None = None,
         codebook_target_norm: float = DEFAULT_CODEBOOK_TARGET_NORM,
         bias_balance_cost: float = 0.004,
         bias_temperature: float = 0.2,
+        bias_diversity_cost: float = 0.02,
     ):
         super().__init__()
         if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 256):
@@ -296,6 +297,7 @@ class DualVQCodebookRouter(nn.Module):
         self.temperature = temperature
         self.bias_temperature = bias_temperature
         self.diversity_cost = diversity_cost
+        self.bias_diversity_cost = bias_diversity_cost
         self.reseed_dead_experts = reseed_dead_experts
         self.ema_decay = ema_decay
         self.quantization = quantization
@@ -357,6 +359,10 @@ class DualVQCodebookRouter(nn.Module):
             persistent=False,
         )
         self.lut_valid: bool = False
+        self.collect_lut_diagnostics: bool = False
+        self.lut_margin_valid: bool = False
+        self.lut_margin_samples: int = 0
+        self.register_buffer("lut_margin_stats", torch.zeros(2, 3), persistent=False)
         self.register_buffer(
             "coalesced_biases",
             torch.zeros(num_bias_experts, num_biases, dtype=torch.float32),
@@ -395,6 +401,7 @@ class DualVQCodebookRouter(nn.Module):
         super().train(mode)
         if mode:
             self.lut_valid = False
+            self.lut_margin_valid = False
             self.coalesced_valid = False
         return self
 
@@ -524,6 +531,9 @@ class DualVQCodebookRouter(nn.Module):
             cb_w_sq = torch.sum(cb_w**2, dim=-1).unsqueeze(0)
             cb_b_sq = torch.sum(cb_b**2, dim=-1).unsqueeze(0)
 
+            # Optional validation diagnostics reuse a small, regular sample of
+            # distances from this necessary LUT build. Export pays no top-k cost.
+            margins_w, margins_b = [], []
             chunk_size = 65536
             for i in range(0, self.num_contexts, chunk_size):
                 z_chunk = z_all[i : i + chunk_size]
@@ -537,11 +547,33 @@ class DualVQCodebookRouter(nn.Module):
                 dist_b = z_sq + cb_b_sq - 2.0 * torch.matmul(z_chunk, cb_b.t())
                 idx_b = torch.argmin(dist_b, dim=-1)
 
+                if self.collect_lut_diagnostics:
+                    for distances, margins in (
+                        (dist_w, margins_w),
+                        (dist_b, margins_b),
+                    ):
+                        if distances.shape[1] >= 2:
+                            nearest = (
+                                distances[::256].topk(2, largest=False, dim=1).values
+                            )
+                            margins.append(nearest[:, 1] - nearest[:, 0])
+
                 # Bit packing: 6 bits weight | 8 bits bias
                 packed = (idx_w & 0x3F) | ((idx_b & 0xFF) << 6)
                 self.lut[i : i + chunk_size] = packed
 
             self.lut_valid = True
+            self.lut_margin_valid = False
+            if margins_w and margins_b:
+                for row, samples in enumerate((margins_w, margins_b)):
+                    gaps = torch.cat(samples)
+                    self.lut_margin_stats[row].copy_(
+                        torch.stack(
+                            (gaps.min(), gaps.mean(), (gaps <= 1e-6).float().mean())
+                        )
+                    )
+                self.lut_margin_samples = sum(gap.numel() for gap in margins_w)
+                self.lut_margin_valid = True
 
             if self.quantization is not None:
                 raw_biases = self.bias_head(self.codebook_b)
@@ -566,194 +598,86 @@ class DualVQCodebookRouter(nn.Module):
             )
         self.lut.copy_(table.to(device=self.lut.device, dtype=torch.int32))
         self.lut_valid = True
+        self.lut_margin_valid = False
         for p in self.parameters():
             p.zero_()
 
     @torch.no_grad()
-    def reseed_dead_experts_context_wide(
+    def reseed_dead_experts_from_traffic(
         self,
         temperature: float = 0.5,
         perturbation_scale: float = 0.02,
         min_relative_utilization: float = DEFAULT_MIN_RELATIVE_UTILIZATION,
     ) -> tuple[list[int], list[int]]:
-        """Evaluates contexts across the board context space and reseeds dead experts
-        via traffic-weighted cell splitting of active experts.
+        """Split active cells only after sustained low hard-traffic EMA.
+
+        No context enumeration or LUT construction is needed. A temporarily
+        empty Voronoi cell must not bypass the traffic EMA's grace period.
         """
         self.last_reseed_parents_w = {}
         self.last_reseed_parents_b = {}
         self.last_reseed_details = {}
-        min_utilization_w = min_relative_utilization / self.num_weight_experts
-        min_utilization_b = min_relative_utilization / self.num_bias_experts
-
-        device = self.codebook_weights.device
-        with ieee_matmul_precision():
-            z_all = self.get_all_context_vectors()
-
-            cb_w = self.codebook_w
-            cb_b = self.codebook_b
-            cb_w_sq = torch.sum(cb_w**2, dim=-1).unsqueeze(0)
-            cb_b_sq = torch.sum(cb_b**2, dim=-1).unsqueeze(0)
-
-            chunk_size = 65536
-            all_idx_w = []
-            all_idx_b = []
-
-            for i in range(0, self.num_contexts, chunk_size):
-                z_chunk = z_all[i : i + chunk_size]
-                z_sq = torch.sum(z_chunk**2, dim=-1, keepdim=True)
-
-                dist_w = z_sq + cb_w_sq - 2.0 * torch.matmul(z_chunk, cb_w.t())
-                idx_w = torch.argmin(dist_w, dim=-1)
-                all_idx_w.append(idx_w)
-
-                dist_b = z_sq + cb_b_sq - 2.0 * torch.matmul(z_chunk, cb_b.t())
-                idx_b = torch.argmin(dist_b, dim=-1)
-                all_idx_b.append(idx_b)
-
-            idx_w = torch.cat(all_idx_w, dim=0)
-            idx_b = torch.cat(all_idx_b, dim=0)
-
-        counts_w = torch.bincount(idx_w, minlength=self.num_weight_experts)
-        dead_w = torch.nonzero(
-            (counts_w == 0) | (self.ema_traffic_weights < min_utilization_w),
-            as_tuple=True,
-        )[0]
-        details = (
-            torch.stack(
-                (counts_w[dead_w].float(), self.ema_traffic_weights[dead_w]), dim=1
-            )
-            .cpu()
-            .tolist()
-        )
-        self.last_reseed_details["weights"] = {
-            int(idx): {
-                "zero_contexts": count == 0,
-                "low_traffic": traffic < min_utilization_w,
-                "traffic": traffic,
-                "floor": min_utilization_w,
+        reseeded = []
+        for name, codebook, traffic in (
+            ("weights", self.codebook_weights, self.ema_traffic_weights),
+            ("biases", self.codebook_biases, self.ema_traffic_biases),
+        ):
+            count = traffic.numel()
+            floor = min_relative_utilization / count
+            dead = torch.nonzero(traffic < floor, as_tuple=True)[0]
+            self.last_reseed_details[name] = {
+                idx: {"traffic": value, "floor": floor}
+                for idx, value in zip(dead.tolist(), traffic[dead].cpu().tolist())
             }
-            for idx, (count, traffic) in zip(dead_w.tolist(), details)
-        }
-        reseeded_w: list[int] = []
-        if len(dead_w) > 0:
-            floor_w = (1.0 / self.num_weight_experts) - 1e-5
-            active_w = torch.nonzero(
-                self.ema_traffic_weights >= floor_w, as_tuple=True
-            )[0]
-            if len(active_w) == 0:
-                active_w = torch.nonzero(counts_w > 0, as_tuple=True)[0]
-            if len(active_w) == 0:
-                active_w = torch.arange(self.num_weight_experts, device=device)
-            if len(active_w) > 0:
-                traffic_w = self.ema_traffic_weights[active_w].clone()
-                if traffic_w.sum() <= 0:
-                    traffic_w = counts_w[active_w].float()
+            parents = {}
+            modified = set()
+            if dead.numel():
+                # Prefer busy cells; fall back to any healthy cell. Never use
+                # a dead child as a donor if all traffic estimates are zero.
+                active = torch.nonzero(
+                    (traffic >= 1.0 / count - 1e-5)
+                    & (traffic >= floor)
+                    & (traffic > 0),
+                    as_tuple=True,
+                )[0]
+                if not active.numel():
+                    active = torch.nonzero(
+                        (traffic >= floor) & (traffic > 0), as_tuple=True
+                    )[0]
+                if active.numel():
+                    logits = traffic[active].clamp_min(1e-8).log() / max(
+                        temperature, 1e-4
+                    )
+                    probabilities = F.softmax(logits, dim=0)
+                    for child in dead.tolist():
+                        donor_pos = torch.multinomial(probabilities, 1).item()
+                        donor = active[donor_pos].item()
+                        direction = torch.randn_like(codebook[child])
+                        offset = (
+                            direction
+                            / direction.norm().clamp_min(1e-8)
+                            * perturbation_scale
+                        )
+                        original = codebook[donor].clone()
+                        codebook[child].copy_(original + offset)
+                        codebook[donor].copy_(original - offset)
+                        traffic[donor] *= 0.5
+                        traffic[child] = traffic[donor]
+                        probabilities[donor_pos] *= 0.5
+                        probabilities /= probabilities.sum().clamp_min(1e-8)
+                        parents[child] = donor
+                        modified.update((child, donor))
+            if name == "weights":
+                self.last_reseed_parents_w = parents
+            else:
+                self.last_reseed_parents_b = parents
+            reseeded.append(sorted(modified))
 
-                logits_w = torch.log(traffic_w.clamp(min=1e-8)) / max(temperature, 1e-4)
-                probs_w = F.softmax(logits_w, dim=-1)
-
-                modified_w = set(dead_w.tolist())
-                parent_map_w: dict[int, int] = {}
-                for dead_idx in dead_w:
-                    target_pos = torch.multinomial(probs_w, num_samples=1).item()
-                    target_idx = active_w[target_pos].item()
-                    modified_w.add(target_idx)
-                    parent_map_w[int(dead_idx)] = int(target_idx)
-
-                    direction = torch.randn_like(self.codebook_weights[dead_idx])
-                    norm = torch.norm(direction).clamp(min=1e-8)
-                    eps = (direction / norm) * perturbation_scale
-
-                    parent_vec = self.codebook_weights.data[target_idx].clone()
-                    self.codebook_weights.data[dead_idx].copy_(parent_vec + eps)
-                    self.codebook_weights.data[target_idx].copy_(parent_vec - eps)
-
-                    # Split EMA traffic between parent and newly reseeded child
-                    self.ema_traffic_weights[target_idx] *= 0.5
-                    self.ema_traffic_weights[dead_idx] = self.ema_traffic_weights[
-                        target_idx
-                    ]
-
-                    # Halve probability of the target to prevent dogpiling
-                    probs_w[target_pos] *= 0.5
-                    probs_w = probs_w / probs_w.sum().clamp(min=1e-8)
-
-                reseeded_w = sorted(modified_w)
-                self.last_reseed_parents_w = parent_map_w
-
-        counts_b = torch.bincount(idx_b, minlength=self.num_bias_experts)
-        dead_b = torch.nonzero(
-            (counts_b == 0) | (self.ema_traffic_biases < min_utilization_b),
-            as_tuple=True,
-        )[0]
-        details = (
-            torch.stack(
-                (counts_b[dead_b].float(), self.ema_traffic_biases[dead_b]), dim=1
-            )
-            .cpu()
-            .tolist()
-        )
-        self.last_reseed_details["biases"] = {
-            int(idx): {
-                "zero_contexts": count == 0,
-                "low_traffic": traffic < min_utilization_b,
-                "traffic": traffic,
-                "floor": min_utilization_b,
-            }
-            for idx, (count, traffic) in zip(dead_b.tolist(), details)
-        }
-        reseeded_b: list[int] = []
-        if len(dead_b) > 0:
-            floor_b = (1.0 / self.num_bias_experts) - 1e-5
-            active_b = torch.nonzero(self.ema_traffic_biases >= floor_b, as_tuple=True)[
-                0
-            ]
-            if len(active_b) == 0:
-                active_b = torch.nonzero(counts_b > 0, as_tuple=True)[0]
-            if len(active_b) == 0:
-                active_b = torch.arange(self.num_bias_experts, device=device)
-            if len(active_b) > 0:
-                traffic_b = self.ema_traffic_biases[active_b].clone()
-                if traffic_b.sum() <= 0:
-                    traffic_b = counts_b[active_b].float()
-
-                logits_b = torch.log(traffic_b.clamp(min=1e-8)) / max(temperature, 1e-4)
-                probs_b = F.softmax(logits_b, dim=-1)
-
-                modified_b = set(dead_b.tolist())
-                parent_map_b: dict[int, int] = {}
-                for dead_idx in dead_b:
-                    target_pos = torch.multinomial(probs_b, num_samples=1).item()
-                    target_idx = active_b[target_pos].item()
-                    modified_b.add(target_idx)
-                    parent_map_b[int(dead_idx)] = int(target_idx)
-
-                    direction = torch.randn_like(self.codebook_biases[dead_idx])
-                    norm = torch.norm(direction).clamp(min=1e-8)
-                    eps = (direction / norm) * perturbation_scale
-
-                    parent_vec = self.codebook_biases.data[target_idx].clone()
-                    self.codebook_biases.data[dead_idx].copy_(parent_vec + eps)
-                    self.codebook_biases.data[target_idx].copy_(parent_vec - eps)
-
-                    # Split EMA traffic between parent and newly reseeded child
-                    self.ema_traffic_biases[target_idx] *= 0.5
-                    self.ema_traffic_biases[dead_idx] = self.ema_traffic_biases[
-                        target_idx
-                    ]
-
-                    # Halve probability of the target to prevent dogpiling
-                    probs_b[target_pos] *= 0.5
-                    probs_b = probs_b / probs_b.sum().clamp(min=1e-8)
-
-                reseeded_b = sorted(modified_b)
-                self.last_reseed_parents_b = parent_map_b
-
-        if reseeded_w or reseeded_b:
+        if any(reseeded):
             self.lut_valid = False
+            self.lut_margin_valid = False
             self.coalesced_valid = False
-
-        return reseeded_w, reseeded_b
+        return tuple(reseeded)
 
     def forward(
         self,
@@ -803,7 +727,7 @@ class DualVQCodebookRouter(nn.Module):
                     self.diversity_cost * codebook_diversity_loss(self.codebook_w),
                     commit_loss_b,
                     self.bias_balance_cost * balance_loss_b,
-                    self.diversity_cost * codebook_diversity_loss(self.codebook_b),
+                    self.bias_diversity_cost * codebook_diversity_loss(self.codebook_b),
                 )
             )
             moe_loss = parts.sum()
@@ -812,6 +736,7 @@ class DualVQCodebookRouter(nn.Module):
                 self.loss_component_batches.add_(1)
 
             self.lut_valid = False
+            self.lut_margin_valid = False
             self.coalesced_valid = False
 
             half = c_us.shape[0]

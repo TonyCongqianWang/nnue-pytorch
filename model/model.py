@@ -37,6 +37,8 @@ class NNUEModel(nn.Module):
             quantization=self.quantization,
             balance_cost=config.moe_weight_balance_cost,
             bias_balance_cost=config.moe_bias_balance_cost,
+            diversity_cost=config.moe_weight_diversity_cost,
+            bias_diversity_cost=config.moe_bias_diversity_cost,
             temperature=config.moe_weight_temperature,
             bias_temperature=config.moe_bias_temperature,
         )

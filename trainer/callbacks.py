@@ -765,7 +765,7 @@ class SimpleLineLogger(Callback):
 
 
 class MoEDeadExpertReseeder(Callback):
-    """Periodically checks all 849,420 contexts and reseeds dead MoE experts via traffic-weighted cell splitting."""
+    """Periodically reseeds experts with low traffic EMA via traffic-weighted cell splitting."""
 
     def __init__(
         self,
@@ -800,7 +800,7 @@ class MoEDeadExpertReseeder(Callback):
             # In DDP, rank 0 determines dead experts and executes cell splitting.
             # Other ranks wait for broadcast parent tensors to avoid divergence and collective desync.
             if not is_ddp or rank == 0:
-                router.reseed_dead_experts_context_wide(
+                router.reseed_dead_experts_from_traffic(
                     temperature=self.temperature,
                     min_relative_utilization=self.min_relative_utilization,
                 )
@@ -867,6 +867,15 @@ class MoEDeadExpertReseeder(Callback):
                         flush=True,
                     )
 
+    @torch.compiler.disable
+    def on_validation_epoch_start(self, trainer):
+        from .engine import _unwrap_module
+
+        router = _unwrap_module(trainer.model).model.router
+        router.collect_lut_diagnostics = getattr(
+            trainer, "rank", 0
+        ) == 0 and not getattr(trainer, "sanity_checking", False)
+
     @torch.no_grad()
     @torch.compiler.disable
     def on_validation_epoch_end(self, trainer):
@@ -874,7 +883,7 @@ class MoEDeadExpertReseeder(Callback):
             trainer, "sanity_checking", False
         ):
             return
-        from model.modules.router import MOE_LOSS_COMPONENTS
+        from model.modules.router import MOE_LOSS_COMPONENTS, ieee_matmul_precision
 
         from .engine import _unwrap_module
 
@@ -883,7 +892,15 @@ class MoEDeadExpertReseeder(Callback):
         for name in ("weights", "biases"):
             hard = getattr(router, f"ema_traffic_{name}").detach().float().cpu()
             soft = getattr(router, f"ema_soft_{name}").detach().float().cpu()
+            codebook = router.codebook_w if name == "weights" else router.codebook_b
+            with ieee_matmul_precision():
+                normalized = torch.nn.functional.normalize(codebook, dim=1)
+                cosine = normalized @ normalized.T
+            cosine.fill_diagonal_(-torch.inf)
             k = hard.numel()
+            max_pair = cosine.flatten().argmax().item()
+            pair = (max_pair // k, max_pair % k)
+            max_cosine = cosine[pair].item()
             floor = self.min_relative_utilization / k
             mass = hard / hard.sum().clamp_min(1e-12)
             effective = torch.exp(-(mass * mass.clamp_min(1e-12).log()).sum()).item()
@@ -898,6 +915,18 @@ class MoEDeadExpertReseeder(Callback):
                 f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
                 flush=True,
             )
+            geometry = f"max_cos={max_cosine:.5f} pair={pair}"
+            if router.lut_margin_valid:
+                row = 0 if name == "weights" else 1
+                gap_min, gap_mean, near_ties = (
+                    router.lut_margin_stats[row].cpu().tolist()
+                )
+                geometry += (
+                    f"; LUT margin sample n={router.lut_margin_samples} "
+                    f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
+                )
+            print(f"[Routing geometry {name}] {geometry}", flush=True)
+        router.collect_lut_diagnostics = False
         terms = [
             f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
             for name in MOE_LOSS_COMPONENTS
@@ -911,13 +940,8 @@ class MoEDeadExpertReseeder(Callback):
         descriptions = []
         for child, parent in sorted(parents.items()):
             detail = router.last_reseed_details[name][child]
-            reasons = []
-            if detail["zero_contexts"]:
-                reasons.append("zero LUT contexts")
-            if detail["low_traffic"]:
-                reasons.append("low EMA")
             descriptions.append(
-                f"{child}<-{parent} ({' + '.join(reasons)}; "
+                f"{child}<-{parent} (low EMA; "
                 f"traffic={detail['traffic']:.3g}, floor={detail['floor']:.3g})"
             )
         return "; ".join(descriptions)

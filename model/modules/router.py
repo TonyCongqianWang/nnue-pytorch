@@ -40,7 +40,7 @@ NUM_BIAS_EXPERTS = 128
 NUM_BIASES = 64
 BIAS_RANK = 32
 CODEBOOK_DIM = 256
-ROUTER_HASH = 0x4D6F4536  # 'MoE6'
+ROUTER_HASH = 0x4D6F3635  # 'Mo65': dual activation biases and L2 scale 128
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 # Weighted contributions, ordered by router, for inexpensive epoch accumulation.
 MOE_BANKS = ("weights_stm", "biases_stm", "weights_opp", "biases_opp")

@@ -93,34 +93,42 @@ def make_stacks():
         for layer in (bank.l1, bank.l2, bank.output):
             layer.is_coalesced = True
             layer.coalesced_weight.uniform_(-0.25, 0.5)
-            layer.coalesced_bias.fill_(0.125)
+            layer.coalesced_bias.uniform_(-0.15, 0.25)
     return stacks
 
 
 def reference(stacks, x, e1, e2, d1, d2):
-    def affine(layer, x, ids):
+    def project(layer, x, ids):
         w = layer.coalesced_weight.reshape(2, layer.out_features, layer.in_features)[
             ids
         ]
-        b = layer.coalesced_bias.reshape(2, layer.out_features)[ids]
-        return (w @ x.unsqueeze(-1)).squeeze(-1) + b
+        b = layer.coalesced_bias.reshape(2, layer.bias_features)[ids]
+        return (w @ x.unsqueeze(-1)).squeeze(-1), b
 
-    def activate(a, b, ds, dt):
+    def activate(a, b, ba, bb, ds, dt):
+        asq, alin = ba.chunk(2, 1)
+        bsq, blin = bb.chunk(2, 1)
         return torch.cat(
-            [(a + ds[0]).square(), (b + dt[0]).square(), a + ds[1], b + dt[1]], 1
+            [
+                (a + asq + ds[0]).square(),
+                (b + bsq + dt[0]).square(),
+                a + alin + ds[1],
+                b + blin + dt[1],
+            ],
+            1,
         ).clamp(0, 127 / 128)
 
-    a = affine(stacks.l1, x, e1)
-    b = affine(stacks.opp.l1, x, e2)
+    a, ba = project(stacks.l1, x, e1)
+    b, bb = project(stacks.opp.l1, x, e2)
     skip = (a[:, -2:-1] - a[:, -1:] + b[:, -2:-1] - b[:, -1:]) * 0.5
-    h1 = activate(a, b, d1[:2], d2[:2])
-    a = affine(stacks.l2, h1, e1)
-    b = affine(stacks.opp.l2, h1, e2)
-    h2 = activate(a, b, d1[2:], d2[2:])
+    h1 = activate(a, b, ba, bb, d1[:2], d2[:2])
+    a, ba = project(stacks.l2, h1, e1)
+    b, bb = project(stacks.opp.l2, h1, e2)
+    h2 = activate(a, b, ba, bb, d1[2:], d2[2:])
     h = torch.cat([h1, h2], 1)
-    return (
-        affine(stacks.output, h, e1) + affine(stacks.opp.output, h, e2)
-    ) * 0.5 + skip
+    a, ba = project(stacks.output, h, e1)
+    b, bb = project(stacks.opp.output, h, e2)
+    return (a + ba + b + bb) * 0.5 + skip
 
 
 def test_fixed_order_independent_full_readouts():
@@ -157,9 +165,13 @@ def test_common_scale_average(oa, ob, sa, sb):
             layer.coalesced_bias.zero_()
     for bank, o, skip in ((s, oa, sa), (s.opp, ob, sb)):
         bank.output.coalesced_bias.fill_(o / 16384)
-        bank.l1.coalesced_bias.reshape(2, 2)[:, 0] = skip / 32768
+        bank.l1.coalesced_weight.reshape(2, 2, 4)[:, 0, 0] = skip / 32768
+        # Large, unequal activation biases must not enter the skip.
+        bank.l1.coalesced_bias.uniform_(-0.5, 0.5)
     d = tuple(torch.zeros(1, 2) for _ in range(4))
-    actual = s(torch.zeros(1, 4), None, torch.tensor([0]), torch.tensor([1]), d, d)
+    actual = s(
+        torch.tensor([[1.0, 0, 0, 0]]), None, torch.tensor([0]), torch.tensor([1]), d, d
+    )
     expected = s.quantization.fake_quantize_output(
         torch.tensor([[int((2 * oa + 2 * ob + sa + sb) / 2) / 32768]])
     )
@@ -234,6 +246,9 @@ def test_default_moe6_shapes_and_mac_budget():
         layer.in_features * layer.out_features
         for layer in (stacks.l1, stacks.l2, stacks.output)
     )
+    assert stacks.l1.bias_features == stacks.l2.bias_features == 32
+    assert stacks.output.bias_features == 1
+    assert stacks.quantization.weight_scales_dict["ls_l2_weight"] == 128
     assert macs == 35072  # Master: 34944; only the final scalar readout doubles.
 
 

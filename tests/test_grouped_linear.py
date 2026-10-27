@@ -90,7 +90,8 @@ def _check_forward_and_all_gradients(
     with torch.cuda.stream(stream):
         reference = _reference(layer, x, codebook, indices, quantize)
         expected = torch.autograd.grad(reference, (x, *parameters), upstream)
-        actual = layer(x, codebook, indices, quantize)
+        projection, bias = layer(x, codebook, indices, quantize)
+        actual = projection + bias
         gradients = torch.autograd.grad(actual, (x, *parameters), upstream)
     torch.cuda.current_stream().wait_stream(stream)
     optimized.assert_called_once()
@@ -161,7 +162,8 @@ def test_grouped_dispatch_gate(count, expected, monkeypatch):
         torch.arange(count, device="cuda") % layer.codebook_dim,
         num_classes=layer.codebook_dim,
     ).float()
-    actual = layer(x, codebook, indices, False)
+    projection, bias = layer(x, codebook, indices, False)
+    actual = projection + bias
     if expected:
         optimized.assert_called_once()
     else:
@@ -270,13 +272,14 @@ def test_grouped_fallback(device, case, monkeypatch):
     ).to(dtype=dtype)
 
     with torch.autocast(device_type=device, enabled=case == "autocast"):
-        actual = layer(x, codebook, indices)
+        projection, bias = layer(x, codebook, indices)
+        actual = projection + bias
         # Use the original all-buckets operation for matching autocast semantics.
         if case == "autocast":
             flat_w, flat_b = layer.get_all_weights_and_biases(codebook)
             expected = layer.select_output(
-                torch.nn.functional.linear(x, flat_w, flat_b), indices
-            )
+                torch.nn.functional.linear(x, flat_w), indices
+            ) + F.embedding(indices.flatten(), flat_b.view(buckets, outputs))
         else:
             expected = _reference(layer, x, codebook, indices)
     assert actual.dtype == expected.dtype
@@ -322,7 +325,8 @@ def test_grouped_fallback_compiles(count, device):
         num_classes=layer.codebook_dim,
     ).float()
     compiled = torch.compile(layer, backend="aot_eager")
-    actual = compiled(x, codebook, indices, True)
+    projection, bias = compiled(x, codebook, indices, True)
+    actual = projection + bias
     expected = _reference(layer, x, codebook, indices, True)
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-4)
     parameters = (x, *layer.parameters())

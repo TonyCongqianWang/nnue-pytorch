@@ -1,4 +1,4 @@
-# MoE6: independent STM/OPP routing
+# MoE6.5: independent STM/OPP routing
 
 MoE6 retains K32H3 and the existing 849,420 material/king contexts. It replaces
 MoE5's shared, perspective-swapped dense bank with independent STM and OPP banks.
@@ -21,11 +21,11 @@ Each role has 128 bias experts producing 64 threshold values: FC0 squared16,
 FC0 linear16, FC1 squared16, FC1 linear16. Bias generators have independent down
 and up projections; up weights and offsets start at zero. Material and king
 context embeddings remain shared. Dynamic-bias generator weight decay defaults
-to 4e-4; the experiment uses 4e-5 for dense weights.
+to 1e-3; the experiment uses 1e-6 for dense weights.
 
-Weight scales are FC0=256, FC1=64, output=128. Bias scales are 32768, 8192,
+Weight scales are FC0=256, FC1=128, output=128. Bias scales are 32768, 16384,
 and 16384, respectively. Dynamic thresholds use their corresponding hidden-layer
-bias scales. FC0 activations shift by eight bits; FC1 by six bits.
+bias scales. FC0 activations shift by eight bits; FC1 by seven bits.
 
 For output accumulators `o_stm,o_opp` at scale 16384 and skip accumulators
 `s_stm,s_opp` at scale 32768, merge once using wide integers:
@@ -37,8 +37,12 @@ output = trunc(merged * (600*16)/32768)
 
 Stockfish then truncates `output/16` to its internal evaluation unit. Skips retain
 the existing last-two-FC0-neuron difference independently for each role. Their
-signs are learned in STM coordinates. Trainer STE rounding follows this integer
-path. Scale reconciliation and averaging are separate operations.
+signs are learned in STM coordinates. FC0 skips use raw weight projections,
+without static or dynamic biases. Hidden weight experts have independent
+squared/linear biases (16 each per layer); readouts retain one scalar bias.
+Native trainer matmuls compute bias-free projections; selected static and dynamic
+biases are combined once before each activation. Trainer STE rounding follows
+this integer path. Scale reconciliation and averaging are separate operations.
 
 ## Routing and serialization
 
@@ -47,11 +51,12 @@ entry is little-endian with byte0=STM weights, byte1=OPP weights, byte2=STM bias
 byte3=OPP biases. Weight IDs range 0..63; bias IDs 0..127. Unused byte bits are zero.
 STM fields are read from the STM context, OPP fields from the opponent context.
 
-The router tag is `0x4D6F4536` (MoE6), combined with per-role expert counts. Previous
+The router tag is `0x4D6F3635` (Mo65), combined with per-role expert counts. Previous
 nets and checkpoints are incompatible; start a fresh run. After the unchanged FT,
 the file stores 64 STM expert triples, 64 OPP triples, 849,420 uint32 LUT entries,
 and two 128x64 int32 bias tables in STM/OPP order. Expert weights remain coalesced
-on disk. Bias tables occupy 64 KiB combined; the LUT occupies 3,397,680 bytes.
+on disk, with each hidden layer storing 32 biases before its weights. Bias tables
+occupy 64 KiB combined; the LUT occupies 3,397,680 bytes.
 
 Role bank storage is explicit in the trainer: the existing `layer_stacks.l1/l2/output`
 are STM; `layer_stacks.opp` contains OPP layers. `router.codebook` supplies the pair
@@ -92,3 +97,13 @@ Cross-check a randomly initialized exported net using `cross_check_eval.py
 --random-weights --device cpu` and a compatible MoE6 engine. Cover AVX-VNNI and
 SSE execution and AVX512 compilation. CUDA tests require a separate capable host;
 local validation performs no training or optimizer steps.
+
+## Fused inference and full run
+
+FC0 and FC1 share input loads and traversal between role banks on AVX2/VNNI;
+other architectures retain the two-call fallback. Independent accumulators keep
+both parameter slices and the existing integer semantics. The fused kernels add
+no new trainable parameters or MACs.
+
+The v6.5 recipe starts fresh: epochs 0–100 and 100–560 use batch size 131072;
+only 560–600 uses 65536. Trainer and engine pins must both match this format.

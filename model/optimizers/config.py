@@ -27,10 +27,10 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     virtual_ft_weight_decay: float = 0.0
     """Weight decay to apply to the virtual feature transformer parameters."""
 
-    dense_weight_decay: float = 0.0
+    dense_weight_decay: float = 1.0e-6
     """Weight decay to apply to the dense layer parameters."""
 
-    dynamic_bias_weight_decay: float = 4.0e-4
+    dynamic_bias_weight_decay: float = 1.0e-3
     """Weight decay to apply to the dynamic bias head parameters."""
 
     factorized_weight_decay: float = 0.0
@@ -41,7 +41,7 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
 
     def __post_init__(self):
         if (
-            self.dynamic_bias_weight_decay in (0.0, 4.0e-4)
+            self.dynamic_bias_weight_decay in (0.0, 1.0e-3)
             and self.factorized_weight_decay > 0.0
         ):
             self.dynamic_bias_weight_decay = self.factorized_weight_decay

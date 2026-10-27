@@ -1,5 +1,6 @@
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,22 @@ try:
     from .grouped_linear import grouped_l1, grouped_l1_preferred
 except (ImportError, OSError, RuntimeError):
     grouped_l1 = None
+
+
+@dataclass
+class ExpertParameters:
+    """Coalesced affine parameters; hidden layers have separate activation biases."""
+
+    weight: torch.Tensor
+    bias: torch.Tensor
+
+    @property
+    def in_features(self):
+        return self.weight.shape[1]
+
+    @property
+    def out_features(self):
+        return self.weight.shape[0]
 
 
 class MoeLinear(nn.Module):
@@ -29,11 +46,13 @@ class MoeLinear(nn.Module):
         codebook_dim: int = CODEBOOK_DIM,
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,
+        dual_bias: bool = False,
     ):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
+        self.bias_features = out_features * (2 if dual_bias else 1)
         self.count = count
         self.rank = rank
         self.codebook_dim = codebook_dim
@@ -43,7 +62,7 @@ class MoeLinear(nn.Module):
 
         self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
         self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
-        self.bias_adapter = nn.Parameter(torch.empty(out_features, rank))
+        self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
 
         self.register_buffer(
             "coalesced_weight",
@@ -51,7 +70,7 @@ class MoeLinear(nn.Module):
         )
         self.register_buffer(
             "coalesced_bias",
-            torch.zeros(count * out_features, dtype=torch.float32),
+            torch.zeros(count * self.bias_features, dtype=torch.float32),
         )
 
         self._reset_parameters()
@@ -68,72 +87,47 @@ class MoeLinear(nn.Module):
         bound_bias = 1.0 / math.sqrt(self.rank) if self.rank > 0 else 0.0
         nn.init.uniform_(self.bias_adapter, -bound_bias, bound_bias)
 
-    def get_expert_weight_and_bias(
-        self, c: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Maps a 1D context vector c (codebook_dim,) to single expert (weight, bias).
-        """
-        if c.shape[-1] != self.adapter_down.shape[1]:
+    def _bottleneck(self, codebook: torch.Tensor) -> torch.Tensor:
+        if codebook.shape[-1] != self.codebook_dim:
             raise ValueError(
                 f"codebook dimension mismatch in MoeLinear: "
-                f"adapter_down expects {self.adapter_down.shape[1]}, got {c.shape[-1]}"
+                f"adapter_down expects {self.codebook_dim}, got {codebook.shape[-1]}"
             )
+        return rms_norm(F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0)
+
+    def get_expert_weight_and_bias(self, c):
         with ieee_matmul_precision():
-            act = F.gelu(c)
-            h = F.linear(act, self.adapter_down)
-            h = rms_norm(h, target_norm=1.0)
-            w = F.linear(h, self.adapter_up).reshape(
-                self.out_features, self.in_features
+            h = self._bottleneck(c)
+            return (
+                F.linear(h, self.adapter_up).reshape(
+                    self.out_features, self.in_features
+                ),
+                F.linear(h, self.bias_adapter),
             )
-            b = F.linear(h, self.bias_adapter).reshape(self.out_features)
-            return w, b
 
-    def get_delta_weights(self, codebook: torch.Tensor) -> torch.Tensor:
-        # codebook: (count, codebook_dim)
-        if codebook.shape[-1] != self.adapter_down.shape[1]:
-            raise ValueError(
-                f"codebook dimension mismatch in MoeLinear: "
-                f"adapter_down expects {self.adapter_down.shape[1]}, got {codebook.shape[-1]}"
-            )
-        act = F.gelu(codebook)
-        h = F.linear(act, self.adapter_down)  # (count, rank)
-        h = rms_norm(h, target_norm=1.0)
-        w = F.linear(h, self.adapter_up)  # (count, out_features * in_features)
-        return w.view(-1, self.out_features, self.in_features)
+    def get_delta_weights(self, codebook):
+        return F.linear(self._bottleneck(codebook), self.adapter_up).view(
+            -1, self.out_features, self.in_features
+        )
 
-    def get_delta_biases(self, codebook: torch.Tensor) -> torch.Tensor:
-        # codebook: (count, codebook_dim)
-        if codebook.shape[-1] != self.adapter_down.shape[1]:
-            raise ValueError(
-                f"codebook dimension mismatch in MoeLinear: "
-                f"adapter_down expects {self.adapter_down.shape[1]}, got {codebook.shape[-1]}"
-            )
-        act = F.gelu(codebook)
-        h = F.linear(act, self.adapter_down)  # (count, rank)
-        h = rms_norm(h, target_norm=1.0)
-        return F.linear(h, self.bias_adapter)  # (count, out_features)
+    def get_delta_biases(self, codebook):
+        return F.linear(self._bottleneck(codebook), self.bias_adapter)
 
-    def get_all_weights_and_biases(
-        self, codebook: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_all_weights_and_biases(self, codebook=None):
         if self.is_coalesced:
             return self.coalesced_weight, self.coalesced_bias
-
         if codebook is None:
             raise ValueError(
                 "codebook must be provided when MoeLinear is not coalesced"
             )
-
         with ieee_matmul_precision():
-            w = self.get_delta_weights(codebook)
-            b = self.get_delta_biases(codebook)
-
-            flat_w = w.reshape(
-                self.count * self.out_features, self.in_features
-            ).contiguous()
-            flat_b = b.reshape(self.count * self.out_features).contiguous()
-            return flat_w, flat_b
+            h = self._bottleneck(codebook)
+            return (
+                F.linear(h, self.adapter_up)
+                .reshape(self.count * self.out_features, self.in_features)
+                .contiguous(),
+                F.linear(h, self.bias_adapter).reshape(-1).contiguous(),
+            )
 
     # Backward compatibility alias
     get_merged_weights_and_biases = get_all_weights_and_biases
@@ -144,7 +138,8 @@ class MoeLinear(nn.Module):
         codebook: torch.Tensor | None,
         expert_indices: torch.Tensor,
         fake_quantize_weights: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the bias-free projection and selected activation biases separately."""
         flat_w, flat_b = self.get_all_weights_and_biases(codebook)
 
         if fake_quantize_weights:
@@ -176,10 +171,13 @@ class MoeLinear(nn.Module):
             and x.shape[1] == self.in_features
             and torch.cuda.get_device_capability(x.device)[0] >= 8
         ):
-            return grouped_l1(x, flat_w, flat_b, expert_indices, self.count)
-
-        stacked_output = F.linear(x, flat_w, flat_b)
-        return self.select_output(stacked_output, expert_indices)
+            projection = grouped_l1(x, flat_w, None, expert_indices, self.count)
+        else:
+            projection = self.select_output(F.linear(x, flat_w), expert_indices)
+        bias = F.embedding(
+            expert_indices.flatten(), flat_b.view(self.count, self.bias_features)
+        )
+        return projection, bias
 
     def select_output(
         self, stacked_output: torch.Tensor, expert_indices: torch.Tensor
@@ -198,27 +196,14 @@ class MoeLinear(nn.Module):
         return selected_output
 
     @torch.no_grad()
-    def at_index(self, index: int, codebook: torch.Tensor | None = None) -> nn.Linear:
-        layer = nn.Linear(self.in_features, self.out_features)
-
-        if self.is_coalesced:
-            flat_w = self.coalesced_weight
-            flat_b = self.coalesced_bias
-        else:
-            if codebook is None:
-                raise ValueError(
-                    "codebook must be provided when MoeLinear is not coalesced"
-                )
-            flat_w, flat_b = self.get_all_weights_and_biases(codebook)
-            if self.quantization is not None and self.layer_key is not None:
-                flat_w = self.quantization.clip_ls_weight(flat_w, self.layer_key)
-
-        begin = index * self.out_features
-        end = (index + 1) * self.out_features
-
-        layer.weight.copy_(flat_w[begin:end, :])
-        layer.bias.copy_(flat_b[begin:end])
-        return layer
+    def at_index(self, index: int, codebook=None) -> ExpertParameters:
+        flat_w, flat_b = self.get_all_weights_and_biases(codebook)
+        w = flat_w[index * self.out_features : (index + 1) * self.out_features]
+        if self.quantization is not None and self.layer_key is not None:
+            w = self.quantization.clip_ls_weight(w, self.layer_key)
+        return ExpertParameters(
+            w, flat_b[index * self.bias_features : (index + 1) * self.bias_features]
+        )
 
     @torch.no_grad()
     def coalesce_weights(self, codebook: torch.Tensor) -> None:

@@ -5,7 +5,7 @@ from torch import nn
 
 from ..quantize import QuantizationManager
 from .config import LayerStacksConfig
-from .moe_linear import MoeLinear
+from .moe_linear import ExpertParameters, MoeLinear
 from .router import CODEBOOK_DIM
 
 
@@ -47,6 +47,7 @@ class ExpertBank(nn.Module):
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l1",
+            dual_bias=True,
         )
         self.l2 = MoeLinear(
             self.L2 * 2,
@@ -56,6 +57,7 @@ class ExpertBank(nn.Module):
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l2",
+            dual_bias=True,
         )
         self.output = MoeLinear(
             self.L2 * 2 + self.L3 * 2,
@@ -78,49 +80,23 @@ class ExpertBank(nn.Module):
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(
-        self,
-        codebook: torch.Tensor | None = None,
-    ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        if not self.l1.is_coalesced:
-            if codebook is None:
-                raise ValueError(
-                    "codebook must be provided when layer stacks are not coalesced"
-                )
-            w1, b1 = self.l1.get_all_weights_and_biases(codebook)
-            w2, b2 = self.l2.get_all_weights_and_biases(codebook)
-            wo, bo = self.output.get_all_weights_and_biases(codebook)
-            if self.quantization is not None:
-                w1 = self.quantization.clip_ls_weight(w1, self.l1.layer_key)
-                w2 = self.quantization.clip_ls_weight(w2, self.l2.layer_key)
-                wo = self.quantization.clip_ls_weight(wo, self.output.layer_key)
-        else:
-            w1, b1 = self.l1.coalesced_weight, self.l1.coalesced_bias
-            w2, b2 = self.l2.coalesced_weight, self.l2.coalesced_bias
-            wo, bo = self.output.coalesced_weight, self.output.coalesced_bias
-
+        self, codebook=None
+    ) -> Generator[tuple[ExpertParameters, ...], None, None]:
+        layers = (self.l1, self.l2, self.output)
+        parameters = [layer.get_all_weights_and_biases(codebook) for layer in layers]
         for i in range(self.count):
-            l1 = nn.Linear(self.l1.in_features, self.l1.out_features)
-            l2 = nn.Linear(self.l2.in_features, self.l2.out_features)
-            output = nn.Linear(self.output.in_features, self.output.out_features)
-
-            l1.weight.copy_(
-                w1[i * self.l1.out_features : (i + 1) * self.l1.out_features, :]
-            )
-            l1.bias.copy_(b1[i * self.l1.out_features : (i + 1) * self.l1.out_features])
-
-            l2.weight.copy_(
-                w2[i * self.l2.out_features : (i + 1) * self.l2.out_features, :]
-            )
-            l2.bias.copy_(b2[i * self.l2.out_features : (i + 1) * self.l2.out_features])
-
-            output.weight.copy_(
-                wo[i * self.output.out_features : (i + 1) * self.output.out_features, :]
-            )
-            output.bias.copy_(
-                bo[i * self.output.out_features : (i + 1) * self.output.out_features]
-            )
-
-            yield (l1, l2, output)
+            result = []
+            for layer, (weights, biases) in zip(layers, parameters):
+                weight = weights[i * layer.out_features : (i + 1) * layer.out_features]
+                if self.quantization is not None:
+                    weight = self.quantization.clip_ls_weight(weight, layer.layer_key)
+                result.append(
+                    ExpertParameters(
+                        weight,
+                        biases[i * layer.bias_features : (i + 1) * layer.bias_features],
+                    )
+                )
+            yield tuple(result)
 
     @torch.no_grad()
     def coalesce_layer_stacks_inplace(self, codebook: torch.Tensor) -> None:
@@ -160,23 +136,42 @@ class LayerStacks(ExpertBank):
                 )
             )
 
-        a = self.l1(x, cb1, e1, fake_quantize_weights)
-        b = self.opp.l1(x, cb2, e2, fake_quantize_weights)
+        def project_pair(layer_a, layer_b, inputs):
+            a, bias_a = layer_a(inputs, cb1, e1, fake_quantize_weights)
+            b, bias_b = layer_b(inputs, cb2, e2, fake_quantize_weights)
+            return a, b, bias_a, bias_b
+
+        def hidden(a, b, bias_a, bias_b, offset):
+            # Biases belong to activation paths; the shared raw projection
+            # remains available to the bias-free FC0 skip.
+            a_sqr, a_lin = bias_a.chunk(2, dim=1)
+            b_sqr, b_lin = bias_b.chunk(2, dim=1)
+            return activate(
+                torch.cat(
+                    [
+                        a + (a_sqr + dyn_biases_1[offset]),
+                        b + (b_sqr + dyn_biases_2[offset]),
+                    ],
+                    1,
+                ),
+                torch.cat(
+                    [
+                        a + (a_lin + dyn_biases_1[offset + 1]),
+                        b + (b_lin + dyn_biases_2[offset + 1]),
+                    ],
+                    1,
+                ),
+            )
+
+        a, b, bias_a, bias_b = project_pair(self.l1, self.opp.l1, x)
         sa = a[:, -2:-1] - a[:, -1:]
         sb = b[:, -2:-1] - b[:, -1:]
-        h1 = activate(
-            torch.cat([a + dyn_biases_1[0], b + dyn_biases_2[0]], 1),
-            torch.cat([a + dyn_biases_1[1], b + dyn_biases_2[1]], 1),
-        )
-        a = self.l2(h1, cb1, e1, fake_quantize_weights)
-        b = self.opp.l2(h1, cb2, e2, fake_quantize_weights)
-        h2 = activate(
-            torch.cat([a + dyn_biases_1[2], b + dyn_biases_2[2]], 1),
-            torch.cat([a + dyn_biases_1[3], b + dyn_biases_2[3]], 1),
-        )
+        h1 = hidden(a, b, bias_a, bias_b, 0)
+        a, b, bias_a, bias_b = project_pair(self.l2, self.opp.l2, h1)
+        h2 = hidden(a, b, bias_a, bias_b, 2)
         combined = torch.cat([h1, h2], 1)
-        a = self.output(combined, cb1, e1, fake_quantize_weights)
-        b = self.opp.output(combined, cb2, e2, fake_quantize_weights)
+        a, b, bias_a, bias_b = project_pair(self.output, self.opp.output, combined)
+        a, b = a + bias_a, b + bias_b
         value = (a + sa + b + sb) * 0.5
         if fake_quantize_acts:
             # Readouts have scale 16384; skips have scale 32768. Average

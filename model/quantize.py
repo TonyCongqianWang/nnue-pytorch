@@ -69,7 +69,7 @@ def _fake_quantize_weights(value: torch.Tensor, weight_scale: float) -> torch.Te
 class QuantizationConfig:
     nnue2score: float = 600.0
     weight_scale_l1: float = 256.0
-    weight_scale_l2: float = 64.0
+    weight_scale_l2: float = 128.0
     weight_scale_l_out: float = 128
     weight_scale_out: float = 16.0
     ft_quantized_one: float = 256.0

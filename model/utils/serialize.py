@@ -7,10 +7,10 @@ from typing import BinaryIO
 import numpy as np
 import numpy.typing as npt
 import torch
-from torch import nn
 
 from ..config import ModelConfig
 from ..model import NNUEModel
+from ..modules.moe_linear import ExpertParameters
 
 
 def ascii_hist(name, x, bins=7):
@@ -202,7 +202,7 @@ class NNUEWriter:
     def write_fc_layer(
         self,
         model: NNUEModel,
-        layer: nn.Linear,
+        layer: ExpertParameters,
         layer_key: str | None,
         desc: str,
     ) -> None:
@@ -264,7 +264,9 @@ class NNUEReader:
                     out_f = layer.out_features
                     self.read_fc_layer(
                         layer.coalesced_weight[b * out_f : (b + 1) * out_f],
-                        layer.coalesced_bias[b * out_f : (b + 1) * out_f],
+                        layer.coalesced_bias[
+                            b * layer.bias_features : (b + 1) * layer.bias_features
+                        ],
                         layer.layer_key,
                     )
 

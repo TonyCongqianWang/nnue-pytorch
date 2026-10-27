@@ -64,7 +64,7 @@ def get_histogram_callback(hist_title: str, verbose: bool):
 
 
 # hardcoded for now
-VERSION = 0x6A448AFA
+VERSION = 0x6A448AFC
 DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
 
 
@@ -147,9 +147,6 @@ class NNUEWriter:
 
         bias = layer.bias.data[: model.L1]
 
-        # Get export weights (coalesced + remapped 12→11 piece types)
-        weight = layer.get_export_weights()
-
         # biases are exported as i16s
         biases = model.quantization.quantize_feature_transformer_bias(
             bias, get_histogram_callback("", self.verbose)
@@ -158,17 +155,14 @@ class NNUEWriter:
         self.write_tensor(biases)
 
         # Weights stored as [num_features][outputs]
-        offset = 0
         for f in layer.features:
-            n = f.NUM_REAL_FEATURES
             f_export_dtype = f.EXPORT_WEIGHT_DTYPE
 
             ft_histogram_callback = get_histogram_callback(f.FEATURE_NAME, self.verbose)
-            segment_weight = weight[offset : offset + n]
+            segment_weight = f.get_export_weights()
             segment_weight = model.quantization.quantize_feature_transformer_weights(
                 segment_weight, f_export_dtype, ft_histogram_callback
             )
-            offset += n
 
             self.write_tensor(segment_weight)
 
@@ -274,21 +268,20 @@ class NNUEReader:
         L1 = layer.num_outputs
 
         bias = self.tensor(np.int16, [L1])
-        segments = []
-
+        layer.bias.data = (
+            bias.to(torch.float32)
+            / self.model.quantization.weight_scales_dict["ft_bias"]
+        )
         for feature in layer.features:
             dtype = np.int8 if feature.EXPORT_WEIGHT_DTYPE == torch.int8 else np.int16
-            s = self.tensor(dtype, [feature.NUM_REAL_FEATURES, L1])
-            segments.append(s)
-
-        weight = torch.cat(segments, dim=0)
-
-        bias, weight = self.model.quantization.dequantize_feature_transformer(
-            bias, weight
-        )
-
-        layer.bias.data = bias.to(torch.float32)
-        layer.load_export_weights(weight.to(torch.float32))
+            weight = self.tensor(
+                dtype, [feature.NUM_REAL_FEATURES, feature.num_outputs]
+            )
+            weight = (
+                weight.to(torch.float32)
+                / self.model.quantization.weight_scales_dict["ft_weight"]
+            )
+            feature.load_export_weights(weight)
 
     def read_fc_layer(
         self,

@@ -31,12 +31,32 @@ class ComposedFeatureTransformer(nn.Module):
 
         features = [fc(self.num_outputs) for fc in feature_classes]
         self.features = nn.ModuleList(features)
+        self.routed_support = any(
+            f.FEATURE_NAME in ("Own_Supports", "Enemy_Supports") for f in features
+        )
+        if self.routed_support and (
+            l1_size % 16
+            or [f.FEATURE_NAME for f in features[:2]]
+            != ["Own_Supports", "Enemy_Supports"]
+            or any(
+                f.FEATURE_NAME in ("Own_Supports", "Enemy_Supports")
+                for f in features[2:]
+            )
+        ):
+            raise ValueError(
+                "Routed supports require L1 divisible by 16 and exactly one Own_Supports+Enemy_Supports prefix."
+            )
 
         self.bias = nn.Parameter(torch.empty(self.num_outputs, dtype=torch.float32))
 
         # Aggregate attributes from components
         self.NUM_INPUTS = sum(f.NUM_INPUTS for f in features)
         self.MAX_ACTIVE_FEATURES = sum(f.MAX_ACTIVE_FEATURES for f in features)
+        if self.routed_support:
+            # Own/enemy supports partition the former single support family.
+            self.MAX_ACTIVE_FEATURES -= min(
+                features[0].MAX_ACTIVE_FEATURES, features[1].MAX_ACTIVE_FEATURES
+            )
         self.NUM_REAL_FEATURES = sum(f.NUM_REAL_FEATURES for f in features)
 
         self.FEATURE_NAME = "+".join(f.FEATURE_NAME for f in features)
@@ -66,7 +86,9 @@ class ComposedFeatureTransformer(nn.Module):
         self,
         fake_quantize_weights: bool = False,
     ):
-        merged = torch.cat([f.merged_weight() for f in self.features], dim=0)
+        merged = torch.cat(
+            [self.expand_weight(f, f.merged_weight()) for f in self.features], dim=0
+        )
         b = self.bias
         if fake_quantize_weights:
             merged = self.quantization.fake_quantize_weights(merged, "ft_weight")
@@ -91,19 +113,42 @@ class ComposedFeatureTransformer(nn.Module):
 
     @torch.no_grad()
     def get_export_weights(self) -> torch.Tensor:
-        return torch.cat([f.get_export_weights() for f in self.features], dim=0)
+        return torch.cat(
+            [self.expand_weight(f, f.get_export_weights()) for f in self.features],
+            dim=0,
+        )
 
     @torch.no_grad()
     def load_export_weights(self, export_weight: torch.Tensor) -> None:
         offset = 0
         for f in self.features:
             n = f.NUM_REAL_FEATURES
-            f.load_export_weights(export_weight[offset : offset + n])
+            w = export_weight[offset : offset + n]
+            if f.FEATURE_NAME == "Own_Supports":
+                a = self.l1_size * 3 // 8
+                w = torch.cat(
+                    (w[:, :a], w[:, self.l1_size // 2 : self.l1_size // 2 + a]), dim=1
+                )
+            elif f.FEATURE_NAME == "Enemy_Supports":
+                a = self.l1_size * 3 // 8
+                w = torch.cat(
+                    (w[:, a : self.l1_size // 2], w[:, self.l1_size // 2 + a :]), dim=1
+                )
+            f.load_export_weights(w)
             offset += n
 
     def clip_weights(self, quantization) -> None:
         for f in self.features:
             f.clip_weights(quantization)
+
+    def expand_weight(self, feature, weight):
+        if feature.FEATURE_NAME not in ("Own_Supports", "Enemy_Supports"):
+            return weight
+        first, second = weight.chunk(2, dim=1)
+        zeros = weight.new_zeros(weight.shape[0], self.l1_size // 2 - first.shape[1])
+        if feature.FEATURE_NAME == "Own_Supports":
+            return torch.cat((first, zeros, second, zeros), dim=1)
+        return torch.cat((zeros, first, zeros, second), dim=1)
 
     def forward(
         self,
@@ -116,8 +161,6 @@ class ComposedFeatureTransformer(nn.Module):
         backend: str = "auto",
     ) -> torch.Tensor:
         merged, bias = self.merged_weight_and_bias(fake_quantize_weights)
-        ft_max_act = self.quantization.max_ft_activation
-
         l0_ = double_feature_transform(
             us,
             them,
@@ -125,7 +168,7 @@ class ComposedFeatureTransformer(nn.Module):
             black_indices,
             merged,
             bias,
-            ft_max_act,
+            self.quantization.max_ft_activation,
             self.l1_size,
             backend,
         )

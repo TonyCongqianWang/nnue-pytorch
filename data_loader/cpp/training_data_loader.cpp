@@ -443,6 +443,8 @@ struct PP_3WideExtractor: IFeatureExtractor {
     }
 };
 
+#include "global_features.h"
+
 struct ComposedFeatureExtractor: IFeatureExtractor {
     std::vector<std::unique_ptr<IFeatureExtractor>> extractors;
     int                                             m_inputs;
@@ -457,6 +459,14 @@ struct ComposedFeatureExtractor: IFeatureExtractor {
             m_inputs += e->inputs();
             m_max_active += e->max_active_features();
         }
+        // Own/enemy support contacts partition the previous support family;
+        // their combined allowance is 256, not two independent allowances.
+        if (extractors.size() >= 2
+            && dynamic_cast<GlobalRelationsExtractor<1>*>(extractors[0].get())
+            && dynamic_cast<GlobalRelationsExtractor<2>*>(extractors[1].get()))
+            m_max_active -= std::min(extractors[0]->max_active_features(),
+                                     extractors[1]->max_active_features());
+
     }
 
     int inputs() const override { return m_inputs; }
@@ -485,6 +495,16 @@ struct ComposedFeatureExtractor: IFeatureExtractor {
 };
 
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
+    if (name == "Own_Supports")
+        return std::make_unique<GlobalRelationsExtractor<1>>();
+    if (name == "Enemy_Supports")
+        return std::make_unique<GlobalRelationsExtractor<2>>();
+    if (name == "Global_Attacks")
+        return std::make_unique<GlobalRelationsExtractor<0>>();
+    if (name == "Pawn_FrontierPairs")
+        return std::make_unique<PawnStructureExtractor<true>>();
+    if (name == "Pawn_FilePairs")
+        return std::make_unique<PawnStructureExtractor<false>>();
     if (name == "HalfKAv2_hm")
         return std::make_unique<HalfKAv2_hmExtractor>();
     if (name == "K32Q2")
@@ -668,7 +688,7 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
     int* white_ids     = black_offsets + size + 1;
     int* black_ids     = white_ids + num_active_white_features;
     int* piece_counts  = black_ids + num_active_black_features;
-    int  white_count   = 0, black_count = 0;
+    int  white_count = 0, black_count = 0;
     white_offsets[0] = black_offsets[0] = 0;
     for (int row = 0; row < size; ++row)
     {

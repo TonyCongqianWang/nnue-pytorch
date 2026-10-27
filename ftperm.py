@@ -428,7 +428,10 @@ def make_swaps_3(actmat: torch.Tensor) -> SwapResult:
 
 
 def find_perm_impl(
-    actmat: npt.NDArray[np.bool_] | torch.Tensor, device_str: str, L1: int
+    actmat: npt.NDArray[np.bool_] | torch.Tensor,
+    device_str: str,
+    L1: int,
+    support_boundary: int | None = None,
 ) -> npt.NDArray[np.int_]:
     if isinstance(actmat, np.ndarray):
         actmat = np.reshape(actmat, (actmat.shape[0] * 2, actmat.shape[1] // 2))
@@ -436,6 +439,17 @@ def find_perm_impl(
     else:
         actmat = actmat.reshape((actmat.shape[0] * 2, actmat.shape[1] // 2))
         actmat = actmat.to(device_str)
+
+    if support_boundary is not None:
+        parts = []
+        for start, stop in ((0, support_boundary), (support_boundary, L1 // 2)):
+            width = stop - start
+            if width < 8:
+                parts.append(np.arange(start, stop))
+            else:
+                group = actmat[:, start:stop].contiguous().reshape(-1, width * 2)
+                parts.append(find_perm_impl(group, device_str, width * 2) + start)
+        return np.concatenate(parts)
 
     actmat_orig = actmat.clone()
 
@@ -572,15 +586,30 @@ def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
             f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
         )
 
-    # Both sides of the FT must use the same permutation.
-    permutation.extend([x + l1_size // 2 for x in permutation])
-
-    # Apply the permutation in place.
+    half = l1_size // 2
+    if sorted(permutation) != list(range(half)):
+        raise ValueError("Expected a bijection of product indices.")
+    own = l1_size * 3 // 8
+    if model.input.routed_support and any(
+        (i < own) != (j < own) for i, j in enumerate(permutation)
+    ):
+        raise ValueError(
+            "FT permutation must preserve own/enemy support product sections."
+        )
+    raw_permutation = permutation + [x + half for x in permutation]
     for f in model.input.features:
-        f.weight.copy_(f.weight[:, permutation])
-    model.input.bias.copy_(model.input.bias[permutation])
+        if f.FEATURE_NAME == "Own_Supports":
+            local = permutation[:own]
+            columns = local + [x + own for x in local]
+        elif f.FEATURE_NAME == "Enemy_Supports":
+            local = [x - own for x in permutation[own:]]
+            columns = local + [x + (half - own) for x in local]
+        else:
+            columns = raw_permutation
+        f.weight.copy_(f.weight[:, columns])
+    model.input.bias.copy_(model.input.bias[raw_permutation])
     model.layer_stacks.l1.linear.weight.copy_(
-        model.layer_stacks.l1.linear.weight[:, permutation]
+        model.layer_stacks.l1.linear.weight[:, raw_permutation]
     )
 
 
@@ -708,7 +737,14 @@ def command_find_perm(args: FeaturePermutationConfig) -> None:
         actmat = np.load(file)
 
     device_str = resolve_device(args.use_cupy, args.device)
-    perm = find_perm_impl(actmat, device_str, args.model_config.L1)
+    perm = find_perm_impl(
+        actmat,
+        device_str,
+        args.model_config.L1,
+        args.model_config.L1 * 3 // 8
+        if "Own_Supports" in args.feature_config.features
+        else None,
+    )
 
     # perm = np.random.permutation([i for i in range(L1)])
     with open(args.subcommand.out, "wb") as file:
@@ -737,7 +773,12 @@ def ft_optimize(
             np.save(file, actmat)
 
     print("Finding permutation...")
-    perm = find_perm_impl(actmat, device_str, model.L1)
+    perm = find_perm_impl(
+        actmat,
+        device_str,
+        model.L1,
+        model.L1 * 3 // 8 if model.input.routed_support else None,
+    )
     if perm_save_path is not None:
         with open(perm_save_path, "wb") as file:
             np.save(file, perm)

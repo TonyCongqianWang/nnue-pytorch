@@ -9,7 +9,7 @@ from .moe_linear import MoeLinear
 from .router import CODEBOOK_DIM
 
 
-class LayerStacks(nn.Module):
+class ExpertBank(nn.Module):
     def __init__(
         self,
         count: int,
@@ -29,7 +29,7 @@ class LayerStacks(nn.Module):
             or config.L3 % 2
         ):
             raise ValueError(
-                "MoE5 requires even widths and at least four total L2 neurons"
+                "MoE6 requires even widths and at least four total L2 neurons"
             )
         self.count = count
         self.L1 = config.L1
@@ -70,101 +70,11 @@ class LayerStacks(nn.Module):
         with torch.no_grad():
             self.output.bias_adapter.zero_()
 
-    def get_expert_deltas(self, codebook: torch.Tensor) -> list[torch.Tensor]:
+    def get_expert_deltas(self, codebook):
         return [
-            self.l1.get_delta_weights(codebook),
-            self.l2.get_delta_weights(codebook),
-            self.output.get_delta_weights(codebook),
+            layer.get_delta_weights(codebook)
+            for layer in (self.l1, self.l2, self.output)
         ]
-
-    def forward_head(
-        self,
-        x,
-        codebook,
-        expert_indices,
-        dyn_biases,
-        fake_quantize_acts=True,
-        fake_quantize_weights=True,
-    ):
-        """Counterfactual with the same complete route on both sides."""
-        return self.forward(
-            x,
-            codebook,
-            expert_indices,
-            expert_indices,
-            dyn_biases,
-            dyn_biases,
-            fake_quantize_acts,
-            fake_quantize_weights,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        codebook: torch.Tensor | None,
-        e1: torch.Tensor,
-        e2: torch.Tensor,
-        dyn_biases_1: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        dyn_biases_2: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        fake_quantize_acts: bool = True,
-        fake_quantize_weights: bool = True,
-    ) -> torch.Tensor:
-        def average(a, b, layer_key):
-            value = (a + b) * 0.5
-            if fake_quantize_acts:
-                # C++ averages integer affine accumulators with truncation toward zero.
-                # Round each operand first to remove floating-point matmul noise.
-                scale = self.quantization.weight_scales_dict[f"{layer_key}_bias"]
-                quantized = (
-                    torch.trunc((torch.round(a * scale) + torch.round(b * scale)) * 0.5)
-                    / scale
-                )
-                value = value + (quantized - value).detach()
-            return value
-
-        def activate(sqr, lin):
-            sqr = sqr.square()
-            if fake_quantize_acts:
-                sqr = self.quantization.fake_quantize_ls_act(sqr)
-                lin = self.quantization.fake_quantize_ls_act(lin)
-            sqr = sqr * self.quantization.sqr_crelu_correction_factor
-            return self.quantization.clip_ls_act(torch.cat([sqr, lin], dim=1))
-
-        # FT is [STM, opponent]. Hidden activations are grouped by activation
-        # kind, then perspective: [A_sq, B_sq, A_lin, B_lin].
-        def swap_ft(value):
-            return torch.cat(value.chunk(2, dim=1)[::-1], dim=1)
-
-        def swap_hidden(value):
-            return value.view(value.shape[0], 2, 2, -1).flip(2).reshape_as(value)
-
-        a = self.l1(x, codebook, e1, fake_quantize_weights)
-        b = self.l1(swap_ft(x), codebook, e2, fake_quantize_weights)
-        skip = average(a[:, -2:-1] - a[:, -1:], b[:, -1:] - b[:, -2:-1], "ls_l1")
-        h1 = activate(
-            torch.cat([a + dyn_biases_1[0], b + dyn_biases_2[0]], dim=1),
-            torch.cat([a + dyn_biases_1[1], b + dyn_biases_2[1]], dim=1),
-        )
-        a = self.l2(h1, codebook, e1, fake_quantize_weights)
-        b = self.l2(swap_hidden(h1), codebook, e2, fake_quantize_weights)
-        h2 = activate(
-            torch.cat([a + dyn_biases_1[2], b + dyn_biases_2[2]], dim=1),
-            torch.cat([a + dyn_biases_1[3], b + dyn_biases_2[3]], dim=1),
-        )
-        a = self.output(torch.cat([h1, h2], dim=1), codebook, e1, fake_quantize_weights)
-        b = self.output(
-            torch.cat([swap_hidden(h1), swap_hidden(h2)], dim=1),
-            codebook,
-            e2,
-            fake_quantize_weights,
-        )
-        # B predicts in opponent coordinates. Convert to STM before averaging.
-        value = average(a, -b, "ls_output") + skip
-        return (
-            self.quantization.fake_quantize_output(value)
-            if fake_quantize_acts
-            else value
-        )
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(
@@ -217,3 +127,84 @@ class LayerStacks(nn.Module):
         self.l1.coalesce_weights(codebook)
         self.l2.coalesce_weights(codebook)
         self.output.coalesce_weights(codebook)
+
+
+class LayerStacks(ExpertBank):
+    """Independent role banks; every branch consumes fixed global input ordering."""
+
+    def __init__(self, count, config, quantization, rank=32, codebook_dim=CODEBOOK_DIM):
+        super().__init__(count, config, quantization, rank, codebook_dim)
+        self.opp = ExpertBank(count, config, quantization, rank, codebook_dim)
+
+    def forward(
+        self,
+        x,
+        codebook,
+        e1,
+        e2,
+        dyn_biases_1,
+        dyn_biases_2,
+        fake_quantize_acts=True,
+        fake_quantize_weights=True,
+    ):
+        cb1, cb2 = (None, None) if codebook is None else codebook
+
+        def activate(sqr, lin):
+            sqr = sqr.square()
+            if fake_quantize_acts:
+                sqr = self.quantization.fake_quantize_ls_act(sqr)
+                lin = self.quantization.fake_quantize_ls_act(lin)
+            return self.quantization.clip_ls_act(
+                torch.cat(
+                    [sqr * self.quantization.sqr_crelu_correction_factor, lin], dim=1
+                )
+            )
+
+        a = self.l1(x, cb1, e1, fake_quantize_weights)
+        b = self.opp.l1(x, cb2, e2, fake_quantize_weights)
+        sa = a[:, -2:-1] - a[:, -1:]
+        sb = b[:, -2:-1] - b[:, -1:]
+        h1 = activate(
+            torch.cat([a + dyn_biases_1[0], b + dyn_biases_2[0]], 1),
+            torch.cat([a + dyn_biases_1[1], b + dyn_biases_2[1]], 1),
+        )
+        a = self.l2(h1, cb1, e1, fake_quantize_weights)
+        b = self.opp.l2(h1, cb2, e2, fake_quantize_weights)
+        h2 = activate(
+            torch.cat([a + dyn_biases_1[2], b + dyn_biases_2[2]], 1),
+            torch.cat([a + dyn_biases_1[3], b + dyn_biases_2[3]], 1),
+        )
+        combined = torch.cat([h1, h2], 1)
+        a = self.output(combined, cb1, e1, fake_quantize_weights)
+        b = self.opp.output(combined, cb2, e2, fake_quantize_weights)
+        value = (a + sa + b + sb) * 0.5
+        if fake_quantize_acts:
+            # Readouts have scale 16384; skips have scale 32768. Average
+            # complete predictions once in the common L1 reference scale.
+            scale = self.quantization.weight_scales_dict["ls_l1_bias"]
+            hard = (
+                torch.trunc(
+                    (
+                        torch.round(a * scale)
+                        + torch.round(sa * scale)
+                        + torch.round(b * scale)
+                        + torch.round(sb * scale)
+                    )
+                    * 0.5
+                )
+                / scale
+            )
+            value = value + (hard - value).detach()
+            value = self.quantization.fake_quantize_output(value)
+        return value
+
+    @torch.no_grad()
+    def get_coalesced_layer_stacks(self, codebook=None):
+        cb1, cb2 = (None, None) if codebook is None else codebook
+        yield from super().get_coalesced_layer_stacks(cb1)
+        yield from self.opp.get_coalesced_layer_stacks(cb2)
+
+    @torch.no_grad()
+    def coalesce_layer_stacks_inplace(self, codebook):
+        super().coalesce_layer_stacks_inplace(codebook[0])
+        self.opp.coalesce_layer_stacks_inplace(codebook[1])

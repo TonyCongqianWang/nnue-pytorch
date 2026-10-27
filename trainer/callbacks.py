@@ -797,73 +797,33 @@ class MoEDeadExpertReseeder(Callback):
             )
             rank = getattr(trainer, "rank", 0)
 
-            # In DDP, rank 0 determines dead experts and executes cell splitting.
-            # Other ranks wait for broadcast parent tensors to avoid divergence and collective desync.
             if not is_ddp or rank == 0:
                 router.reseed_dead_experts_from_traffic(
                     temperature=self.temperature,
                     min_relative_utilization=self.min_relative_utilization,
                 )
-
-                parent_map_w = getattr(router, "last_reseed_parents_w", {})
-                parent_map_b = getattr(router, "last_reseed_parents_b", {})
-            else:
-                parent_map_w, parent_map_b = {}, {}
-
-            parent_tensor_w = torch.full(
-                (router.num_weight_experts,),
-                -1,
-                dtype=torch.long,
-                device=router.codebook_weights.device,
-            )
-            parent_tensor_b = torch.full(
-                (router.num_bias_experts,),
-                -1,
-                dtype=torch.long,
-                device=router.codebook_biases.device,
-            )
-            if rank == 0:
-                for child, parent in parent_map_w.items():
-                    parent_tensor_w[child] = parent
-                for child, parent in parent_map_b.items():
-                    parent_tensor_b[child] = parent
-
-            if is_ddp:
-                dist.broadcast(parent_tensor_w, src=0)
-                dist.broadcast(parent_tensor_b, src=0)
-
-                if (parent_tensor_w >= 0).any():
-                    dist.broadcast(router.codebook_weights.data, src=0)
+            for name, parameter, _, _, _ in router.banks():
+                parents = router.last_reseed_parents.get(name, {}) if rank == 0 else {}
+                parent_tensor = torch.full(
+                    (len(parameter),), -1, dtype=torch.long, device=parameter.device
+                )
+                for child, parent in parents.items():
+                    parent_tensor[child] = parent
+                if is_ddp:
+                    dist.broadcast(parent_tensor, src=0)
+                if (parent_tensor >= 0).any():
+                    if is_ddp:
+                        dist.broadcast(parameter.data, src=0)
                     self._copy_optimizer_state(
-                        trainer.optimizer, router.codebook_weights, parent_tensor_w
+                        trainer.optimizer, parameter, parent_tensor
                     )
-
-                if (parent_tensor_b >= 0).any():
-                    dist.broadcast(router.codebook_biases.data, src=0)
-                    self._copy_optimizer_state(
-                        trainer.optimizer, router.codebook_biases, parent_tensor_b
-                    )
-            else:
-                if (parent_tensor_w >= 0).any():
-                    self._copy_optimizer_state(
-                        trainer.optimizer, router.codebook_weights, parent_tensor_w
-                    )
-                if (parent_tensor_b >= 0).any():
-                    self._copy_optimizer_state(
-                        trainer.optimizer, router.codebook_biases, parent_tensor_b
-                    )
-
-            if rank == 0:
-                if parent_map_w:
+                    router.lut_valid = router.lut_margin_valid = (
+                        router.coalesced_valid
+                    ) = False
+                if rank == 0 and parents:
                     print(
-                        f"[Step {trainer.global_step}] Reseeded {len(parent_map_w)} dead weight expert(s): "
-                        f"{self._reseed_description(router, 'weights', parent_map_w)}",
-                        flush=True,
-                    )
-                if parent_map_b:
-                    print(
-                        f"[Step {trainer.global_step}] Reseeded {len(parent_map_b)} dead bias expert(s): "
-                        f"{self._reseed_description(router, 'biases', parent_map_b)}",
+                        f"[Step {trainer.global_step}] Reseeded {len(parents)} {name} expert(s): "
+                        f"{self._reseed_description(router, name, parents)}",
                         flush=True,
                     )
 
@@ -872,6 +832,8 @@ class MoEDeadExpertReseeder(Callback):
         from .engine import _unwrap_module
 
         router = _unwrap_module(trainer.model).model.router
+        for name, _, _, _, _ in router.banks():
+            getattr(router, f"validation_counts_{name}").zero_()
         router.collect_lut_diagnostics = getattr(
             trainer, "rank", 0
         ) == 0 and not getattr(trainer, "sanity_checking", False)
@@ -889,10 +851,9 @@ class MoEDeadExpertReseeder(Callback):
 
         router = _unwrap_module(trainer.model).model.router
         # These are training snapshots. Validation must not alter traffic EMAs.
-        for name in ("weights", "biases"):
-            hard = getattr(router, f"ema_traffic_{name}").detach().float().cpu()
-            soft = getattr(router, f"ema_soft_{name}").detach().float().cpu()
-            codebook = router.codebook_w if name == "weights" else router.codebook_b
+        for row, (name, _, hard, soft, codebook) in enumerate(router.banks()):
+            hard = hard.detach().float().cpu()
+            soft = soft.detach().float().cpu()
             with ieee_matmul_precision():
                 normalized = torch.nn.functional.normalize(codebook, dim=1)
                 cosine = normalized @ normalized.T
@@ -915,9 +876,18 @@ class MoEDeadExpertReseeder(Callback):
                 f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
                 flush=True,
             )
+            counts = getattr(router, f"validation_counts_{name}").detach().cpu()
+            observed = counts / counts.sum().clamp_min(1)
+            observed_effective = (
+                (-(observed * observed.clamp_min(1e-12).log()).sum()).exp().item()
+            )
+            print(
+                f"[Validation routing {name}, rank-0] active={int((counts > 0).sum())}/{k} "
+                f"effective={observed_effective:.1f} min={observed.min():.3g} max={observed.max():.3g}",
+                flush=True,
+            )
             geometry = f"max_cos={max_cosine:.5f} pair={pair}"
             if router.lut_margin_valid:
-                row = 0 if name == "weights" else 1
                 gap_min, gap_mean, near_ties = (
                     router.lut_margin_stats[row].cpu().tolist()
                 )

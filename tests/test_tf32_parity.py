@@ -61,7 +61,9 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
-    codebook = torch.randn(count, layer.codebook_dim, device="cuda")
+    codebook = tuple(
+        torch.randn(count, layer.codebook_dim, device="cuda") for _ in range(2)
+    )
     biases = tuple(
         torch.zeros(batch, width, device="cuda")
         for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2
@@ -78,12 +80,12 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
 
 @pytest.mark.skipif(not _tf32_supported(), reason=_TF32_REASON)
 def test_quantized_gemm_matches_fp64_reference():
-    # Raw L1-shaped GEMM with grid inputs: k/128 acts, k/128 weights, k/16384
+    # Raw L1-shaped GEMM with grid inputs: k/128 acts, k/256 weights, k/32768
     # bias, as after fake quantization. Products are exact in both precisions,
     # so TF32 vs fp64 differs only by fp32 accumulation order.
     x = torch.randint(0, 128, (4096, 1024), device="cuda").float() / 128.0
-    w = torch.randint(-127, 128, (256, 1024), device="cuda").float() / 128.0
-    b = torch.randint(-127, 128, (256,), device="cuda").float() / 16384.0
+    w = torch.randint(-127, 128, (256, 1024), device="cuda").float() / 256.0
+    b = torch.randint(-127, 128, (256,), device="cuda").float() / 32768.0
 
     torch.backends.cuda.matmul.allow_tf32 = True
     actual = torch.nn.functional.linear(x, w, b)
@@ -102,7 +104,9 @@ def test_tf32_changes_forward_without_quantization():
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
-    codebook = torch.randn(8, layer.codebook_dim, device="cuda")
+    codebook = tuple(
+        torch.randn(8, layer.codebook_dim, device="cuda") for _ in range(2)
+    )
     biases = tuple(
         torch.zeros(batch, width, device="cuda")
         for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2

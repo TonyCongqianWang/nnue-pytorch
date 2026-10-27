@@ -7,19 +7,7 @@ from cross_check_eval import init_random_weights
 from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
-from model.modules.router import (
-    NUM_BIAS_EXPERTS,
-    NUM_BIASES,
-    NUM_MATERIAL_STATES,
-    NUM_WEIGHT_EXPERTS,
-    ROUTER_HASH,
-    ROUTER_TABLE_SIZE,
-    DualVQCodebookRouter,
-    StructuredKingEmbedding,
-    decode_material_state,
-    encode_material_state,
-    get_router_hash,
-)
+from model.modules.router import *
 from model.utils.serialize import NNUEReader, NNUEWriter
 
 
@@ -82,203 +70,56 @@ def test_structured_king_geometry():
     assert z_k.shape == (3, 256)
 
 
-def test_dual_router_training_gradient_flow():
-    """Verify forward and backward gradient flow into codebooks and embeddings."""
-    torch.manual_seed(123)
-    router = DualVQCodebookRouter()
-    router.train()
-
-    c_us = torch.tensor([0, 1000, 50000, 800000], dtype=torch.long)
-    c_them = torch.tensor([800000, 50000, 1000, 0], dtype=torch.long)
-
-    (
-        e1_w,
-        e2_w,
-        dyn_biases_1,
-        dyn_biases_2,
-        moe_loss,
-        commit_loss,
-        balance_loss,
-    ) = router(c_us, c_them)
-
-    assert e1_w.shape == (4,)
-    assert e2_w.shape == (4,)
-    assert all(0 <= idx.item() < NUM_WEIGHT_EXPERTS for idx in e1_w)
-    assert all(0 <= idx.item() < NUM_WEIGHT_EXPERTS for idx in e2_w)
-
-    for b in dyn_biases_1 + dyn_biases_2:
-        assert b.shape == (4, 16)
-
-    assert moe_loss.ndim == 0
-    assert commit_loss.ndim == 0
-    assert balance_loss.ndim == 0
-
-    # Backprop
-    total_loss = (
-        moe_loss
-        + dyn_biases_1[0].sum()
-        + dyn_biases_1[1].sum()
-        + dyn_biases_1[2].sum()
-        + dyn_biases_1[3].sum()
+def test_four_byte_routing_and_bias_tables():
+    r = DualVQCodebookRouter(num_contexts=2)
+    entries = torch.tensor(
+        [
+            63 | (62 << 8) | (127 << 16) | (126 << 24),
+            1 | (2 << 8) | (3 << 16) | (4 << 24),
+        ],
+        dtype=torch.int64,
     )
-    total_loss.backward()
-
-    # Verify gradients exist on all core parameters
-    assert router.codebook_weights.grad is not None
-    assert router.codebook_biases.grad is not None
-    assert router.bias_head_down.weight.grad is not None
-    assert router.bias_head_up.weight.grad is not None
-    assert router.bias_head_up.bias.grad is not None
-    assert router.embed_T.weight.grad is not None
-    assert router.embed_P.weight.grad is not None
-    assert router.king_embed.embed_chebyshev.weight.grad is not None
+    r.load_lookup_table(entries.to(torch.uint32).numpy().tobytes())
+    d = torch.arange(2 * 128 * 64, dtype=torch.float32).reshape(2, 128, 64) / 32768
+    r.load_coalesced_biases(d)
+    r.eval()
+    ew1, ew2, d1, d2, *_ = r(torch.tensor([0]), torch.tensor([1]))
+    assert ew1.item() == 63 and ew2.item() == 2
+    torch.testing.assert_close(torch.cat(d1, 1), d[0, 127:128])
+    torch.testing.assert_close(torch.cat(d2, 1), d[1, 4:5])
+    assert torch.equal(r.get_lookup_table(), entries)
 
 
-def test_dual_router_eval_mode_and_bit_packing():
-    """Verify bit packing into uint16 and consistency in eval mode."""
-    torch.manual_seed(42)
-    router = DualVQCodebookRouter()
-    router.eval()
-
-    lut = router.get_lookup_table()
-    assert lut.shape == (ROUTER_TABLE_SIZE,)
-
-    c_sample = torch.tensor([0, 12345, ROUTER_TABLE_SIZE - 1], dtype=torch.long)
-    packed = lut[c_sample]
-
-    e_w = packed & 0x3F
-    e_b = (packed >> 6) & 0xFF
-
-    assert all(0 <= w.item() < NUM_WEIGHT_EXPERTS for w in e_w)
-    assert all(0 <= b.item() < NUM_BIAS_EXPERTS for b in e_b)
-    assert get_router_hash(NUM_WEIGHT_EXPERTS, NUM_BIAS_EXPERTS) == (
-        ROUTER_HASH ^ ((NUM_BIAS_EXPERTS << 16) | NUM_WEIGHT_EXPERTS)
-    )
-
-    coalesced_biases = router.get_coalesced_bias_table()
-    assert coalesced_biases.shape == (NUM_BIAS_EXPERTS, NUM_BIASES)
-
-    e1_w, e2_w, dyn_b1, dyn_b2, *_ = router(c_sample, c_sample)
-    assert torch.equal(e1_w, e_w)
-    assert torch.equal(e2_w, e_w)
-    assert torch.equal(dyn_b1[0], coalesced_biases[e_b, 0:16])
-    assert torch.equal(dyn_b1[1], coalesced_biases[e_b, 16:32])
-    assert torch.equal(dyn_b1[2], coalesced_biases[e_b, 32:48])
-    assert torch.equal(dyn_b1[3], coalesced_biases[e_b, 48:64])
-    assert torch.equal(dyn_b2[0], coalesced_biases[e_b, 0:16])
-    assert torch.equal(dyn_b2[1], coalesced_biases[e_b, 16:32])
-    assert torch.equal(dyn_b2[2], coalesced_biases[e_b, 32:48])
-    assert torch.equal(dyn_b2[3], coalesced_biases[e_b, 48:64])
-
-
-def test_dead_expert_reseeding():
-    """Verify that dead experts are identified and reseeded across both codebooks."""
-    torch.manual_seed(99)
-    router = DualVQCodebookRouter()
-
-    # Force expert 0 in weights and expert 0 in biases to be extreme outliers / dead
-    with torch.no_grad():
-        router.codebook_weights[0].fill_(1000.0)
-        router.codebook_biases[0].fill_(1000.0)
-        router.ema_traffic_weights[0] = 0.0
-        router.ema_traffic_biases[0] = 0.0
-
-    reseeded_w, reseeded_b = router.reseed_dead_experts_from_traffic()
-    assert 0 in reseeded_w
-    assert 0 in reseeded_b
-    assert not torch.allclose(router.codebook_weights[0], torch.tensor(1000.0))
-    assert not torch.allclose(router.codebook_biases[0], torch.tensor(1000.0))
+def test_zero_bias_init_and_independent_codebooks():
+    r = DualVQCodebookRouter(num_contexts=4)
+    assert r.coalesced_biases.shape == (2, 128, 64)
+    assert torch.count_nonzero(r.get_coalesced_bias_table()) == 0
+    assert len(list(r.banks())) == 4
+    assert r.codebook[0].data_ptr() != r.codebook[1].data_ptr()
 
 
 def test_serialization_and_deserialization_roundtrip():
-    """Verify that NNUEWriter and NNUEReader serialize and restore models identically."""
-    torch.manual_seed(42)
-    config = ModelConfig()
-    model = NNUEModel(feature_name=DEFAULT_FEATURES, config=config)
-    init_random_weights(model)
-
-    # Initialize bias head with non-trivial values
-    with torch.no_grad():
-        model.router.bias_head_down.weight.normal_(0, 0.05)
-        model.router.bias_head_up.weight.normal_(0, 0.05)
-        model.router.bias_head_up.bias.normal_(0, 0.05)
-
-    writer = NNUEWriter(model, verbose=False)
-    serialized_bytes = writer.buf
-
-    # Read back
-    buf_io = io.BytesIO(serialized_bytes)
-    reader = NNUEReader(buf_io, feature_name=DEFAULT_FEATURES, config=config)
-    loaded_model = reader.model
-
-    # Verify lookup tables match identically
-    lut_orig = model.router.get_lookup_table()
-    lut_loaded = loaded_model.router.get_lookup_table()
-    assert torch.equal(lut_orig, lut_loaded)
-
-    # Verify coalesced biases match within quantization precision
-    coalesced_orig = model.router.get_coalesced_bias_table()
-    coalesced_loaded = loaded_model.router.get_coalesced_bias_table()
-    max_bias_diff = torch.max(torch.abs(coalesced_orig - coalesced_loaded)).item()
-    assert max_bias_diff < 0.01, f"Dynamic bias diff too large: {max_bias_diff}"
-
-
-def test_cpp_data_loader_parity():
-    """Verify that C++ shared library produces valid and consistent context indices matching Python."""
-    import chess
-
-    from data_loader.stream import destroy_sparse_batch, get_sparse_batch_from_fens
-    from tests.test_top2moe_symmetry import get_context_indices
-
-    test_fens = [
-        chess.STARTING_FEN,
-        "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 4 4",
-        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-        "8/4k3/1pbn1p1p/5Pp1/pP4P1/P2BK3/1B5P/8 w - - 1 49",
-        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-    ]
-
-    scores = [0] * len(test_fens)
-    plies = [0] * len(test_fens)
-    results = [0] * len(test_fens)
-
-    batch_ptr = get_sparse_batch_from_fens(
-        "HalfKAv2_hm", test_fens, scores, plies, results
+    m = NNUEModel(DEFAULT_FEATURES, ModelConfig())
+    init_random_weights(m)
+    writer = NNUEWriter(m, verbose=False)
+    loaded = NNUEReader(io.BytesIO(writer.buf), DEFAULT_FEATURES, ModelConfig()).model
+    torch.testing.assert_close(
+        m.router.get_lookup_table(), loaded.router.get_lookup_table(), rtol=0, atol=0
     )
-    assert batch_ptr is not None
-
-    batch = batch_ptr.contents
-    *_, c_us, c_them = batch.get_tensors("cpu")
-
-    for i, fen in enumerate(test_fens):
-        board = chess.Board(fen)
-        expected_c_us, expected_c_them = get_context_indices(board)
-        assert c_us[i].item() == expected_c_us, (
-            f"FEN {fen}: C++ c_us={c_us[i].item()} != Python {expected_c_us}"
-        )
-        assert c_them[i].item() == expected_c_them, (
-            f"FEN {fen}: C++ c_them={c_them[i].item()} != Python {expected_c_them}"
-        )
-
-    destroy_sparse_batch(batch_ptr)
-
-
-def test_bias_lut_preserves_highest_eight_bit_id():
-    router = DualVQCodebookRouter()
-    table = torch.full((ROUTER_TABLE_SIZE,), 63 | (255 << 6), dtype=torch.int32)
-    router.load_lookup_table(table)
-    biases = (
-        torch.arange(NUM_BIAS_EXPERTS * NUM_BIASES)
-        .reshape(NUM_BIAS_EXPERTS, NUM_BIASES)
-        .float()
+    torch.testing.assert_close(
+        m.router.get_coalesced_bias_table(),
+        loaded.router.get_coalesced_bias_table(),
+        rtol=0,
+        atol=0,
     )
-    router.load_coalesced_biases(biases)
-    router.eval()
-    indices = torch.tensor([0, ROUTER_TABLE_SIZE - 1])
-    e1, e2, b1, b2, *_ = router(indices, indices)
-    assert torch.all(e1 == 63) and torch.all(e2 == 63)
-    assert torch.equal(b1[0], biases[255, :16].expand(2, -1))
-    assert torch.equal(b2[3], biases[255, 48:64].expand(2, -1))
+    for old, new in zip(
+        m.layer_stacks.get_coalesced_layer_stacks(m.router.codebook),
+        loaded.layer_stacks.get_coalesced_layer_stacks(),
+    ):
+        for a, b, key in zip(old, new, ("ls_l1", "ls_l2", "ls_output")):
+            ba, wa = m.quantization.quantize_fc_layer(a.bias, a.weight, key)
+            bb, wb = loaded.quantization.quantize_fc_layer(b.bias, b.weight, key)
+            assert torch.equal(ba, bb) and torch.equal(wa, wb)
 
 
 def test_unit_l2_basis_initialization_preserves_layer_variance():

@@ -1,3 +1,5 @@
+> Historical MoE5 architecture. The current experiment is documented in [moe6.md](moe6.md).
+
 # MoE5: half-width perspective branches
 
 MoE5 retains MoE4's K32H3 inputs, cascading material context, 64 weight experts,

@@ -36,16 +36,17 @@ NUM_OUR_KINGS = 33
 NUM_ENEMY_KINGS = 65
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
 NUM_WEIGHT_EXPERTS = 64
-NUM_BIAS_EXPERTS = 256
+NUM_BIAS_EXPERTS = 128
 NUM_BIASES = 64
 BIAS_RANK = 32
 CODEBOOK_DIM = 256
-ROUTER_HASH = 0x4D6F4535  # 'MoE5'
+ROUTER_HASH = 0x4D6F4536  # 'MoE6'
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 # Weighted contributions, ordered by router, for inexpensive epoch accumulation.
+MOE_BANKS = ("weights_stm", "biases_stm", "weights_opp", "biases_opp")
 MOE_LOSS_COMPONENTS = tuple(
-    f"{router}_{term}"
-    for router in ("weights", "biases")
+    f"{bank}_{term}"
+    for bank in MOE_BANKS
     for term in ("commitment", "balance", "diversity")
 )
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
@@ -252,12 +253,9 @@ class StructuredKingEmbedding(nn.Module):
 
 
 class DualVQCodebookRouter(nn.Module):
-    """
-    Dual Discrete Vector Quantization (VQ) Codebook Router for Top-2 Downstream MoE:
-    - Weight Router: K1 = 64 discrete experts (6 bits) selecting layer stack weights
-    - Bias Router: K2 = 256 discrete experts (8 bits) selecting 64 dynamic threshold biases via rank-32 subspace
-    - Single packed uint16 LUT of size 849,420 (1.55 MB)
-    - 256 coalesced 64-element dynamic bias vectors (64 KB)
+    """Four independent role-specific routers sharing material/king embeddings.
+
+    LUT bytes: STM weights, OPP weights, STM biases, OPP biases.
     """
 
     def __init__(
@@ -282,10 +280,8 @@ class DualVQCodebookRouter(nn.Module):
         hidden_sizes: tuple[int, int] = (16, 16),
     ):
         super().__init__()
-        if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 256):
-            raise ValueError(
-                "The router LUT reserves six weight bits and eight bias bits"
-            )
+        if not (1 <= num_weight_experts <= 64 and 1 <= num_bias_experts <= 128):
+            raise ValueError("MoE6 supports 64 weights and 128 biases per role")
         self.num_contexts = num_contexts
         self.num_weight_experts = num_weight_experts
         self.num_bias_experts = num_bias_experts
@@ -317,43 +313,37 @@ class DualVQCodebookRouter(nn.Module):
         # Structured spatial King embedding table
         self.king_embed = StructuredKingEmbedding(dim=dim)
 
-        # Weight Router Codebook: 64 experts in R^256
+        # STM weight codebook; the OPP bank is independent.
         self.codebook_weights = nn.Parameter(torch.empty(num_weight_experts, dim))
 
-        # Bias Router Codebook: 256 experts in R^256
+        # STM bias codebook: 128 experts in R^256.
         self.codebook_biases = nn.Parameter(torch.empty(num_bias_experts, dim))
         self.bias_head_down = nn.Linear(dim, bias_rank, bias=False)
         self.bias_head_up = nn.Linear(bias_rank, num_biases, bias=True)
+
+        self.codebook_weights_opp = nn.Parameter(torch.empty(num_weight_experts, dim))
+        self.codebook_biases_opp = nn.Parameter(torch.empty(num_bias_experts, dim))
+        self.bias_head_down_opp = nn.Linear(dim, bias_rank, bias=False)
+        self.bias_head_up_opp = nn.Linear(bias_rank, num_biases, bias=True)
 
         # Material decoding buffer on device
         self.register_buffer(
             "material_decode_table", _MATERIAL_DECODE_TABLE, persistent=False
         )
 
-        # Recent batch usage EMA buffers
-        self.register_buffer(
-            "ema_traffic_weights",
-            torch.full(
-                (num_weight_experts,), 1.0 / num_weight_experts, dtype=torch.float32
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "ema_traffic_biases",
-            torch.full(
-                (num_bias_experts,), 1.0 / num_bias_experts, dtype=torch.float32
-            ),
-            persistent=False,
-        )
-
-        for name, count in (
-            ("weights", num_weight_experts),
-            ("biases", num_bias_experts),
-        ):
+        for name, count in zip(MOE_BANKS, (num_weight_experts, num_bias_experts) * 2):
+            self.register_buffer(
+                f"ema_traffic_{name}",
+                torch.full((count,), 1.0 / count),
+                persistent=False,
+            )
             self.register_buffer(
                 f"ema_soft_{name}", torch.full((count,), 1.0 / count), persistent=False
             )
-        self.register_buffer("loss_component_sum", torch.zeros(6), persistent=False)
+            self.register_buffer(
+                f"validation_counts_{name}", torch.zeros(count), persistent=False
+            )
+        self.register_buffer("loss_component_sum", torch.zeros(12), persistent=False)
         self.register_buffer(
             "loss_component_batches", torch.zeros(()), persistent=False
         )
@@ -361,24 +351,23 @@ class DualVQCodebookRouter(nn.Module):
         # Ephemeral runtime cache for inference & Stockfish export
         self.register_buffer(
             "lut",
-            torch.zeros(num_contexts, dtype=torch.int32),
+            torch.zeros(num_contexts, dtype=torch.int64),
             persistent=False,
         )
         self.lut_valid: bool = False
         self.collect_lut_diagnostics: bool = False
         self.lut_margin_valid: bool = False
         self.lut_margin_samples: int = 0
-        self.register_buffer("lut_margin_stats", torch.zeros(2, 3), persistent=False)
+        self.register_buffer("lut_margin_stats", torch.zeros(4, 3), persistent=False)
         self.register_buffer(
             "coalesced_biases",
-            torch.zeros(num_bias_experts, num_biases, dtype=torch.float32),
+            torch.zeros(2, num_bias_experts, num_biases, dtype=torch.float32),
             persistent=False,
         )
         self.coalesced_valid: bool = False
 
         self.last_reseed_details: dict[str, dict[int, dict]] = {}
-        self.last_reseed_parents_w: dict[int, int] = {}
-        self.last_reseed_parents_b: dict[int, int] = {}
+        self.last_reseed_parents: dict[str, dict[int, int]] = {}
 
         self.init_weights()
 
@@ -393,15 +382,33 @@ class DualVQCodebookRouter(nn.Module):
         return center_and_rms_norm(self.codebook_biases, self.codebook_target_norm)
 
     @property
-    def codebook(self) -> torch.Tensor:
-        """Normalized weight codebook for downstream layer stacks and serialization."""
-        return self.codebook_w
+    def codebook(self):
+        return self.codebook_w, center_and_rms_norm(
+            self.codebook_weights_opp, self.codebook_target_norm
+        )
 
-    def bias_head(self, emb: torch.Tensor) -> torch.Tensor:
-        """Linear bottleneck on non-linearly activated codebook embeddings: Wup . Wdown . GELU(emb)."""
-        h = self.bias_head_down(F.gelu(emb))
-        h = rms_norm(h, target_norm=1.0)
-        return self.bias_head_up(h)
+    def banks(self):
+        for name, parameter in zip(
+            MOE_BANKS,
+            (
+                self.codebook_weights,
+                self.codebook_biases,
+                self.codebook_weights_opp,
+                self.codebook_biases_opp,
+            ),
+        ):
+            yield (
+                name,
+                parameter,
+                getattr(self, f"ema_traffic_{name}"),
+                getattr(self, f"ema_soft_{name}"),
+                center_and_rms_norm(parameter, self.codebook_target_norm),
+            )
+
+    def bias_head(self, emb, role=0):
+        down = self.bias_head_down if role == 0 else self.bias_head_down_opp
+        up = self.bias_head_up if role == 0 else self.bias_head_up_opp
+        return up(rms_norm(down(F.gelu(emb)), target_norm=1.0))
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -419,11 +426,15 @@ class DualVQCodebookRouter(nn.Module):
         nn.init.uniform_(self.codebook_weights, -val, val)
         nn.init.uniform_(self.codebook_biases, -val, val)
 
-        val_bias_down = 1.0 / math.sqrt(self.dim)
-        nn.init.uniform_(self.bias_head_down.weight, -val_bias_down, val_bias_down)
-        val_bias_up = 1.0 / math.sqrt(self.bias_rank)
-        nn.init.uniform_(self.bias_head_up.weight, -val_bias_up, val_bias_up)
-        nn.init.zeros_(self.bias_head_up.bias)
+        nn.init.uniform_(self.codebook_weights_opp, -val, val)
+        nn.init.uniform_(self.codebook_biases_opp, -val, val)
+        for down, up in (
+            (self.bias_head_down, self.bias_head_up),
+            (self.bias_head_down_opp, self.bias_head_up_opp),
+        ):
+            nn.init.uniform_(down.weight, -val, val)
+            nn.init.zeros_(up.weight)
+            nn.init.zeros_(up.bias)
 
     def get_context_vector(self, c: torch.Tensor) -> torch.Tensor:
         """Computes, mean-centers, and RMS-normalizes context vector for batch of context indices c."""
@@ -509,7 +520,17 @@ class DualVQCodebookRouter(nn.Module):
         if self.coalesced_valid:
             return self.coalesced_biases
         with ieee_matmul_precision():
-            raw_biases = self.bias_head(self.codebook_b)
+            raw_biases = torch.stack(
+                [
+                    self.bias_head(self.codebook_b),
+                    self.bias_head(
+                        center_and_rms_norm(
+                            self.codebook_biases_opp, self.codebook_target_norm
+                        ),
+                        1,
+                    ),
+                ]
+            )
             if self.quantization is not None:
                 q_biases = self.quantization.quantize_dynamic_bias(raw_biases)
                 self.coalesced_biases.copy_(
@@ -527,68 +548,39 @@ class DualVQCodebookRouter(nn.Module):
         self.coalesced_valid = True
 
     @torch.no_grad()
-    def update_lookup_table(self) -> torch.Tensor:
-        """Evaluates all 849,420 contexts and bit-packs (idx_w, idx_b) into uint16 lookup table."""
+    def update_lookup_table(self):
         with ieee_matmul_precision():
             z_all = self.get_all_context_vectors()
-
-            cb_w = self.codebook_w
-            cb_b = self.codebook_b
-            cb_w_sq = torch.sum(cb_w**2, dim=-1).unsqueeze(0)
-            cb_b_sq = torch.sum(cb_b**2, dim=-1).unsqueeze(0)
-
-            # Optional validation diagnostics reuse a small, regular sample of
-            # distances from this necessary LUT build. Export pays no top-k cost.
-            margins_w, margins_b = [], []
-            chunk_size = 65536
-            for i in range(0, self.num_contexts, chunk_size):
-                z_chunk = z_all[i : i + chunk_size]
-                z_sq = torch.sum(z_chunk**2, dim=-1, keepdim=True)
-
-                # Weight routing (64 experts)
-                dist_w = z_sq + cb_w_sq - 2.0 * torch.matmul(z_chunk, cb_w.t())
-                idx_w = torch.argmin(dist_w, dim=-1)
-
-                # Bias routing (256 experts)
-                dist_b = z_sq + cb_b_sq - 2.0 * torch.matmul(z_chunk, cb_b.t())
-                idx_b = torch.argmin(dist_b, dim=-1)
-
-                if self.collect_lut_diagnostics:
-                    for distances, margins in (
-                        (dist_w, margins_w),
-                        (dist_b, margins_b),
-                    ):
-                        if distances.shape[1] >= 2:
-                            nearest = (
-                                distances[::256].topk(2, largest=False, dim=1).values
-                            )
-                            margins.append(nearest[:, 1] - nearest[:, 0])
-
-                # Bit packing: 6 bits weight | 8 bits bias
-                packed = (idx_w & 0x3F) | ((idx_b & 0xFF) << 6)
-                self.lut[i : i + chunk_size] = packed
-
-            self.lut_valid = True
+            packed = torch.zeros(
+                self.num_contexts, dtype=torch.int64, device=z_all.device
+            )
             self.lut_margin_valid = False
-            if margins_w and margins_b:
-                for row, samples in enumerate((margins_w, margins_b)):
-                    gaps = torch.cat(samples)
+            for row, (name, _, _, _, cb) in enumerate(self.banks()):
+                shift = (0, 16, 8, 24)[row]
+                margins = []
+                for start in range(0, self.num_contexts, 65536):
+                    z = z_all[start : start + 65536]
+                    dist = (
+                        z.square().sum(-1, keepdim=True)
+                        + cb.square().sum(-1)[None]
+                        - 2 * z @ cb.T
+                    )
+                    packed[start : start + len(z)] |= dist.argmin(-1).long() << shift
+                    if self.collect_lut_diagnostics and len(cb) >= 2:
+                        nearest = dist[::256].topk(2, largest=False).values
+                        margins.append(nearest[:, 1] - nearest[:, 0])
+                if margins:
+                    gaps = torch.cat(margins)
                     self.lut_margin_stats[row].copy_(
                         torch.stack(
-                            (gaps.min(), gaps.mean(), (gaps <= 1e-6).float().mean())
+                            [gaps.min(), gaps.mean(), (gaps <= 1e-6).float().mean()]
                         )
                     )
-                self.lut_margin_samples = sum(gap.numel() for gap in margins_w)
-                self.lut_margin_valid = True
-
-            if self.quantization is not None:
-                raw_biases = self.bias_head(self.codebook_b)
-                q_biases = self.quantization.quantize_dynamic_bias(raw_biases)
-                self.coalesced_biases.copy_(
-                    self.quantization.dequantize_dynamic_bias(q_biases)
-                )
-                self.coalesced_valid = True
-
+                    self.lut_margin_samples = len(gaps)
+                    self.lut_margin_valid = True
+            self.lut.copy_(packed)
+            self.lut_valid = True
+            self.get_coalesced_bias_table()
             return self.lut
 
     def get_lookup_table(self) -> torch.Tensor:
@@ -599,10 +591,10 @@ class DualVQCodebookRouter(nn.Module):
     @torch.no_grad()
     def load_lookup_table(self, table: torch.Tensor | bytes | bytearray) -> None:
         if isinstance(table, (bytes, bytearray)):
-            table = torch.frombuffer(bytearray(table), dtype=torch.uint16).to(
-                torch.int32
+            table = torch.frombuffer(bytearray(table), dtype=torch.uint32).to(
+                torch.int64
             )
-        self.lut.copy_(table.to(device=self.lut.device, dtype=torch.int32))
+        self.lut.copy_(table.to(device=self.lut.device, dtype=torch.int64))
         self.lut_valid = True
         self.lut_margin_valid = False
         for p in self.parameters():
@@ -620,14 +612,10 @@ class DualVQCodebookRouter(nn.Module):
         No context enumeration or LUT construction is needed. A temporarily
         empty Voronoi cell must not bypass the traffic EMA's grace period.
         """
-        self.last_reseed_parents_w = {}
-        self.last_reseed_parents_b = {}
+        self.last_reseed_parents = {}
         self.last_reseed_details = {}
         reseeded = []
-        for name, codebook, traffic in (
-            ("weights", self.codebook_weights, self.ema_traffic_weights),
-            ("biases", self.codebook_biases, self.ema_traffic_biases),
-        ):
+        for name, codebook, traffic, _, _ in self.banks():
             count = traffic.numel()
             floor = min_relative_utilization / count
             dead = torch.nonzero(traffic < floor, as_tuple=True)[0]
@@ -673,10 +661,7 @@ class DualVQCodebookRouter(nn.Module):
                         probabilities /= probabilities.sum().clamp_min(1e-8)
                         parents[child] = donor
                         modified.update((child, donor))
-            if name == "weights":
-                self.last_reseed_parents_w = parents
-            else:
-                self.last_reseed_parents_b = parents
+            self.last_reseed_parents[name] = parents
             reseeded.append(sorted(modified))
 
         if any(reseeded):
@@ -685,107 +670,77 @@ class DualVQCodebookRouter(nn.Module):
             self.coalesced_valid = False
         return tuple(reseeded)
 
-    def forward(
-        self,
-        c_us: torch.Tensor,
-        c_them: torch.Tensor,
-        fake_quantize: bool = False,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
+    def forward(self, c_us, c_them, fake_quantize=False):
+        chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
         if self.training:
-            c_combined = torch.cat([c_us, c_them], dim=0)
-            z = self.get_context_vector(c_combined)
-
-            e_w, _, commit_loss_w, balance_loss_w = self.quantize(
-                z,
-                self.codebook_w,
-                self.num_weight_experts,
-                self.temperature,
-                self.ema_traffic_weights,
-                self.ema_soft_weights,
-            )
-            _idx_b, z_q_ste_b, commit_loss_b, balance_loss_b = self.quantize(
-                z,
-                self.codebook_b,
-                self.num_bias_experts,
-                self.bias_temperature,
-                self.ema_traffic_biases,
-                self.ema_soft_biases,
-            )
-
-            dyn_bias = self.bias_head(z_q_ste_b)
-            if fake_quantize and self.quantization is not None:
-                dyn_bias = self.quantization.fake_quantize_dynamic_bias(dyn_bias)
-
-            commit_loss = commit_loss_w + commit_loss_b
-            balance_loss = balance_loss_w + balance_loss_b
-            parts = torch.stack(
-                (
-                    commit_loss_w,
-                    self.balance_cost * balance_loss_w,
-                    self.diversity_cost * codebook_diversity_loss(self.codebook_w),
-                    commit_loss_b,
-                    self.bias_balance_cost * balance_loss_b,
-                    self.bias_diversity_cost * codebook_diversity_loss(self.codebook_b),
+            zs = (self.get_context_vector(c_us), self.get_context_vector(c_them))
+            indices, dynamic, parts = [], [], []
+            for row, (name, _, hard, soft, cb) in enumerate(self.banks()):
+                role, bias = divmod(row, 2)
+                idx, zq, commit, balance = self.quantize(
+                    zs[role],
+                    cb,
+                    len(cb),
+                    self.bias_temperature if bias else self.temperature,
+                    hard,
+                    soft,
                 )
-            )
-            moe_loss = parts.sum()
+                parts.extend(
+                    [
+                        commit * 0.5,
+                        balance
+                        * (self.bias_balance_cost if bias else self.balance_cost)
+                        * 0.5,
+                        codebook_diversity_loss(cb)
+                        * (self.bias_diversity_cost if bias else self.diversity_cost)
+                        * 0.5,
+                    ]
+                )
+                if bias:
+                    d = self.bias_head(zq, role)
+                    if fake_quantize and self.quantization is not None:
+                        d = self.quantization.fake_quantize_dynamic_bias(d)
+                    dynamic.append(d.split(chunks, dim=1))
+                else:
+                    indices.append(idx)
+            parts = torch.stack(parts)
             with torch.no_grad():
                 self.loss_component_sum.add_(parts.detach())
                 self.loss_component_batches.add_(1)
-
-            self.lut_valid = False
-            self.lut_margin_valid = False
-            self.coalesced_valid = False
-
-            half = c_us.shape[0]
-            e1_w = e_w[:half]
-            e2_w = e_w[half:]
-            dyn_bias_1 = dyn_bias[:half]
-            dyn_bias_2 = dyn_bias[half:]
-
-            chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
-            dyn_biases_1 = dyn_bias_1.split(chunks, dim=1)
-            dyn_biases_2 = dyn_bias_2.split(chunks, dim=1)
-
+            self.lut_valid = self.lut_margin_valid = self.coalesced_valid = False
             return (
-                e1_w,
-                e2_w,
-                dyn_biases_1,
-                dyn_biases_2,
-                moe_loss,
-                commit_loss,
-                balance_loss,
+                indices[0],
+                indices[1],
+                dynamic[0],
+                dynamic[1],
+                parts.sum(),
+                parts[::3].sum(),
+                parts[1::3].sum(),
             )
-        else:
-            if not self.lut_valid:
-                self.update_lookup_table()
-            packed_1 = self.lut[c_us.long()]
-            packed_2 = self.lut[c_them.long()]
+        if not self.lut_valid:
+            self.update_lookup_table()
+        us, them = self.lut[c_us.long()], self.lut[c_them.long()]
+        ew = (us & 255, (them >> 8) & 255)
+        eb = ((us >> 16) & 255, (them >> 24) & 255)
+        if self.collect_lut_diagnostics:
+            for name, ids, count in zip(
+                MOE_BANKS,
+                (ew[0], eb[0], ew[1], eb[1]),
+                (self.num_weight_experts, self.num_bias_experts) * 2,
+            ):
+                counts = getattr(self, f"validation_counts_{name}")
+                counts.scatter_add_(0, ids, torch.ones_like(ids, dtype=counts.dtype))
+        table = self.get_coalesced_bias_table()
+        zero = torch.zeros((), device=c_us.device)
+        return (
+            ew[0],
+            ew[1],
+            table[0, eb[0]].split(chunks, 1),
+            table[1, eb[1]].split(chunks, 1),
+            zero,
+            zero,
+            zero,
+        )
 
-            e1_w = (packed_1 & 0x3F).long()
-            e2_w = (packed_2 & 0x3F).long()
-            e1_b = ((packed_1 >> 6) & 0xFF).long()
-            e2_b = ((packed_2 >> 6) & 0xFF).long()
 
-            coalesced = self.get_coalesced_bias_table()
-            dyn_bias_1 = coalesced[e1_b]
-            dyn_bias_2 = coalesced[e2_b]
-
-            chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
-            dyn_biases_1 = dyn_bias_1.split(chunks, dim=1)
-            dyn_biases_2 = dyn_bias_2.split(chunks, dim=1)
-
-            zero = torch.tensor(0.0, device=c_us.device)
-            return e1_w, e2_w, dyn_biases_1, dyn_biases_2, zero, zero, zero
-
-
-# Backward-compatible alias for any modules importing VQCodebookRouter
 VQCodebookRouter = DualVQCodebookRouter

@@ -3,7 +3,6 @@
 import chess
 import pytest
 import torch
-import torch.nn.functional as F
 from test_top2moe_symmetry import get_context_indices
 
 from data_loader import stream
@@ -88,131 +87,95 @@ def test_heavy_export_roundtrip():
 
 def make_stacks():
     torch.manual_seed(7)
-    quantization = QuantizationManager(QuantizationConfig())
-    stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), quantization)
-    for layer in (stacks.l1, stacks.l2, stacks.output):
-        layer.is_coalesced = True
-        layer.coalesced_weight.uniform_(-0.25, 0.5)
-        layer.coalesced_bias.fill_(0.125)
+    q = QuantizationManager(QuantizationConfig(), (2, 2))
+    stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), q)
+    for bank in (stacks, stacks.opp):
+        for layer in (bank.l1, bank.l2, bank.output):
+            layer.is_coalesced = True
+            layer.coalesced_weight.uniform_(-0.25, 0.5)
+            layer.coalesced_bias.fill_(0.125)
     return stacks
 
 
-def reference(stacks, x, e1, e2, biases1, biases2):
-    def affine(layer, value, expert):
-        w = layer.coalesced_weight.view(2, layer.out_features, layer.in_features)[
-            expert
+def reference(stacks, x, e1, e2, d1, d2):
+    def affine(layer, x, ids):
+        w = layer.coalesced_weight.reshape(2, layer.out_features, layer.in_features)[
+            ids
         ]
-        b = layer.coalesced_bias.view(2, layer.out_features)[expert]
-        return F.linear(value, w, b)
+        b = layer.coalesced_bias.reshape(2, layer.out_features)[ids]
+        return (w @ x.unsqueeze(-1)).squeeze(-1) + b
 
-    def swapped(value):
-        a_sq, b_sq, a_lin, b_lin = value.chunk(4, dim=1)
-        return torch.cat([b_sq, a_sq, b_lin, a_lin], dim=1)
-
-    def activation(a, b, a_sq, b_sq, a_lin, b_lin):
+    def activate(a, b, ds, dt):
         return torch.cat(
-            [(a + a_sq).square(), (b + b_sq).square(), a + a_lin, b + b_lin], dim=1
+            [(a + ds[0]).square(), (b + dt[0]).square(), a + ds[1], b + dt[1]], 1
         ).clamp(0, 127 / 128)
 
     a = affine(stacks.l1, x, e1)
-    b = affine(stacks.l1, torch.cat(x.chunk(2, dim=1)[::-1], dim=1), e2)
-    skip = (a[:, -2:-1] - a[:, -1:] - b[:, -2:-1] + b[:, -1:]) / 2
-    h1 = activation(a, b, biases1[0], biases2[0], biases1[1], biases2[1])
+    b = affine(stacks.opp.l1, x, e2)
+    skip = (a[:, -2:-1] - a[:, -1:] + b[:, -2:-1] - b[:, -1:]) * 0.5
+    h1 = activate(a, b, d1[:2], d2[:2])
     a = affine(stacks.l2, h1, e1)
-    b = affine(stacks.l2, swapped(h1), e2)
-    h2 = activation(a, b, biases1[2], biases2[2], biases1[3], biases2[3])
+    b = affine(stacks.opp.l2, h1, e2)
+    h2 = activate(a, b, d1[2:], d2[2:])
+    h = torch.cat([h1, h2], 1)
     return (
-        affine(stacks.output, torch.cat([h1, h2], dim=1), e1)
-        - affine(stacks.output, torch.cat([swapped(h1), swapped(h2)], dim=1), e2)
-    ) / 2 + skip
+        affine(stacks.output, h, e1) + affine(stacks.opp.output, h, e2)
+    ) * 0.5 + skip
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_perspective_concatenation_and_duplicate_route(quantized):
-    stacks = make_stacks()
-    x = torch.tensor([[0.25, 0.5, 0.125, 0.75]])
-    a, b = torch.tensor([0]), torch.tensor([1])
-    ba = tuple(torch.full((1, 2), 0.025 * i) for i in range(4))
-    bb = tuple(torch.full((1, 2), -0.05 * i) for i in range(4))
-    args = {"fake_quantize_acts": quantized, "fake_quantize_weights": quantized}
-    actual = stacks(x, None, a, b, ba, bb, **args)
-    swapped_x = torch.cat(x.chunk(2, dim=1)[::-1], dim=1)
+def test_fixed_order_independent_full_readouts():
+    s = make_stacks()
+    x = torch.rand(3, 4)
+    e1 = torch.tensor([0, 1, 0])
+    e2 = torch.tensor([1, 0, 0])
+    d1 = tuple(torch.rand(3, 2) * 0.1 for _ in range(4))
+    d2 = tuple(torch.rand(3, 2) * 0.1 for _ in range(4))
     torch.testing.assert_close(
-        actual, -stacks(swapped_x, None, b, a, bb, ba, **args), rtol=0, atol=0
+        s(x, None, e1, e2, d1, d2, False, False), reference(s, x, e1, e2, d1, d2)
     )
-    if not quantized:
-        torch.testing.assert_close(actual, reference(stacks, x, 0, 1, ba, bb))
-        same = stacks(x, None, a, a, ba, ba, **args)
-        torch.testing.assert_close(same, reference(stacks, x, 0, 0, ba, ba))
-        assert same.abs().max() > 1e-5  # Same route is not a symmetric input.
-    symmetric = torch.cat([x[:, :2], x[:, :2]], dim=1)
-    torch.testing.assert_close(
-        stacks(symmetric, None, a, a, ba, ba, **args), torch.zeros(1, 1), rtol=0, atol=0
+    # Equal contexts/FT inputs do not force zero: role parameters are independent.
+    d = tuple(torch.zeros(1, 2) for _ in range(4))
+    for bank in (s, s.opp):
+        for layer in (bank.l1, bank.l2, bank.output):
+            layer.coalesced_weight.zero_()
+            layer.coalesced_bias.zero_()
+        bank.output.coalesced_bias.fill_(-0.25)
+    assert (
+        s(torch.zeros(1, 4), None, torch.tensor([0]), torch.tensor([0]), d, d).item()
+        < 0
     )
 
 
-def test_joint_hypernetwork_gradient_flow():
-    torch.manual_seed(11)
-    q = QuantizationManager(QuantizationConfig())
-    stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), q)
-    codebook = torch.randn(2, 256, requires_grad=True)
-    # Keep this derivative check inside the activation range, rather than
-    # depending on random clipping at the narrower width.
-    with torch.no_grad():
-        for layer in (stacks.l1, stacks.l2):
-            layer.adapter_up.mul_(0.1)
-            layer.bias_adapter.zero_()
-    x = torch.tensor([[0.125, 0.25, 0.375, 0.5]])
-    ba = tuple(torch.full((1, 2), 0.25, requires_grad=True) for _ in range(4))
-    bb = tuple(torch.full((1, 2), 0.125, requires_grad=True) for _ in range(4))
-    value = stacks(
-        x,
-        codebook,
-        torch.tensor([0]),
-        torch.tensor([1]),
-        ba,
-        bb,
-        fake_quantize_acts=False,
-        fake_quantize_weights=False,
-    )
-    # A single derivative check, with no optimizer or training loop.
-    value.sum().backward()
-    assert (codebook.grad.norm(dim=1) > 0).all()
-    for layer in (stacks.l1, stacks.l2, stacks.output):
-        assert layer.adapter_up.grad.abs().sum() > 0
-        assert layer.adapter_down.grad.abs().sum() > 0
-    for bias in ba + bb:
-        assert bias.grad.abs().sum() > 0
-
-
-@pytest.mark.parametrize("a,b", [(-3, -2), (1, 2), (-2, 3), (3, 4)])
-def test_integer_average_truncates_toward_zero(a, b):
-    stacks = make_stacks()
-    for layer in (stacks.l1, stacks.l2, stacks.output):
-        layer.coalesced_weight.zero_()
-        layer.coalesced_bias.zero_()
-    scale = stacks.quantization.weight_scales_dict["ls_output_bias"]
-    stacks.output.coalesced_bias.copy_(torch.tensor([a, b]) / scale)
-    biases = tuple(torch.zeros(1, 2) for _ in range(4))
-    actual = stacks(
-        torch.zeros(1, 4), None, torch.tensor([0]), torch.tensor([1]), biases, biases
-    )
-    expected = stacks.quantization.fake_quantize_output(
-        torch.tensor([[int((a - b) / 2) / scale]])
+@pytest.mark.parametrize(
+    "oa,ob,sa,sb", [(-3, -2, 1, 0), (1, 2, -3, 0), (-2, 3, 0, -3), (3, 4, 1, 2)]
+)
+def test_common_scale_average(oa, ob, sa, sb):
+    s = make_stacks()
+    for bank in (s, s.opp):
+        for layer in (bank.l1, bank.l2, bank.output):
+            layer.coalesced_weight.zero_()
+            layer.coalesced_bias.zero_()
+    for bank, o, skip in ((s, oa, sa), (s.opp, ob, sb)):
+        bank.output.coalesced_bias.fill_(o / 16384)
+        bank.l1.coalesced_bias.reshape(2, 2)[:, 0] = skip / 32768
+    d = tuple(torch.zeros(1, 2) for _ in range(4))
+    actual = s(torch.zeros(1, 4), None, torch.tensor([0]), torch.tensor([1]), d, d)
+    expected = s.quantization.fake_quantize_output(
+        torch.tensor([[int((2 * oa + 2 * ob + sa + sb) / 2) / 32768]])
     )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_engine_accumulator_paths():
-    """Optional engine integration; see docs/moe5.md for building the probe."""
+    """Optional engine integration; see docs/moe6.md for building the probe."""
     import os
     import random
     import subprocess
 
-    probe = os.environ.get("MOE5_ENGINE_PROBE")
-    net = os.environ.get("MOE5_TEST_NET")
+    probe = os.environ.get("MOE6_ENGINE_PROBE")
+    net = os.environ.get("MOE6_TEST_NET")
     if not probe or not net:
-        pytest.skip("Set MOE5_ENGINE_PROBE and MOE5_TEST_NET for engine integration")
+        pytest.skip("Set MOE6_ENGINE_PROBE and MOE6_TEST_NET for engine integration")
     episodes = [
         ("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1", ["e4d5"]),
         ("4k3/8/8/3r4/4P3/8/8/4K3 w - - 0 1", ["e4d5"]),
@@ -260,7 +223,7 @@ def test_engine_accumulator_paths():
     assert "Verified 1547" in result.stdout
 
 
-def test_default_moe5_shapes_and_mac_budget():
+def test_default_moe6_shapes_and_mac_budget():
     stacks = LayerStacks(
         64, LayerStacksConfig(), QuantizationManager(QuantizationConfig())
     )
@@ -272,3 +235,37 @@ def test_default_moe5_shapes_and_mac_budget():
         for layer in (stacks.l1, stacks.l2, stacks.output)
     )
     assert macs == 35072  # Master: 34944; only the final scalar readout doubles.
+
+
+def test_independent_generators_receive_gradients_without_optimizer():
+    from model.modules.router import DualVQCodebookRouter
+
+    torch.manual_seed(19)
+    router = DualVQCodebookRouter(
+        num_contexts=2,
+        num_weight_experts=2,
+        num_bias_experts=2,
+        hidden_sizes=(2, 2),
+        num_biases=8,
+    )
+    stacks = LayerStacks(
+        2,
+        LayerStacksConfig(L1=4, L2=4, L3=4),
+        QuantizationManager(QuantizationConfig(), (2, 2)),
+    )
+    a, b, d1, d2, loss, *_ = router(
+        torch.tensor([0, 1, 0, 1]), torch.tensor([1, 0, 1, 0])
+    )
+    value = stacks(torch.rand(4, 4), router.codebook, a, b, d1, d2, False, False)
+    (value.square().sum() + loss).backward()
+    for bank in (stacks, stacks.opp):
+        for layer in (bank.l1, bank.l2, bank.output):
+            assert layer.adapter_up.grad.abs().sum() > 0
+    for up, down in (
+        (router.bias_head_up, router.bias_head_down),
+        (router.bias_head_up_opp, router.bias_head_down_opp),
+    ):
+        assert up.weight.grad.abs().sum() > 0
+        assert (
+            down.weight.grad.abs().sum() == 0
+        )  # Zero output projection on the initial pass.

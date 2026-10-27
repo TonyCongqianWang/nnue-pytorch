@@ -354,6 +354,9 @@ def init_random_weights(model: M.NNUEModel) -> None:
             model.layer_stacks.l1,
             model.layer_stacks.l2,
             model.layer_stacks.output,
+            model.layer_stacks.opp.l1,
+            model.layer_stacks.opp.l2,
+            model.layer_stacks.opp.output,
         ]:
             ls.adapter_down.data.uniform_(-0.1, 0.1)
             touched.add(id(ls.adapter_down))

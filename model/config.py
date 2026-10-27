@@ -15,7 +15,7 @@ class ModelConfig(LayerStacksConfig):
     moe_weight_balance_cost: float = 0.001
     """Weight-router balancing coefficient."""
     moe_bias_balance_cost: float = 0.004
-    """Bias-router balancing coefficient (4x weight balancing for 256 experts)."""
+    """Bias-router balancing coefficient (4x weight balancing; applied to each role average)."""
     moe_weight_diversity_cost: float = 0.01
     """Weight-router codebook diversity coefficient."""
     moe_bias_diversity_cost: float = 0.02

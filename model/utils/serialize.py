@@ -117,14 +117,14 @@ class NNUEWriter:
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
 
-        # 3. Downstream Top-2 MoE Dual Router Lookup Table (849,420 uint16 = 1,698,840 bytes)
+        # 3. Downstream Top-2 MoE Dual Router Lookup Table (849,420 uint32 = 3,397,680 bytes)
         if self.verbose:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
-        self.write_tensor(router_table.to(torch.uint16))
+        self.write_tensor(router_table.to(torch.uint32))
 
-        # 4. Dynamic Biases Table (256 experts x 64 int32 values = 65,536 bytes)
+        # 4. Dynamic Biases Table (2 x 128 experts x 64 int32 values = 65,536 bytes)
         coalesced_biases = model.router.get_coalesced_bias_table()
         q_biases = model.quantization.quantize_dynamic_bias(
             coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)
@@ -254,24 +254,21 @@ class NNUEReader:
 
         self.read_feature_transformer(self.model.input)
 
-        layers = [
-            self.model.layer_stacks.l1,
-            self.model.layer_stacks.l2,
-            self.model.layer_stacks.output,
-        ]
-        num_ls_buckets = self.model.num_ls_buckets
-        for layer in layers:
-            layer.init_coalesced_storage()
-
-        for b in range(num_ls_buckets):
-            self.read_int32(fc_hash)  # FC layers hash
+        for bank in (self.model.layer_stacks, self.model.layer_stacks.opp):
+            layers = [bank.l1, bank.l2, bank.output]
             for layer in layers:
-                out_f = layer.out_features
-                w_slice = layer.coalesced_weight[b * out_f : (b + 1) * out_f, :]
-                b_slice = layer.coalesced_bias[b * out_f : (b + 1) * out_f]
-                self.read_fc_layer(w_slice, b_slice, layer.layer_key)
+                layer.init_coalesced_storage()
+            for b in range(self.model.num_ls_buckets):
+                self.read_int32(fc_hash)
+                for layer in layers:
+                    out_f = layer.out_features
+                    self.read_fc_layer(
+                        layer.coalesced_weight[b * out_f : (b + 1) * out_f],
+                        layer.coalesced_bias[b * out_f : (b + 1) * out_f],
+                        layer.layer_key,
+                    )
 
-        router_table_bytes = ROUTER_TABLE_SIZE * 2
+        router_table_bytes = ROUTER_TABLE_SIZE * 4
         raw_router = self.f.read(router_table_bytes)
         if len(raw_router) != router_table_bytes:
             raise EOFError(
@@ -280,7 +277,7 @@ class NNUEReader:
         self.model.router.load_lookup_table(raw_router)
 
         raw_biases = self.tensor(
-            np.int32, [NUM_BIAS_EXPERTS, self.model.router.num_biases]
+            np.int32, [2, NUM_BIAS_EXPERTS, self.model.router.num_biases]
         )
         biases = self.model.quantization.dequantize_dynamic_bias(raw_biases)
         self.model.router.load_coalesced_biases(biases)

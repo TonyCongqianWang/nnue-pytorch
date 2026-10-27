@@ -429,7 +429,7 @@ class SimpleTrainer:
             .clone()
         )
         if self.world_size > 1:
-            # One six-value collective at the epoch boundary, never per step.
+            # One twelve-value collective at the epoch boundary, never per step.
             dist.all_reduce(component_means, op=dist.ReduceOp.SUM)
             component_means /= self.world_size
         component_means = component_means.cpu().tolist()

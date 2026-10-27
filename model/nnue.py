@@ -150,6 +150,9 @@ class NNUE(nn.Module):
             self.model.router.bias_head_down.weight,
             self.model.router.bias_head_up.weight,
             self.model.router.bias_head_up.bias,
+            self.model.router.bias_head_down_opp.weight,
+            self.model.router.bias_head_up_opp.weight,
+            self.model.router.bias_head_up_opp.bias,
         ]
         router_dyn_bias_ids = {id(p) for p in router_dyn_bias_params}
         other_router_params = [
@@ -179,29 +182,27 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Dense Layer Stacks
+            # Independent role-specific dense hypernetworks.
             {
                 "params": [
-                    self.model.layer_stacks.l1.adapter_down,
-                    self.model.layer_stacks.l1.adapter_up,
-                    self.model.layer_stacks.l2.adapter_down,
-                    self.model.layer_stacks.l2.adapter_up,
-                    self.model.layer_stacks.output.adapter_down,
-                    self.model.layer_stacks.output.adapter_up,
+                    p
+                    for bank in (self.model.layer_stacks, self.model.layer_stacks.opp)
+                    for layer in (bank.l1, bank.l2, bank.output)
+                    for p in (layer.adapter_down, layer.adapter_up)
                 ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
             {
                 "params": [
-                    self.model.layer_stacks.l1.bias_adapter,
-                    self.model.layer_stacks.l2.bias_adapter,
-                    self.model.layer_stacks.output.bias_adapter,
+                    layer.bias_adapter
+                    for bank in (self.model.layer_stacks, self.model.layer_stacks.opp)
+                    for layer in (bank.l1, bank.l2, bank.output)
                 ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
-            # Downstream Top-2 MoE Router
+            # Downstream role routers
             {
                 "params": router_dyn_bias_params,
                 "lr": LRs[0],

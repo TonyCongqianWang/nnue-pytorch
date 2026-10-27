@@ -401,6 +401,12 @@ def test_top2moe_optimizer_param_groups():
                 id(nnue.model.layer_stacks.l2.adapter_up),
                 id(nnue.model.layer_stacks.output.adapter_down),
                 id(nnue.model.layer_stacks.output.adapter_up),
+                id(nnue.model.layer_stacks.opp.l1.adapter_down),
+                id(nnue.model.layer_stacks.opp.l1.adapter_up),
+                id(nnue.model.layer_stacks.opp.l2.adapter_down),
+                id(nnue.model.layer_stacks.opp.l2.adapter_up),
+                id(nnue.model.layer_stacks.opp.output.adapter_down),
+                id(nnue.model.layer_stacks.opp.output.adapter_up),
             }
             assert {id(p) for p in group["params"]} == expected_dense
         elif group["weight_decay"] == 3e-4:
@@ -409,6 +415,9 @@ def test_top2moe_optimizer_param_groups():
                 id(nnue.model.router.bias_head_down.weight),
                 id(nnue.model.router.bias_head_up.weight),
                 id(nnue.model.router.bias_head_up.bias),
+                id(nnue.model.router.bias_head_down_opp.weight),
+                id(nnue.model.router.bias_head_up_opp.weight),
+                id(nnue.model.router.bias_head_up_opp.bias),
             }
             assert {id(p) for p in group["params"]} == expected_dyn_bias
 

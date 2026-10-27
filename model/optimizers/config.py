@@ -30,7 +30,7 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     dense_weight_decay: float = 0.0
     """Weight decay to apply to the dense layer parameters."""
 
-    dynamic_bias_weight_decay: float = 0.0
+    dynamic_bias_weight_decay: float = 4.0e-4
     """Weight decay to apply to the dynamic bias head parameters."""
 
     factorized_weight_decay: float = 0.0
@@ -40,7 +40,10 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     """Initial learning rate."""
 
     def __post_init__(self):
-        if self.dynamic_bias_weight_decay == 0.0 and self.factorized_weight_decay > 0.0:
+        if (
+            self.dynamic_bias_weight_decay in (0.0, 4.0e-4)
+            and self.factorized_weight_decay > 0.0
+        ):
             self.dynamic_bias_weight_decay = self.factorized_weight_decay
 
     def get_optimizer_wrapper(self):

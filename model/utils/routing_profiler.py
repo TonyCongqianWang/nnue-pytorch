@@ -15,7 +15,7 @@ def king_sq_name(k: int) -> str:
         return "e1[c]"
     r = k // 4
     f = k % 4
-    file_map = ["a", "g", "c", "e"]
+    file_map = ["a", "b", "c", "d"]
     return f"{file_map[f]}{r + 1}"
 
 
@@ -27,13 +27,14 @@ def enemy_king_sq_name(sq: int) -> str:
 
 
 @torch.no_grad()
-def print_routing_profile(model, file=None) -> None:
+def _print_weight_profile(
+    model, layer_stacks, codebook, shift, role, file=None
+) -> None:
     """Prints the compact Expert Routing Profile card."""
     if file is None:
         file = sys.stdout
 
     router = model.router
-    layer_stacks = model.layer_stacks
 
     lut = router.get_lookup_table()
     total_contexts = lut.numel()
@@ -42,13 +43,13 @@ def print_routing_profile(model, file=None) -> None:
     mat_id, k_us, k_them = decompose_router_index(all_ctx)
     mat_feats = router.material_decode_table[mat_id]
 
-    lut_np = (lut & 0x3F).cpu().numpy()  # Extract 6 bits for weight experts
-    t_np = mat_feats[:, 0].cpu().numpy() + 1  # 1..16 pieces
-    q_np = mat_feats[:, 2].cpu().numpy()  # 0 or 1
+    lut_np = ((lut >> shift) & 0x3F).cpu().numpy()  # Extract 6 bits for weight experts
+    t_np = mat_feats[:, 0].cpu().numpy()  # Non-king pieces: 0..15
+    q_np = (mat_feats[:, 2] == 0).cpu().numpy()  # Queen-first heavy category
     k_us_np = k_us.cpu().numpy()  # 0..32
     k_them_np = k_them.cpu().numpy()  # 0..64
 
-    delta_w_layers = layer_stacks.get_expert_deltas(router.codebook)
+    delta_w_layers = layer_stacks.get_expert_deltas(codebook)
     is_coalesced = getattr(layer_stacks.l1, "is_coalesced", False)
     coalesced_deltas = []
     if is_coalesced:
@@ -67,7 +68,7 @@ def print_routing_profile(model, file=None) -> None:
     w_kth = 22
     w_dw = 8
 
-    print(f"\nExpert Routing Profile ({total_contexts:,} contexts):", file=file)
+    print(f"\n{role} Weight Routing Profile ({total_contexts:,} contexts):", file=file)
     header = (
         f"{'Expert':^{w_exp}} | {'Contexts (%)':^{w_ctx}} | {'PC (mean/mode)':^{w_pc}} | "
         f"{'Queen %':^{w_q}} | {'Top King (Our)':^{w_kus}} | {'Top King (Enemy)':^{w_kth}} | "
@@ -147,3 +148,30 @@ def print_routing_profile(model, file=None) -> None:
             file=file,
         )
     print(file=file)
+
+
+@torch.no_grad()
+def print_routing_profile(model, file=None):
+    file = sys.stdout if file is None else file
+    lut = model.router.get_lookup_table()
+    print(f"\nMoE6 routing profile ({lut.numel():,} contexts):", file=file)
+    for name, shift, count in (
+        ("STM weights", 0, 64),
+        ("OPP weights", 8, 64),
+        ("STM biases", 16, 128),
+        ("OPP biases", 24, 128),
+    ):
+        counts = torch.bincount((lut >> shift) & 255, minlength=count).cpu()
+        mass = counts.float() / counts.sum()
+        effective = (-(mass * mass.clamp_min(1e-12).log()).sum()).exp().item()
+        print(
+            f"{name}: active={int((counts > 0).sum())}/{count}, effective={effective:.1f}",
+            file=file,
+        )
+    for role, bank, cb, shift in zip(
+        ("STM", "OPP"),
+        (model.layer_stacks, model.layer_stacks.opp),
+        model.router.codebook,
+        (0, 8),
+    ):
+        _print_weight_profile(model, bank, cb, shift, role, file)

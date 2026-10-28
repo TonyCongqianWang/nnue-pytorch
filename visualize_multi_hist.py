@@ -104,16 +104,20 @@ def main():
     )
 
     layer_stacks = [model.layer_stacks for model in models]
-    layers_l1 = [[] for i in range(layer_stacks[0].count)]
-    layers_l2 = [[] for i in range(layer_stacks[0].count)]
-    layers_l3 = [[] for i in range(layer_stacks[0].count)]
-    for ls in layer_stacks:
-        for i, sublayers in enumerate(ls.get_coalesced_layer_stacks()):
+    layers_l1 = [[] for i in range(2 * layer_stacks[0].count)]
+    layers_l2 = [[] for i in range(2 * layer_stacks[0].count)]
+    layers_l3 = [[] for i in range(2 * layer_stacks[0].count)]
+    for model, ls in zip(models, layer_stacks):
+        for i, sublayers in enumerate(
+            ls.get_coalesced_layer_stacks(model.router.codebook)
+        ):
             l1, l2, l3 = sublayers
             layers_l1[i].append(l1.weight.flatten().numpy())
             layers_l2[i].append(l2.weight.flatten().numpy())
             layers_l3[i].append(l3.weight.flatten().numpy())
-    col_names = [f"Subnet {i}" for i in range(layer_stacks[0].count)]
+    col_names = [
+        f"{role} {i}" for role in ("STM", "OPP") for i in range(layer_stacks[0].count)
+    ]
     plot_hists(
         layers_l1,
         labels,

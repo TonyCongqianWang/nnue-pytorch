@@ -27,14 +27,24 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     virtual_ft_weight_decay: float = 0.0
     """Weight decay to apply to the virtual feature transformer parameters."""
 
-    dense_weight_decay: float = 0.0
+    dense_weight_decay: float = 1.0e-6
     """Weight decay to apply to the dense layer parameters."""
 
+    dynamic_bias_weight_decay: float = 1.0e-3
+    """Weight decay to apply to the dynamic bias head parameters."""
+
     factorized_weight_decay: float = 0.0
-    """Weight decay to apply to the factorized dense layer parameters."""
+    """Deprecated alias for dynamic_bias_weight_decay."""
 
     lr: float = 8.75e-4
     """Initial learning rate."""
+
+    def __post_init__(self):
+        if (
+            self.dynamic_bias_weight_decay in (0.0, 1.0e-3)
+            and self.factorized_weight_decay > 0.0
+        ):
+            self.dynamic_bias_weight_decay = self.factorized_weight_decay
 
     def get_optimizer_wrapper(self):
         optimizer_name = self.optimizer_name.lower().strip()
@@ -51,13 +61,15 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
         )
         if (
             self.dense_weight_decay > 0.0
+            or self.dynamic_bias_weight_decay > 0.0
             or self.ft_weight_decay > 0.0
             or self.virtual_ft_weight_decay > 0.0
         ):
             info_str += (
                 f" and ft_weight_decay: {self.ft_weight_decay}, "
                 f"virtual_ft_weight_decay: {self.virtual_ft_weight_decay}, "
-                f"dense_weight_decay: {self.dense_weight_decay}"
+                f"dense_weight_decay: {self.dense_weight_decay}, "
+                f"dynamic_bias_weight_decay: {self.dynamic_bias_weight_decay}"
             )
         if int(os.environ.get("RANK", "0")) == 0:
             print(info_str + ".")

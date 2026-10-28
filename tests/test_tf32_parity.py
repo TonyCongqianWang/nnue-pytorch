@@ -1,7 +1,7 @@
 """TF32 dense-forward parity under fake quantization, and the reason for the guard.
 
 With act and weight fake-quantization on, every dense GEMM input is k/128
-(k <= 127) and every weight k/128 or k/64: both are exact in TF32's 11-bit
+(k <= 127) and every weight k/256 or k/128: both are exact in TF32's 11-bit
 significand, and products are exact in the fp32 accumulator, so enabling TF32
 cannot change the forward result. Without quantization the inputs leave that
 grid and TF32 rounds them, which is why train.py only enables TF32 for
@@ -61,10 +61,36 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
+    codebook = tuple(
+        tuple(torch.randn(count, layer.codebook_dim, device="cuda") for _ in range(2))
+        for _ in range(2)
+    )
+    biases = tuple(
+        torch.zeros(batch, width, device="cuda")
+        for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2
+    )
     torch.backends.cuda.matmul.allow_tf32 = False
-    expected = layer(x, ls_indices, True, True)
+    expected = layer(
+        x,
+        codebook,
+        (ls_indices, ls_indices),
+        (ls_indices, ls_indices),
+        biases,
+        biases,
+        True,
+        True,
+    )
     torch.backends.cuda.matmul.allow_tf32 = True
-    actual = layer(x, ls_indices, True, True)
+    actual = layer(
+        x,
+        codebook,
+        (ls_indices, ls_indices),
+        (ls_indices, ls_indices),
+        biases,
+        biases,
+        True,
+        True,
+    )
     torch.backends.cuda.matmul.allow_tf32 = False
 
     assert actual.dtype == expected.dtype
@@ -73,12 +99,12 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
 
 @pytest.mark.skipif(not _tf32_supported(), reason=_TF32_REASON)
 def test_quantized_gemm_matches_fp64_reference():
-    # Raw L1-shaped GEMM with grid inputs: k/128 acts, k/128 weights, k/16384
+    # Raw L1-shaped GEMM with grid inputs: k/128 acts, k/256 weights, k/32768
     # bias, as after fake quantization. Products are exact in both precisions,
     # so TF32 vs fp64 differs only by fp32 accumulation order.
     x = torch.randint(0, 128, (4096, 1024), device="cuda").float() / 128.0
-    w = torch.randint(-127, 128, (256, 1024), device="cuda").float() / 128.0
-    b = torch.randint(-127, 128, (256,), device="cuda").float() / 16384.0
+    w = torch.randint(-127, 128, (256, 1024), device="cuda").float() / 256.0
+    b = torch.randint(-127, 128, (256,), device="cuda").float() / 32768.0
 
     torch.backends.cuda.matmul.allow_tf32 = True
     actual = torch.nn.functional.linear(x, w, b)
@@ -97,10 +123,36 @@ def test_tf32_changes_forward_without_quantization():
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
+    codebook = tuple(
+        tuple(torch.randn(8, layer.codebook_dim, device="cuda") for _ in range(2))
+        for _ in range(2)
+    )
+    biases = tuple(
+        torch.zeros(batch, width, device="cuda")
+        for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2
+    )
     torch.backends.cuda.matmul.allow_tf32 = False
-    expected = layer(x, ls_indices, False, False)
+    expected = layer(
+        x,
+        codebook,
+        (ls_indices, ls_indices),
+        (ls_indices, ls_indices),
+        biases,
+        biases,
+        False,
+        False,
+    )
     torch.backends.cuda.matmul.allow_tf32 = True
-    actual = layer(x, ls_indices, False, False)
+    actual = layer(
+        x,
+        codebook,
+        (ls_indices, ls_indices),
+        (ls_indices, ls_indices),
+        biases,
+        biases,
+        False,
+        False,
+    )
     torch.backends.cuda.matmul.allow_tf32 = False
 
     # Pins why train.py gates TF32 on fake quantization.

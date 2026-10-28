@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "lib/rng.h"
+#include <array>
 
 using namespace binpack;
 using namespace chess;
@@ -54,9 +55,7 @@ struct K32H3 {
     static int block_idx(const Position& pos, Color color) {
         if (pos.piecesBB(Piece(PieceType::Queen, !color)).any())
             return 2;
-        for (Color c : {Color::White, Color::Black})
-            if (pos.piecesBB(Piece(PieceType::Rook, c)).any()
-                || pos.piecesBB(Piece(PieceType::Queen, c)).any())
+        if (pos.piecesBB(Piece(PieceType::Rook, !color)).any())
                 return 1;
         return 0;
     }
@@ -538,8 +537,8 @@ SparseBatch::SparseBatch(const IFeatureExtractor&               feature_set,
     BumpAllocator<int> int_alloc(m_int_block);
     white        = int_alloc.alloc(size * max_active_features);
     black        = int_alloc.alloc(size * max_active_features);
-    piece_count  = int_alloc.alloc(size);
-    queen_bucket = int_alloc.alloc(size);
+    context_us   = int_alloc.alloc(size);
+    context_them = int_alloc.alloc(size);
 
     num_active_white_features = 0;
     num_active_black_features = 0;
@@ -566,14 +565,55 @@ SparseBatch::~SparseBatch() {
     }
 }
 
+static const auto MAT_ID_TABLE = [] {
+    std::array<std::array<std::array<uint16_t, 4>, 9>, 16> table{};
+    uint16_t                                               id = 0;
+    for (int t = 0; t < 16; ++t)
+        for (int p = 0; p <= std::min(8, t); ++p)
+            for (int h = 0; h < 4; ++h)
+                if (t - p >= (h < 2 ? 1 : h == 2 ? 2 : 0))
+                    table[t][p][h] = id++;
+    return table;
+}();
+
+static int router_context(const Position& pos, Color perspective) {
+    const int t = std::clamp(int(pos.piecesBB(perspective).count()) - 1, 0, 15);
+    const int p =
+      std::clamp(int(pos.piecesBB(Piece(PieceType::Pawn, perspective)).count()), 0, std::min(8, t));
+    const auto bishops = pos.piecesBB(Piece(PieceType::Bishop, perspective)).bits();
+    const int  h =
+      t - p >= 1 && pos.piecesBB(Piece(PieceType::Queen, perspective)).any()                  ? 0
+       : t - p >= 1 && pos.piecesBB(Piece(PieceType::Rook, perspective)).any()                 ? 1
+       : t - p >= 2 && (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL) ? 2
+                                                                                               : 3;
+    const auto rights = pos.castlingRights();
+    const auto ownRights =
+      perspective == Color::White ? CastlingRights::White : CastlingRights::Black;
+    const auto enemyRights =
+      perspective == Color::White ? CastlingRights::Black : CastlingRights::White;
+    auto own   = pos.kingSquare(perspective);
+    auto enemy = pos.kingSquare(!perspective);
+    if (perspective == Color::Black)
+    {
+        own   = own.flippedVertically();
+        enemy = enemy.flippedVertically();
+    }
+    const int ownSq = int(own), enemySq = int(enemy);
+    const int ownBucket = bool(rights & ownRights) && own == Square(fileE, rank1)
+                          ? 32
+                          : (ownSq / 8) * 4 + std::min(ownSq % 8, 7 - ownSq % 8);
+    const int enemyBucket =
+      bool(rights & enemyRights) && enemy == Square(fileE, rank8) ? 64 : enemySq;
+    return (MAT_ID_TABLE[t][p][h] * 33 + ownBucket) * 65 + enemyBucket;
+}
+
 void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingDataEntry& e) {
     is_white[i]     = static_cast<float>(e.pos.sideToMove() == Color::White);
     outcome[i]      = (e.result + 1.0f) / 2.0f;
     score[i]        = e.score;
-    piece_count[i]  = e.pos.piecesBB().count();
     const auto stm  = e.pos.sideToMove();
-    queen_bucket[i] = (e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 2 : 0)
-                    | (e.pos.piecesBB(Piece(PieceType::Queen, !stm)).any() ? 1 : 0);
+    context_us[i]   = router_context(e.pos, stm);
+    context_them[i] = router_context(e.pos, !stm);
     fill_features(fs, i, e);
 }
 
@@ -596,7 +636,7 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
     int* black_offsets = white_offsets + size + 1;
     int* white_ids     = black_offsets + size + 1;
     int* black_ids     = white_ids + num_active_white_features;
-    int* piece_counts  = black_ids + num_active_black_features;
+    int* context_ids   = black_ids + num_active_black_features;
     int  white_count = 0, black_count = 0;
     white_offsets[0] = black_offsets[0] = 0;
     for (int row = 0; row < size; ++row)
@@ -611,8 +651,8 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
         white_offsets[row + 1] = white_count;
         black_offsets[row + 1] = black_count;
     }
-    std::memcpy(piece_counts, piece_count, std::size_t(size) * sizeof(int));
-    std::memcpy(piece_counts + size, queen_bucket, std::size_t(size) * sizeof(int));
+    std::memcpy(context_ids, context_us, std::size_t(size) * sizeof(int));
+    std::memcpy(context_ids + size, context_them, std::size_t(size) * sizeof(int));
     return true;
 }
 

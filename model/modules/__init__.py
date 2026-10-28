@@ -12,6 +12,8 @@ from .features import (
     get_feature_cls,
 )
 from .layer_stacks import LayerStacks
+from .moe_linear import MoeLinear
+from .router import MoERouter
 
 __all__ = [
     "K32H3",
@@ -21,6 +23,8 @@ __all__ = [
     "InputFeature",
     "LayerStacks",
     "LayerStacksConfig",
+    "MoERouter",
+    "MoeLinear",
     "add_feature_args",
     "get_available_features",
     "get_feature_cls",

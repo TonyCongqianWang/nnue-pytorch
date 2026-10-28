@@ -26,12 +26,12 @@ def _sparse_forward(x, weight, bias, indices, count):
     measured cost; parameter storage and dense STE input gradients stay intact.
     """
     width = x.shape[1]
-    outputs = bias.numel() // count
-    key = (width, outputs)
+    outputs = weight.shape[0] // count
+    key = (width, outputs, bias is not None)
     kernel = _sparse_forward_kernels.get(key)
     if kernel is None:
         kernel = cp.RawKernel(
-            f"#define K {width}\n#define N {outputs}\n"
+            f"#define K {width}\n#define N {outputs}\n#define HAS_BIAS {int(bias is not None)}\n"
             + r"""
 extern "C" __global__ void sparse_l1_forward(
     const float* x, const float* weight, const float* bias,
@@ -71,7 +71,7 @@ extern "C" __global__ void sparse_l1_forward(
     partial[warp][lane] = acc;
     __syncthreads();
     if (warp == 0 && column < N) {
-        float total = bias[bucket * N + column];
+        float total = HAS_BIAS ? bias[bucket * N + column] : 0.0f;
         #pragma unroll
         for (int i = 0; i < 4; ++i) total += partial[i][lane];
         output[row * N + column] = total;
@@ -83,19 +83,22 @@ extern "C" __global__ void sparse_l1_forward(
         _sparse_forward_kernels[key] = kernel
     transposed = weight.reshape(count, outputs, width).transpose(1, 2).contiguous()
     output = torch.empty((len(x), outputs), device=x.device, dtype=x.dtype)
-    stream = cp.cuda.ExternalStream(torch.cuda.current_stream(x.device).cuda_stream)
+    curr_stream = torch.cuda.current_stream(x.device)
+    stream = cp.cuda.ExternalStream(curr_stream.cuda_stream)
     kernel(
         (len(x), tr.cdiv(outputs, 32)),
         (128,),
         (
             x.data_ptr(),
             transposed.data_ptr(),
-            bias.data_ptr(),
+            bias.data_ptr() if bias is not None else 0,
             indices.data_ptr(),
             output.data_ptr(),
         ),
         stream=stream,
     )
+    transposed.record_stream(curr_stream)
+    output.record_stream(curr_stream)
     return output
 
 
@@ -126,15 +129,16 @@ extern "C" __global__ void route(const long long* ids,int* rows,int* counts,int 
         _route_kernels[count] = kernel
     rows = torch.empty((count, len(indices)), device=indices.device, dtype=torch.int32)
     counts = torch.zeros(count, device=indices.device, dtype=torch.int32)
-    stream = cp.cuda.ExternalStream(
-        torch.cuda.current_stream(indices.device).cuda_stream
-    )
+    curr_stream = torch.cuda.current_stream(indices.device)
+    stream = cp.cuda.ExternalStream(curr_stream.cuda_stream)
     kernel(
         (tr.cdiv(len(indices), 256),),
         (256,),
         (indices.data_ptr(), rows.data_ptr(), counts.data_ptr(), len(indices)),
         stream=stream,
     )
+    rows.record_stream(curr_stream)
+    counts.record_stream(curr_stream)
     return rows, counts
 
 
@@ -262,6 +266,7 @@ def _sum_gradient_partials(
     N: tl.constexpr,
     SPLIT: tl.constexpr,
     BLOCK: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ):
     b = tl.program_id(0)
     i = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -270,7 +275,7 @@ def _sum_gradient_partials(
         P + b * SPLIT * N * K + s[:, None] * N * K + i[None, :], i[None, :] < N * K, 0
     )
     tl.store(W + b * N * K + i, tl.sum(p, 0), i < N * K)
-    if tl.program_id(1) == 0:
+    if HAS_BIAS and tl.program_id(1) == 0:
         q = tl.load(Q + b * SPLIT * N + s[:, None] * N + i[None, :], i[None, :] < N, 0)
         tl.store(B + b * N + i, tl.sum(q, 0), i < N)
 
@@ -294,14 +299,18 @@ def _input_gradient(g, w, rows, counts, k, bm=32, bk=64):
     return out
 
 
-def _weight_and_bias_gradient(x, g, rows, counts, split=8, bm=32, bk=32):
+def _weight_and_bias_gradient(x, g, rows, counts, split=8, bm=32, bk=32, has_bias=True):
     batch, k = x.shape
     n = g.shape[1]
     count = counts.numel()  # Tensor metadata; no GPU-to-CPU synchronization.
     p = torch.empty((count, split, n, k), device=x.device, dtype=x.dtype)
-    q = torch.empty((count, split, n), device=x.device, dtype=x.dtype)
+    q = (
+        torch.empty((count, split, n), device=x.device, dtype=x.dtype)
+        if has_bias
+        else None
+    )
     w = torch.empty((count * n, k), device=x.device, dtype=x.dtype)
-    b = torch.empty(count * n, device=x.device, dtype=x.dtype)
+    b = torch.empty(count * n, device=x.device, dtype=x.dtype) if has_bias else None
     _bucketed_weight_gradient[(tr.cdiv(k, bk), count, split)](
         x,
         g,
@@ -317,11 +326,29 @@ def _weight_and_bias_gradient(x, g, rows, counts, split=8, bm=32, bk=32):
         max(16, tr.next_power_of_2(n)),
         num_warps=4,
     )
-    _bucketed_bias_gradient[(count, split)](
-        g, rows, counts, q, batch, n, split, max(16, tr.next_power_of_2(n)), num_warps=4
-    )
+    if has_bias:
+        _bucketed_bias_gradient[(count, split)](
+            g,
+            rows,
+            counts,
+            q,
+            batch,
+            n,
+            split,
+            max(16, tr.next_power_of_2(n)),
+            num_warps=4,
+        )
     _sum_gradient_partials[(count, tr.cdiv(n * k, 128))](
-        p, q, w, b, k, n, split, 128, num_warps=4
+        p,
+        q if has_bias else p,
+        w,
+        b if has_bias else w,
+        k,
+        n,
+        split,
+        128,
+        has_bias,
+        num_warps=4,
     )
     return w, b
 
@@ -334,7 +361,10 @@ class _GroupedLinear(torch.autograd.Function):
         indices = indices.flatten().to(torch.int64).contiguous()
         rows, counts = _route_rows(indices, count)
         ctx.save_for_backward(x, weight, rows, counts)
-        return _sparse_forward(x, weight, bias.contiguous(), indices, count)
+        ctx.has_bias = bias is not None
+        return _sparse_forward(
+            x, weight, bias.contiguous() if bias is not None else None, indices, count
+        )
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -345,7 +375,7 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output, weight, rows, counts, x.shape[1], 64, 64
         )
         grad_weight, grad_bias = _weight_and_bias_gradient(
-            x, grad_output, rows, counts, 16, 32, 32
+            x, grad_output, rows, counts, 16, 32, 32, ctx.has_bias
         )
         return grad_input, grad_weight, grad_bias, None, None
 

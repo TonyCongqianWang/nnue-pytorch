@@ -24,6 +24,9 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     ft_weight_decay: float = 0.0
     """Weight decay to apply to the feature transformer parameters."""
 
+    composition_weight_decay: float = 0.0
+    """Weight decay for shared material bases and bucket corrections."""
+
     virtual_ft_weight_decay: float = 0.0
     """Weight decay to apply to the virtual feature transformer parameters."""
 
@@ -52,11 +55,13 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
         if (
             self.dense_weight_decay > 0.0
             or self.ft_weight_decay > 0.0
+            or self.composition_weight_decay > 0.0
             or self.virtual_ft_weight_decay > 0.0
         ):
             info_str += (
                 f" and ft_weight_decay: {self.ft_weight_decay}, "
                 f"virtual_ft_weight_decay: {self.virtual_ft_weight_decay}, "
+                f"composition_weight_decay: {self.composition_weight_decay}, "
                 f"dense_weight_decay: {self.dense_weight_decay}"
             )
         if int(os.environ.get("RANK", "0")) == 0:

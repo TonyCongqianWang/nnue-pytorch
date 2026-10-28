@@ -144,11 +144,17 @@ class NNUE(nn.Module):
         dense_wd = optimizer_config.dense_weight_decay
         factorized_wd = optimizer_config.factorized_weight_decay
 
+        material_features = [
+            f for f in self.model.input.features if f.FEATURE_NAME == "Composition"
+        ]
+        spatial_features = [
+            f for f in self.model.input.features if f.FEATURE_NAME != "Composition"
+        ]
         train_params = [
             # Feature Transformer
             {
                 "params": _get_parameters(
-                    [self.model.input], get_biases=False, get_virtual=False
+                    spatial_features, get_biases=False, get_virtual=False
                 ),
                 "lr": LRs[0],
                 "weight_decay": ft_wd,
@@ -208,6 +214,14 @@ class NNUE(nn.Module):
             },
         ]
 
+        if material_features:
+            train_params.append(
+                {
+                    "params": _get_parameters(material_features),
+                    "lr": LRs[0],
+                    "weight_decay": optimizer_config.composition_weight_decay,
+                }
+            )
         train_params = [group for group in train_params if len(group["params"]) > 0]
 
         return self.optimizer_wrapper.configure_optimizers(train_params)

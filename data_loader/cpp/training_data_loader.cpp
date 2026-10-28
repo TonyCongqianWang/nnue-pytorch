@@ -415,7 +415,50 @@ struct SimpleExtractor: IFeatureExtractor {
     }
 };
 
+// Count multiplicities are repeated sparse IDs, preserving the existing batch ABI.
+struct Composition {
+    static constexpr int  INPUTS              = 5120;
+    static constexpr int  MAX_ACTIVE_FEATURES = 30;
+    static constexpr auto Offsets             = [] {
+        std::array<int, 1024> offsets{};
+        int                   row = 0;
+        for (int b = 0; b < 1024; ++b)
+        {
+            offsets[b] = row;
+            for (int t = 0; t < 10; ++t)
+                row += (b >> t) & 1;
+        }
+        return offsets;
+    }();
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color perspective) {
+        int counts[10] = {}, bucket = 0;
+        for (Square sq : e.pos.piecesBB())
+        {
+            const Piece p = e.pos.pieceAt(sq);
+            if (p.type() == PieceType::King)
+                continue;
+            ++counts[5 * (p.color() != perspective) + int(p.type())];
+        }
+        for (int t = 0; t < 10; ++t)
+            if (counts[t])
+                bucket |= 1 << t;
+        int row = Offsets[bucket];
+        int n   = 0;
+        for (int t = 0; t < 10; ++t)
+            if (counts[t])
+            {
+                for (int j = 0; j < counts[t]; ++j)
+                    features[n++] = row;
+                ++row;
+            }
+        return {n, INPUTS};
+    }
+};
+
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
+    if (name == "Composition")
+        return std::make_unique<SimpleExtractor<Composition>>();
     if (name == "Full_Threats")
         return std::make_unique<SimpleExtractor<FullThreats>>();
     if (name == "PP_3Wide")

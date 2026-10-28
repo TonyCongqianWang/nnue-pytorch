@@ -99,13 +99,13 @@ def move_indices(
     num_positions = batch.size
     max_features_per_position = batch.max_active_features
     dense_ids_per_perspective = num_positions * max_features_per_position
-    piece_count_elements = num_positions
-    queen_bucket_elements = num_positions
+    context_us_elements = num_positions
+    context_them_elements = num_positions
     dense_elements = (
         dense_ids_per_perspective  # White IDs, including padding.
         + dense_ids_per_perspective  # Black IDs, including padding.
-        + piece_count_elements
-        + queen_bucket_elements
+        + context_us_elements
+        + context_them_elements
     )
 
     # Each perspective needs a start offset per row and a final end offset.
@@ -115,8 +115,8 @@ def move_indices(
         + offsets_per_perspective  # Black offsets.
         + batch.num_active_white_features
         + batch.num_active_black_features
-        + piece_count_elements
-        + queen_bucket_elements
+        + context_us_elements
+        + context_them_elements
     )
     if (
         native_owned

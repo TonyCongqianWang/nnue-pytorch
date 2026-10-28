@@ -116,10 +116,19 @@ def test_nnue_integration_all_optimizers(optimizer_name):
     state = model.state_dict()
     assert "optimizer_state_dict" in state
 
-    # Create new model instance and load state dict
-    new_model = NNUE(config=config)
+    # Create new model instance with different weight decay and load state dict
+    from copy import deepcopy
+
+    new_cfg = deepcopy(config)
+    new_cfg.optimizer_config.dense_weight_decay = 1.0e-6
+    new_cfg.optimizer_config.dynamic_bias_weight_decay = 1.0e-6
+    new_model = NNUE(config=new_cfg)
     new_model.configure_optimizers()
     new_model.load_state_dict(state)
+
+    # Verify that new_model preserved its newly configured weight decays
+    opt = new_model.optimizer_wrapper.optimizer
+    assert any(g.get("weight_decay") == 1.0e-6 for g in opt.param_groups)
 
 
 @pytest.mark.parametrize("optimizer_name", ["rangerlite", "ranger21", "adamw"])
@@ -247,7 +256,7 @@ def test_virtual_ft_weight_decay_and_pruning():
     from model.nnue import _get_parameters
 
     # Test K32H3^ which has virtual weights
-    config_k32h3 = NNUEConfig(
+    config_k32q2 = NNUEConfig(
         features="K32H3^",
         optimizer_config=OptimizerConfig(
             ft_weight_decay=0.01,
@@ -255,17 +264,17 @@ def test_virtual_ft_weight_decay_and_pruning():
             dense_weight_decay=0.02,
         ),
     )
-    model_k32h3 = NNUE(config=config_k32h3)
+    model_k32q2 = NNUE(config=config_k32q2)
     real_ft = _get_parameters(
-        [model_k32h3.model.input], get_biases=False, get_virtual=False
+        [model_k32q2.model.input], get_biases=False, get_virtual=False
     )
     virtual_ft = _get_parameters(
-        [model_k32h3.model.input], get_biases=False, get_virtual=True
+        [model_k32q2.model.input], get_biases=False, get_virtual=True
     )
     assert len(real_ft) > 0
     assert len(virtual_ft) > 0
 
-    res = model_k32h3.configure_optimizers()
+    res = model_k32q2.configure_optimizers()
     opt = res[0][0]
     # Check that virtual weights group exists with correct weight decay
     found_real = False
@@ -354,3 +363,66 @@ def test_weight_clipper_and_swa_export():
     swa.swap_weights = lambda model, to_eval: None
     swa.on_train_end(t_swa)
     assert t_swa.model.model.calls == [True]
+
+
+def test_moe_optimizer_param_groups():
+    config = NNUEConfig(
+        features="Full_Threats",
+        optimizer_config=OptimizerConfig(
+            ft_weight_decay=1e-4,
+            dense_weight_decay=2e-4,
+            dynamic_bias_weight_decay=3e-4,
+        ),
+    )
+    nnue = NNUE(config=config)
+    res = nnue.configure_optimizers()
+    opt = res[0][0]
+
+    all_model_params = {id(p) for p in nnue.model.parameters()}
+    registered_params = set()
+
+    found_ft = False
+    found_dense = False
+    found_dyn_bias = False
+
+    for group in opt.param_groups:
+        for p in group["params"]:
+            assert id(p) not in registered_params, "Duplicate parameter in optimizer!"
+            registered_params.add(id(p))
+
+        if group["weight_decay"] == 1e-4:
+            found_ft = True
+        elif group["weight_decay"] == 2e-4:
+            found_dense = True
+            expected_dense = {
+                id(nnue.model.layer_stacks.l1.adapter_down),
+                id(nnue.model.layer_stacks.l1.adapter_up),
+                id(nnue.model.layer_stacks.l2.adapter_down),
+                id(nnue.model.layer_stacks.l2.adapter_up),
+                id(nnue.model.layer_stacks.output.adapter_down),
+                id(nnue.model.layer_stacks.output.adapter_up),
+                id(nnue.model.layer_stacks.opp.l1.adapter_down),
+                id(nnue.model.layer_stacks.opp.l1.adapter_up),
+                id(nnue.model.layer_stacks.opp.l2.adapter_down),
+                id(nnue.model.layer_stacks.opp.l2.adapter_up),
+                id(nnue.model.layer_stacks.opp.output.adapter_down),
+                id(nnue.model.layer_stacks.opp.output.adapter_up),
+            }
+            assert {id(p) for p in group["params"]} == expected_dense
+        elif group["weight_decay"] == 3e-4:
+            found_dyn_bias = True
+            expected_dyn_bias = {
+                id(p) for p in nnue.model.router.bias_heads.parameters()
+            }
+            assert {id(p) for p in group["params"]} == expected_dyn_bias
+
+    assert found_ft
+    assert found_dense
+    assert found_dyn_bias
+    assert registered_params == all_model_params, (
+        f"Missing {all_model_params - registered_params} params from optimizer!"
+    )
+
+    # Test backward compatibility alias
+    cfg_alias = OptimizerConfig(factorized_weight_decay=4e-5)
+    assert cfg_alias.dynamic_bias_weight_decay == 4e-5

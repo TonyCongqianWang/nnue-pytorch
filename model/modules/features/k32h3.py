@@ -24,7 +24,7 @@ for _sq, _bucket in enumerate(KingBuckets):
 
 
 class K32H3(InputFeature):
-    HASH = 0xAB005CEF
+    HASH = 0x32B5E387
     FEATURE_NAME = "K32H3^"
     INPUT_FEATURE_NAME = "K32H3"
     MAX_ACTIVE_FEATURES = 32

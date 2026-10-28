@@ -31,10 +31,11 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
-      - name: Checkout Stockfish Master
+      - name: Checkout Stockfish
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: TonyCongqianWang/Stockfish
+          ref: bf5abf077a65ae07850dd66d158eefa79718b779
           path: Stockfish
           persist-credentials: false
 
@@ -75,10 +76,11 @@ jobs:
           cache-from: type=gha,scope=cpu-cache
           cache-to: type=gha,mode=max,scope=cpu-cache
 
-      - name: Checkout Stockfish Master
+      - name: Checkout Stockfish
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: official-stockfish/Stockfish
+          repository: TonyCongqianWang/Stockfish
+          ref: bf5abf077a65ae07850dd66d158eefa79718b779
           path: Stockfish
           persist-credentials: false
 
@@ -87,8 +89,12 @@ jobs:
           cd Stockfish/src
           make -j build
 
+      - name: Perform MoE7 CPU Regression Tests
+        run: |
+          ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_moe7.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q
+
       - name: Perform Cross-Check Evaluation on Random Net
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            python -u cross_check_eval.py --random-weights --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' --count 1024 --seed 42 --max-error 5
-
+            python -u cross_check_eval.py --random-weights --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' --count 1024 --seed 42 --max-error 2.0 --max-ckpt-error 0.1

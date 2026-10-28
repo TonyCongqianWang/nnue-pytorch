@@ -76,8 +76,8 @@ struct SparseBatch final {
     int    max_active_features;
     int*   white;
     int*   black;
-    int*   piece_count;
-    int*   queen_bucket;
+    int*   context_us;
+    int*   context_them;
 
 #ifdef NNUE_LOADER_STATISTICS
     std::vector<struct binpack::TrainingDataEntry> entries_copy;

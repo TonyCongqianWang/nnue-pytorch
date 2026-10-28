@@ -27,8 +27,8 @@ class SparseBatch(ctypes.Structure):
         ("max_active_features", ctypes.c_int),
         ("white", ctypes.POINTER(ctypes.c_int)),
         ("black", ctypes.POINTER(ctypes.c_int)),
-        ("piece_count", ctypes.POINTER(ctypes.c_int)),
-        ("queen_bucket", ctypes.POINTER(ctypes.c_int)),
+        ("context_us", ctypes.POINTER(ctypes.c_int)),
+        ("context_them", ctypes.POINTER(ctypes.c_int)),
     ]
 
     def get_tensors(
@@ -74,32 +74,32 @@ class SparseBatch(ctypes.Structure):
         black_indices = int_block_gpu[size * max_active : 2 * size * max_active].view(
             size, max_active
         )
-        piece_count_i32 = int_block_gpu[
+        context_us_i32 = int_block_gpu[
             2 * size * max_active : 2 * size * max_active + size
         ].view(size)
-        queen_bucket_i32 = int_block_gpu[
+        context_them_i32 = int_block_gpu[
             2 * size * max_active + size : 2 * size * max_active + 2 * size
         ].view(size)
 
-        # Keep piece counts and queen buckets as int64 so callers can derive buckets on the target device.
+        # Keep perspective context indices as int64 for routing on the target device.
         if not us.is_cuda and use_pinned_memory:
             them = torch.empty_like(us, pin_memory=True)
             them.fill_(1.0)
             them.sub_(us)
 
-            piece_count = torch.empty(
+            context_us = torch.empty(
                 size, dtype=torch.int64, device="cpu", pin_memory=True
             )
-            piece_count.copy_(piece_count_i32)
+            context_us.copy_(context_us_i32)
 
-            queen_bucket = torch.empty(
+            context_them = torch.empty(
                 size, dtype=torch.int64, device="cpu", pin_memory=True
             )
-            queen_bucket.copy_(queen_bucket_i32)
+            context_them.copy_(context_them_i32)
         else:
             them = 1.0 - us
-            piece_count = piece_count_i32.to(dtype=torch.int64)
-            queen_bucket = queen_bucket_i32.to(dtype=torch.int64)
+            context_us = context_us_i32.to(dtype=torch.int64)
+            context_them = context_them_i32.to(dtype=torch.int64)
 
         return (
             us,
@@ -108,8 +108,8 @@ class SparseBatch(ctypes.Structure):
             black_indices,
             outcome,
             score,
-            piece_count,
-            queen_bucket,
+            context_us,
+            context_them,
         )
 
 

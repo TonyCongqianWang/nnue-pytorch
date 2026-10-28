@@ -18,6 +18,7 @@ from data_loader.config import DataloaderDDPConfig
 from trainer.callbacks import (
     CheckpointManager,
     ExplicitSWA,
+    MoEDeadExpertReseeder,
     SimpleLineLogger,
     TerminateOnNaN,
     TimeLimit,
@@ -259,6 +260,8 @@ def main():
         nnue.config = args.nnue_config
         nnue.param_index = args.dataloader_config.param_index
 
+    nnue.model.router.ema_decay = args.moe_reseed_ema_decay
+
     input_feature_name = nnue.model.input_feature_name
 
     torch.manual_seed(args.seed)
@@ -268,7 +271,7 @@ def main():
 
     if accelerator == "cuda":
         # With act and weight fake-quantization on, every dense GEMM input is
-        # k/128 (k <= 127) and every weight k/128 or k/64, all exact in TF32's
+        # k/128 (k <= 127) and every weight k/256 or k/128, all exact in TF32's
         # 11-bit significand, and products are exact in the fp32 accumulator:
         # the forward is bit-identical and only backward matmuls round (~5e-4
         # relative). Set the flag explicitly so training no longer depends on
@@ -369,6 +372,11 @@ def main():
         WeightClipper(input_clipping_interval=args.input_clipping_interval),
         checkpoint_manager,
         SimpleLineLogger(refresh_rate=refresh_rate),
+        MoEDeadExpertReseeder(
+            reseed_interval=args.moe_reseed_interval,
+            temperature=args.moe_reseed_sampling_temperature,
+            min_relative_utilization=args.moe_reseed_min_relative_utilization,
+        ),
         TimeLimit(args.max_time),
         nan_callback,
     ]

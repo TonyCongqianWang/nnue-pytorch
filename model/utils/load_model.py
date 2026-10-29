@@ -12,6 +12,10 @@ def load_model(
 ) -> NNUEModel:
     if filename.endswith(".pt"):
         model = torch.load(filename, weights_only=False)
+        from ..perspective import ARCHITECTURE_HASH
+
+        if int(getattr(model.model, "architecture_tag", -1)) != ARCHITECTURE_HASH:
+            raise ValueError("Incompatible handcrafted-perspective model")
         model.eval()
         return model.model
 

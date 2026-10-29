@@ -60,7 +60,7 @@ struct SparseBatch final {
 
     // Packed int32 layout: white offsets [size + 1], black offsets [size + 1],
     // white IDs [num_active_white_features], black IDs [num_active_black_features],
-    // piece counts [size], queen buckets [size]. Offsets begin at zero and end
+    // STM compact IDs [size], OPP compact IDs [size]. Offsets begin at zero and end
     // at the total ID count.
     // capacity is in elements; insufficient capacity leaves output untouched.
     bool pack_indices(int* output, std::size_t capacity) const;
@@ -76,8 +76,8 @@ struct SparseBatch final {
     int    max_active_features;
     int*   white;
     int*   black;
-    int*   piece_count;
-    int*   queen_bucket;
+    int*   stm_bucket;
+    int*   opp_bucket;
 
 #ifdef NNUE_LOADER_STATISTICS
     std::vector<struct binpack::TrainingDataEntry> entries_copy;

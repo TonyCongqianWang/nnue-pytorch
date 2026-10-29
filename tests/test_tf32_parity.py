@@ -62,9 +62,9 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
     ) // 4
 
     torch.backends.cuda.matmul.allow_tf32 = False
-    expected = layer(x, ls_indices, True, True)
+    expected = layer(x, (ls_indices, ls_indices.flip(0)), True, True)
     torch.backends.cuda.matmul.allow_tf32 = True
-    actual = layer(x, ls_indices, True, True)
+    actual = layer(x, (ls_indices, ls_indices.flip(0)), True, True)
     torch.backends.cuda.matmul.allow_tf32 = False
 
     assert actual.dtype == expected.dtype
@@ -98,9 +98,9 @@ def test_tf32_changes_forward_without_quantization():
     ) // 4
 
     torch.backends.cuda.matmul.allow_tf32 = False
-    expected = layer(x, ls_indices, False, False)
+    expected = layer(x, (ls_indices, ls_indices.flip(0)), False, False)
     torch.backends.cuda.matmul.allow_tf32 = True
-    actual = layer(x, ls_indices, False, False)
+    actual = layer(x, (ls_indices, ls_indices.flip(0)), False, False)
     torch.backends.cuda.matmul.allow_tf32 = False
 
     # Pins why train.py gates TF32 on fake quantization.

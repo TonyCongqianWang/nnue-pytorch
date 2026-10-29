@@ -13,6 +13,27 @@
 using namespace binpack;
 using namespace chess;
 
+// Same material invariants and immutable nominal ordering as the engine.
+static int perspective_bucket(const Position& pos, Color color) {
+    int count[5] = {};
+    std::uint64_t pawns = 0;
+    for (Square sq : pos.piecesBB()) {
+        const Piece pc = pos.pieceAt(sq);
+        if (pc.color() != color || pc.type() == PieceType::King) continue;
+        ++count[int(pc.type())];
+        if (pc.type() == PieceType::Pawn) pawns |= 1ULL << int(sq);
+    }
+    const auto [p,n,b,r,q] = std::array<int,5>{count[0],count[1],count[2],count[3],count[4]};
+    const int total = p+n+b+r+q;
+    const int promotions = std::max(0,n-2)+std::max(0,b-2)+std::max(0,r-2)+std::max(0,q-1);
+    if (p>8 || total>15 || promotions>8-p) return 255;
+    constexpr std::uint64_t left=0x0f0f0f0f0f0f0f0fULL;
+    const int layout=!pawns ? 2 : (pawns&left) && (pawns&~left) ? 0 : 1;
+    const int heavy=q ? 0 : r ? 1 : 2;
+    static constexpr unsigned char mapping[144] = {255,255,0,255,255,255,255,255,1,255,255,255,255,2,3,255,255,255,4,5,255,255,6,7,8,9,255,255,10,11,12,13,255,255,14,15,16,17,255,18,19,20,21,22,255,23,24,25,26,27,255,28,29,30,31,32,255,33,34,35,36,37,255,38,39,40,41,42,255,43,44,45,46,47,255,48,49,50,51,52,255,53,54,55,56,57,255,58,59,60,255,255,255,61,62,63,255,255,255,64,65,66,255,255,255,67,68,69,255,255,255,70,71,72,255,255,255,73,74,75,255,255,255,76,77,78,255,255,255,79,80,81,255,255,255,82,83,84,255,255,255,255,255,255};
+    return mapping[(((total/2)*3+heavy)*2+(n+b+r+q>=2))*3+layout];
+}
+
 // ---------------------------------------------------------
 // Internal extractors and threat arrays
 // ---------------------------------------------------------
@@ -54,10 +75,8 @@ struct K32H3 {
     static int block_idx(const Position& pos, Color color) {
         if (pos.piecesBB(Piece(PieceType::Queen, !color)).any())
             return 2;
-        for (Color c : {Color::White, Color::Black})
-            if (pos.piecesBB(Piece(PieceType::Rook, c)).any()
-                || pos.piecesBB(Piece(PieceType::Queen, c)).any())
-                return 1;
+        if (pos.piecesBB(Piece(PieceType::Rook, !color)).any())
+            return 1;
         return 0;
     }
 
@@ -538,8 +557,8 @@ SparseBatch::SparseBatch(const IFeatureExtractor&               feature_set,
     BumpAllocator<int> int_alloc(m_int_block);
     white        = int_alloc.alloc(size * max_active_features);
     black        = int_alloc.alloc(size * max_active_features);
-    piece_count  = int_alloc.alloc(size);
-    queen_bucket = int_alloc.alloc(size);
+    stm_bucket  = int_alloc.alloc(size);
+    opp_bucket = int_alloc.alloc(size);
 
     num_active_white_features = 0;
     num_active_black_features = 0;
@@ -570,10 +589,9 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     is_white[i]     = static_cast<float>(e.pos.sideToMove() == Color::White);
     outcome[i]      = (e.result + 1.0f) / 2.0f;
     score[i]        = e.score;
-    piece_count[i]  = e.pos.piecesBB().count();
-    const auto stm  = e.pos.sideToMove();
-    queen_bucket[i] = (e.pos.piecesBB(Piece(PieceType::Queen, stm)).any() ? 2 : 0)
-                    | (e.pos.piecesBB(Piece(PieceType::Queen, !stm)).any() ? 1 : 0);
+    const auto stm = e.pos.sideToMove();
+    stm_bucket[i] = perspective_bucket(e.pos, stm);
+    opp_bucket[i] = perspective_bucket(e.pos, !stm);
     fill_features(fs, i, e);
 }
 
@@ -596,7 +614,7 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
     int* black_offsets = white_offsets + size + 1;
     int* white_ids     = black_offsets + size + 1;
     int* black_ids     = white_ids + num_active_white_features;
-    int* piece_counts  = black_ids + num_active_black_features;
+    int* stm_buckets  = black_ids + num_active_black_features;
     int  white_count = 0, black_count = 0;
     white_offsets[0] = black_offsets[0] = 0;
     for (int row = 0; row < size; ++row)
@@ -611,8 +629,8 @@ bool SparseBatch::pack_indices(int* output, std::size_t capacity) const {
         white_offsets[row + 1] = white_count;
         black_offsets[row + 1] = black_count;
     }
-    std::memcpy(piece_counts, piece_count, std::size_t(size) * sizeof(int));
-    std::memcpy(piece_counts + size, queen_bucket, std::size_t(size) * sizeof(int));
+    std::memcpy(stm_buckets, stm_bucket, std::size_t(size) * sizeof(int));
+    std::memcpy(stm_buckets + size, opp_bucket, std::size_t(size) * sizeof(int));
     return true;
 }
 
@@ -878,7 +896,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
     std::array<double, 33> target_pc_weights_lut{};
     double                 target_pc_weights_total = 0.0;
 
-    auto desired_piece_count_weights = [&config](int pc) -> double {
+    auto desired_stm_bucket_weights = [&config](int pc) -> double {
         double x    = static_cast<double>(pc);
         double y[5] = {config.pc_y0, config.pc_y1, config.pc_y2, config.pc_y3, config.pc_y4};
 
@@ -920,7 +938,7 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
 
     for (int i = 0; i < 33; ++i)
     {
-        target_pc_weights_lut[i] = desired_piece_count_weights(i);
+        target_pc_weights_lut[i] = desired_stm_bucket_weights(i);
         target_pc_weights_total += target_pc_weights_lut[i];
     }
     if (target_pc_weights_total <= 0.0)

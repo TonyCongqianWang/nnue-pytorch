@@ -6,6 +6,8 @@
 using namespace binpack;
 using namespace chess;
 
+NNUE_API std::uint32_t NNUE_CDECL perspective_format_hash() { return 0x48503835u; }
+
 // TODO: We might want to introduce some exception safety to the abi.
 // Although for our uses it doesn't have priority.
 // Additionally the library could be quite unsafe since it reinterpret casts opaque pointers.

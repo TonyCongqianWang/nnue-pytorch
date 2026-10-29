@@ -11,6 +11,7 @@ from torch import nn
 
 from ..config import ModelConfig
 from ..model import NNUEModel
+from ..perspective import ARCHITECTURE_HASH, LIVE_EXPERTS, ROLE_EXPERTS
 
 
 def ascii_hist(name, x, bins=7):
@@ -78,11 +79,26 @@ class NNUEWriter:
         model: NNUEModel,
         description: str | None = None,
         verbose: bool = True,
+        synthetic: bool = False,
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
 
         self.verbose = verbose
+        if int(model.architecture_tag) != ARCHITECTURE_HASH:
+            raise ValueError("Incompatible handcrafted-perspective model")
+        loaded = bool(model.loaded_export)
+        masks = (
+            torch.ones_like(model.training_exposure)
+            if synthetic
+            else model.exported_mask
+            if loaded
+            else model.training_exposure
+        ).cpu()
+        if not masks.any(dim=1).all():
+            raise ValueError(
+                "No training exposure for a role; explicit synthetic=True is required"
+            )
 
         fc_hash = self.fc_hash(model)
 
@@ -95,7 +111,7 @@ class NNUEWriter:
         self.write_feature_transformer(model)
         layer_stacks = model.layer_stacks
         for bucket, (l1, l2, output) in enumerate(
-            layer_stacks.get_coalesced_layer_stacks()
+            layer_stacks.get_coalesced_layer_stacks(masks, loaded and not synthetic)
         ):
             self.int32(fc_hash)  # FC layers hash
             self.write_fc_layer(
@@ -107,6 +123,8 @@ class NNUEWriter:
             self.write_fc_layer(
                 model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
             )
+
+        self.buf.extend(np.packbits(masks.numpy(), axis=1, bitorder="little").tobytes())
 
     @staticmethod
     def fc_hash(model: NNUEModel) -> int:
@@ -129,7 +147,7 @@ class NNUEWriter:
                 # Clipped ReLU hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
-        return layer_hash
+        return layer_hash ^ ARCHITECTURE_HASH
 
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
@@ -227,29 +245,30 @@ class NNUEReader:
 
         self.read_feature_transformer(self.model.input)
 
-        layers = [
-            self.model.layer_stacks.l1,
-            self.model.layer_stacks.l2,
-            self.model.layer_stacks.output,
-        ]
-        num_ls_buckets = self.model.num_ls_buckets
-        l_w_slices = [
-            torch.chunk(layer.linear.weight.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
-        l_b_slices = [
-            torch.chunk(layer.linear.bias.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
-
-        for b in range(num_ls_buckets):
-            self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                self.read_fc_layer(
-                    l_w_slices[layer_idx][b],
-                    l_b_slices[layer_idx][b],
-                    layers[layer_idx].layer_key,
-                )
+        for bank in (self.model.layer_stacks, self.model.layer_stacks.opp):
+            for expert in range(ROLE_EXPERTS):
+                self.read_int32(fc_hash)
+                for layer in bank.layers():
+                    if expert == LIVE_EXPERTS:
+                        w, b = layer.fallback_weight, layer.fallback_bias
+                    else:
+                        begin = expert * layer.out_features
+                        w = layer.linear.weight[begin : begin + layer.out_features]
+                        b = layer.linear.bias[begin : begin + layer.out_features]
+                    self.read_fc_layer(w, b, layer.layer_key)
+        raw = self.f.read(22)
+        if len(raw) != 22 or raw[10] & 0xE0 or raw[21] & 0xE0:
+            raise ValueError("Invalid perspective exposure mask")
+        masks = np.unpackbits(
+            np.frombuffer(raw, dtype=np.uint8).reshape(2, 11), axis=1, bitorder="little"
+        )[:, :LIVE_EXPERTS].copy()
+        if not masks.any(axis=1).all():
+            raise ValueError("Exposure mask contains a role with no exposed experts")
+        self.model.exported_mask.copy_(torch.from_numpy(masks).bool())
+        self.model.mark_export_loaded()
+        self.model.eval()
+        if self.f.read(1):
+            raise ValueError("Trailing incompatible network data")
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version

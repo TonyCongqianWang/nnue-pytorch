@@ -6,6 +6,8 @@
 #include "nnue_macros.h"
 #include "training_data_loader_structs.h"
 
+NNUE_API std::uint32_t NNUE_CDECL perspective_format_hash();
+
 // Opaque handles
 struct SparseBatch;
 struct FenBatch;

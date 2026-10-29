@@ -27,8 +27,8 @@ class SparseBatch(ctypes.Structure):
         ("max_active_features", ctypes.c_int),
         ("white", ctypes.POINTER(ctypes.c_int)),
         ("black", ctypes.POINTER(ctypes.c_int)),
-        ("piece_count", ctypes.POINTER(ctypes.c_int)),
-        ("queen_bucket", ctypes.POINTER(ctypes.c_int)),
+        ("stm_bucket", ctypes.POINTER(ctypes.c_int)),
+        ("opp_bucket", ctypes.POINTER(ctypes.c_int)),
     ]
 
     def get_tensors(
@@ -74,32 +74,32 @@ class SparseBatch(ctypes.Structure):
         black_indices = int_block_gpu[size * max_active : 2 * size * max_active].view(
             size, max_active
         )
-        piece_count_i32 = int_block_gpu[
+        stm_bucket_i32 = int_block_gpu[
             2 * size * max_active : 2 * size * max_active + size
         ].view(size)
-        queen_bucket_i32 = int_block_gpu[
+        opp_bucket_i32 = int_block_gpu[
             2 * size * max_active + size : 2 * size * max_active + 2 * size
         ].view(size)
 
-        # Keep piece counts and queen buckets as int64 so callers can derive buckets on the target device.
+        # Keep independent compact perspective IDs as int64 for expert selection.
         if not us.is_cuda and use_pinned_memory:
             them = torch.empty_like(us, pin_memory=True)
             them.fill_(1.0)
             them.sub_(us)
 
-            piece_count = torch.empty(
+            stm_bucket = torch.empty(
                 size, dtype=torch.int64, device="cpu", pin_memory=True
             )
-            piece_count.copy_(piece_count_i32)
+            stm_bucket.copy_(stm_bucket_i32)
 
-            queen_bucket = torch.empty(
+            opp_bucket = torch.empty(
                 size, dtype=torch.int64, device="cpu", pin_memory=True
             )
-            queen_bucket.copy_(queen_bucket_i32)
+            opp_bucket.copy_(opp_bucket_i32)
         else:
             them = 1.0 - us
-            piece_count = piece_count_i32.to(dtype=torch.int64)
-            queen_bucket = queen_bucket_i32.to(dtype=torch.int64)
+            stm_bucket = stm_bucket_i32.to(dtype=torch.int64)
+            opp_bucket = opp_bucket_i32.to(dtype=torch.int64)
 
         return (
             us,
@@ -108,8 +108,8 @@ class SparseBatch(ctypes.Structure):
             black_indices,
             outcome,
             score,
-            piece_count,
-            queen_bucket,
+            stm_bucket,
+            opp_bucket,
         )
 
 
@@ -172,6 +172,15 @@ class CDataLoaderAPI:
         raise FileNotFoundError("Cannot find data_loader shared library.")
 
     def _define_prototypes(self):
+        try:
+            version = self.dll.perspective_format_hash
+            version.restype = ctypes.c_uint32
+            version.argtypes = []
+            if version() != 0x48503835:
+                raise ValueError("Incompatible handcrafted-perspective loader")
+        except AttributeError as error:
+            raise ValueError("Rebuild loader for handcrafted-perspective") from error
+
         self.pack_sparse_batch = self.dll.pack_sparse_batch
         self.pack_sparse_batch.restype = ctypes.c_bool
         self.pack_sparse_batch.argtypes = [

@@ -166,24 +166,18 @@ class QuantizationManager:
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        return [
-            {
-                "params": [model.layer_stacks.l1.linear.weight],
-                "min_weight": -self.max_hidden_weight[0],
-                "max_weight": self.max_hidden_weight[0],
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-            },
-            {
-                "params": [model.layer_stacks.l2.linear.weight],
-                "min_weight": -self.max_hidden_weight[1],
-                "max_weight": self.max_hidden_weight[1],
-            },
-            {
-                "params": [model.layer_stacks.output.linear.weight],
-                "min_weight": -self.max_hidden_weight[2],
-                "max_weight": self.max_hidden_weight[2],
-            },
-        ]
+        result = []
+        for bank in (model.layer_stacks, model.layer_stacks.opp):
+            for i, layer in enumerate(bank.layers()):
+                group = {
+                    "params": [layer.linear.weight],
+                    "min_weight": -self.max_hidden_weight[i],
+                    "max_weight": self.max_hidden_weight[i],
+                }
+                if i == 0:
+                    group["virtual_params"] = layer.factorized_linear.weight
+                result.append(group)
+        return result
 
     def quantize_feature_transformer_weights(
         self,

@@ -167,42 +167,66 @@ class NNUE(nn.Module):
             },
             # Dense Layer Stacks
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.weight],
+                "params": [
+                    self.model.layer_stacks.l1.factorized_linear.weight,
+                    self.model.layer_stacks.opp.l1.factorized_linear.weight,
+                ],
                 "lr": LRs[2],
                 "weight_decay": factorized_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.bias],
+                "params": [
+                    self.model.layer_stacks.l1.factorized_linear.bias,
+                    self.model.layer_stacks.opp.l1.factorized_linear.bias,
+                ],
                 "lr": LRs[3],
                 "weight_decay": 0.0,
             },
             {
-                "params": [self.model.layer_stacks.l1.linear.weight],
+                "params": [
+                    self.model.layer_stacks.l1.linear.weight,
+                    self.model.layer_stacks.opp.l1.linear.weight,
+                ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.linear.bias],
+                "params": [
+                    self.model.layer_stacks.l1.linear.bias,
+                    self.model.layer_stacks.opp.l1.linear.bias,
+                ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
             {
-                "params": [self.model.layer_stacks.l2.linear.weight],
+                "params": [
+                    self.model.layer_stacks.l2.linear.weight,
+                    self.model.layer_stacks.opp.l2.linear.weight,
+                ],
                 "lr": LRs[6],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l2.linear.bias],
+                "params": [
+                    self.model.layer_stacks.l2.linear.bias,
+                    self.model.layer_stacks.opp.l2.linear.bias,
+                ],
                 "lr": LRs[7],
                 "weight_decay": 0.0,
             },
             {
-                "params": [self.model.layer_stacks.output.linear.weight],
+                "params": [
+                    self.model.layer_stacks.output.linear.weight,
+                    self.model.layer_stacks.opp.output.linear.weight,
+                ],
                 "lr": LRs[8],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.output.linear.bias],
+                "params": [
+                    self.model.layer_stacks.output.linear.bias,
+                    self.model.layer_stacks.opp.output.linear.bias,
+                ],
                 "lr": LRs[9],
                 "weight_decay": 0.0,
             },
@@ -214,15 +238,14 @@ class NNUE(nn.Module):
 
     # --- train / eval switch ---
     def train(self, mode: bool = True):
-        retval = super().train(mode)
-
+        # Swap optimizer views before deriving fallback parameters for validation.
         if self.optimizer_wrapper is not None:
             if mode:
                 self.optimizer_wrapper.switch_to_train(True)
             else:
                 self.optimizer_wrapper.switch_to_eval()
 
-        return retval
+        return super().train(mode)
 
     def eval(self):
         return self.train(False)
@@ -295,6 +318,10 @@ class NNUE(nn.Module):
 
     def load_state_dict(self, state_dict, *args, **kwargs):
         state_dict = dict(state_dict)
+        from .perspective import ARCHITECTURE_HASH
+
+        if int(state_dict.get("model.architecture_tag", -1)) != ARCHITECTURE_HASH:
+            raise ValueError("Incompatible handcrafted-perspective checkpoint")
         lambda_scheduler_state = state_dict.pop("lambda_scheduler_state_dict", None)
         jitter_buffer_value = state_dict.pop("jitter_buffer_value", None)
         optimizer_state = state_dict.pop("optimizer_state_dict", None)
@@ -357,16 +384,16 @@ class NNUE(nn.Module):
             black_indices,
             _outcome,
             _score,
-            piece_count,
-            queen_bucket,
+            stm_bucket,
+            opp_bucket,
         ) = batch
         scorenet = self.model(
             us,
             them,
             white_indices,
             black_indices,
-            piece_count,
-            queen_bucket,
+            stm_bucket,
+            opp_bucket,
             self.config.use_fake_act_quantization,
             self.config.use_fake_weight_quantization,
         )

@@ -20,6 +20,9 @@ import model as M
 @dataclass(frozen=True)
 class SerializeConfig:
     # Flags and Options
+    synthetic: bool = False
+    """Explicitly enable all experts when exporting a fresh synthetic test model."""
+
     out_sha: bool = False
     """Ignore target file name and save as nn-<sha>.nnue. If target is a directory,
     the file is placed there; otherwise it goes to dirname(target) or CWD."""
@@ -108,6 +111,10 @@ def main():
         nnue.eval()
     elif args.source.endswith(".pt"):
         nnue = torch.load(args.source, weights_only=False)
+        from model.perspective import ARCHITECTURE_HASH
+
+        if int(getattr(nnue.model, "architecture_tag", -1)) != ARCHITECTURE_HASH:
+            raise ValueError("Incompatible handcrafted-perspective model")
     elif args.source.endswith(".nnue"):
         with open(args.source, "rb") as f:
             nnue = M.NNUE(
@@ -179,7 +186,9 @@ def main():
             out_dir = os.path.abspath(os.path.dirname(args.target) or os.getcwd())
         os.makedirs(out_dir, exist_ok=True)
 
-        writer = M.NNUEWriter(nnue.model, model_description)
+        writer = M.NNUEWriter(
+            nnue.model, model_description, synthetic=serialize_config.synthetic
+        )
         buf = writer.buf
 
         if serialize_config.out_sha:

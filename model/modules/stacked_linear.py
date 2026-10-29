@@ -82,7 +82,14 @@ class StackedLinear(nn.Module):
 
     @torch.no_grad()
     def at_index(self, index: int) -> nn.Linear:
-        layer = nn.Linear(self.in_features, self.out_features)
+        # Export is a CPU snapshot, even when validation runs on an accelerator
+        # or the caller has changed torch's default device/dtype.
+        layer = nn.Linear(
+            self.in_features,
+            self.out_features,
+            device="cpu",
+            dtype=self.linear.weight.dtype,
+        )
 
         begin = index * self.out_features
         end = (index + 1) * self.out_features
@@ -166,8 +173,8 @@ class FactorizedStackedLinear(StackedLinear):
     def at_index(self, index: int) -> nn.Linear:
         layer = super().at_index(index)
 
-        layer.weight.add_(self.factorized_linear.weight)
-        layer.bias.add_(self.factorized_linear.bias)
+        layer.weight.add_(self.factorized_linear.weight.to(layer.weight))
+        layer.bias.add_(self.factorized_linear.bias.to(layer.bias))
 
         return layer
 

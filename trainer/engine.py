@@ -205,16 +205,16 @@ class SimpleTrainer:
                 black_indices,
                 _outcome,
                 _score,
-                piece_count,
-                queen_bucket,
+                stm_bucket,
+                opp_bucket,
             ) = batch
             scorenet = self._ddp_model(
                 us,
                 them,
                 white_indices,
                 black_indices,
-                piece_count,
-                queen_bucket,
+                stm_bucket,
+                opp_bucket,
                 self.model.config.use_fake_act_quantization,
                 self.model.config.use_fake_weight_quantization,
             )

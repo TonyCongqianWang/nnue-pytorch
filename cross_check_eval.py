@@ -90,8 +90,8 @@ def eval_model_batch(
         black_indices,
         _outcome,
         _score,
-        piece_count,
-        queen_bucket,
+        stm_bucket,
+        opp_bucket,
     ) = batch.contents.get_tensors(device)
 
     evals = [
@@ -101,8 +101,8 @@ def eval_model_batch(
             them,
             white_indices,
             black_indices,
-            piece_count,
-            queen_bucket,
+            stm_bucket,
+            opp_bucket,
             fake_quantize_acts=fake_quantize,
             fake_quantize_weights=fake_quantize,
         )
@@ -343,9 +343,9 @@ def init_random_weights(model: M.NNUEModel) -> None:
                 touched.add(id(group["virtual_params"]))
 
         for ls in [
-            model.layer_stacks.l1,
-            model.layer_stacks.l2,
-            model.layer_stacks.output,
+            layer
+            for bank in (model.layer_stacks, model.layer_stacks.opp)
+            for layer in bank.layers()
         ]:
             if (
                 hasattr(ls, "linear")
@@ -469,7 +469,7 @@ def main():
                 net_path = temp_file.name
             temp_net_path = net_path
 
-            writer = M.NNUEWriter(init_model, verbose=False)
+            writer = M.NNUEWriter(init_model, verbose=False, synthetic=True)
             with open(net_path, "wb") as f:
                 f.write(writer.buf)
 

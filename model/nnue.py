@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import Tensor, nn
 from torchmetrics import MeanMetric, MetricCollection
@@ -48,12 +50,14 @@ def remap_tablebase_score(
 
 
 def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
-    score = remap_tablebase_score(
-        score,
-        base=loss_params.tb_remap_base,
-        scale=loss_params.tb_remap_scale,
-        decay=loss_params.tb_remap_decay,
-    )
+    teacher_score = score
+    if loss_params.tb_probability_decay == 0.0:
+        score = remap_tablebase_score(
+            score,
+            base=loss_params.tb_remap_base,
+            scale=loss_params.tb_remap_scale,
+            decay=loss_params.tb_remap_decay,
+        )
 
     # convert the network and search scores to an estimate match result
     # based on the win_rate_model, with scalings and offsets optimized
@@ -64,11 +68,24 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     s = (score - loss_params.out_offset) / loss_params.out_scaling
     sm = (-score - loss_params.out_offset) / loss_params.out_scaling
     pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
+    if loss_params.tb_probability_decay != 0.0:
+        plies = (32000 - score.abs()).clamp(min=0)
+        tb_probability = loss_params.tb_probability_decay**plies
+        pf = torch.where(
+            score.abs() >= 31755,
+            torch.where(score >= 0, tb_probability, 1 - tb_probability),
+            pf,
+        )
 
     # blend that eval based score with the actual game outcome
-    t = outcome
+    t = (
+        outcome * (1 - 2 * loss_params.outcome_smoothing)
+        + loss_params.outcome_smoothing
+    )
 
     pt = pf * actual_lambda + t * (1.0 - actual_lambda)
+    if loss_params.tb_probability_decay != 0.0:
+        pt = torch.where(teacher_score.abs() >= 31755, pf, pt)
 
     # use a MSE-like loss function
     loss = torch.pow(torch.abs(pt - qf), loss_params.pow_exp)
@@ -78,6 +95,11 @@ def calculate_sf_loss(scorenet, score, outcome, loss_params, actual_lambda):
     weights = 1 + (2.0**loss_params.w1 - 1) * torch.pow(
         (pf - 0.5) ** 2 * pf * (1 - pf), loss_params.w2
     )
+    if loss_params.draw_boost != 0.0:
+        kernel = torch.exp(
+            -math.log(20) * (teacher_score / loss_params.draw_boost_width) ** 2
+        )
+        weights = weights * (1 + loss_params.draw_boost * (outcome == 0.5) * kernel)
     loss = (loss * weights).sum() / weights.sum()
 
     return loss

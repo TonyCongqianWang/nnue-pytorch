@@ -118,6 +118,24 @@ class LossParams:
     """Tablebase score remapping scale value (default=20000.0)"""
     tb_remap_decay: float = 0.85
     """Tablebase score remapping decay parameter (default=0.8)"""
+    tb_probability_decay: float = 0.0
+    """TB target is decay**plies (loss: 1-target), ignoring outcomes; 0 keeps legacy."""
+    outcome_smoothing: float = 0.0
+    """Outcome targets become smoothing, 0.5, and 1-smoothing."""
+    draw_boost: float = 0.0
+    """Maximum relative weight boost for recorded draws with teacher score zero."""
+    draw_boost_width: float = 15.0
+    """Absolute teacher score where the draw boost falls to 5% of its maximum."""
+
+    def __post_init__(self):
+        if not 0.0 <= self.tb_probability_decay <= 1.0:
+            raise ValueError("tb_probability_decay must be in [0, 1].")
+        if not 0.0 <= self.outcome_smoothing < 0.5:
+            raise ValueError("outcome_smoothing must be in [0, 0.5).")
+        if self.draw_boost < 0.0 or self.draw_boost_width <= 0.0:
+            raise ValueError(
+                "draw_boost must be nonnegative and draw_boost_width positive."
+            )
 
 
 @dataclass(kw_only=True)

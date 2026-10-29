@@ -208,6 +208,24 @@ class NNUE(nn.Module):
             },
         ]
 
+        endgame_params = [
+            feature.weight
+            for feature in self.model.input.features
+            if feature.FEATURE_NAME == "Endgame"
+        ]
+        if endgame_params:
+            ids = {id(p) for p in endgame_params}
+            train_params[0]["params"] = [
+                p for p in train_params[0]["params"] if id(p) not in ids
+            ]
+            train_params.append(
+                {
+                    "params": endgame_params,
+                    "lr": LRs[0],
+                    "weight_decay": optimizer_config.endgame_weight_decay,
+                }
+            )
+
         train_params = [group for group in train_params if len(group["params"]) > 0]
 
         return self.optimizer_wrapper.configure_optimizers(train_params)

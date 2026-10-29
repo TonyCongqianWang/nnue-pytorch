@@ -24,6 +24,9 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     ft_weight_decay: float = 0.0
     """Weight decay to apply to the feature transformer parameters."""
 
+    endgame_weight_decay: float = 0.0
+    """Weight decay for the optional sparse endgame correction."""
+
     virtual_ft_weight_decay: float = 0.0
     """Weight decay to apply to the virtual feature transformer parameters."""
 

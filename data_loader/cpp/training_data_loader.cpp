@@ -80,6 +80,64 @@ struct K32H3 {
     }
 };
 
+// Sparse endgame squares, packed identically to the engine's Endgame feature.
+struct Endgame {
+    static constexpr std::string_view NAME                = "Endgame";
+    static constexpr int              INPUTS              = 3584;
+    static constexpr int              MAX_ACTIVE_FEATURES = 30;
+
+    static int category(const int* n) {
+        const int mask = bool(n[1]) | (bool(n[2]) << 1) | (bool(n[3]) << 2) | (bool(n[4]) << 3);
+        switch (mask)
+        {
+        case 0 :
+            return 0;
+        case 1 :
+            return 1;
+        case 2 :
+            return 2;
+        case 4 :
+            return 3;
+        case 8 :
+            return 4;
+        case 5 :
+            return n[1] == 1 && n[3] == 1 ? 5 : -1;
+        case 6 :
+            return n[2] == 1 && n[3] == 1 ? 6 : -1;
+        case 3 :
+            return n[1] == 1 && n[2] == 1 ? 7 : -1;
+        default :
+            return -1;
+        }
+    }
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color perspective) {
+        int j = 0;
+        for (Color c : {Color::White, Color::Black})
+        {
+            int counts[5];
+            for (int t = 0; t < 5; ++t)
+                counts[t] = e.pos.piecesBB(Piece(PieceType(t), c)).count();
+            const int cat = category(counts);
+            if (cat < 0)
+                continue;
+            constexpr int offsets[8] = {0, 0, 1, 2, 3, 4, 6, 8};
+            for (int t = 0; t < 5; ++t)
+            {
+                const int plane = t == 0 ? cat
+                                         : 8 + 10 * !counts[0] + offsets[cat]
+                                             + (cat >= 5 && t == (cat == 7 ? 2 : 3));
+                for (Square sq : e.pos.piecesBB(Piece(PieceType(t), c)))
+                    features[j++] =
+                      plane * 128 + (c != perspective) * 64
+                      + int(orient_flip_2(perspective, sq, e.pos.kingSquare(perspective)));
+            }
+        }
+        return {j, INPUTS};
+    }
+};
+
 // Pawn attackers no longer target pawns; those relationships are represented by PP_3Wide.
 constexpr int numvalidtargets[6] = {4, 10, 8, 8, 10, 0};
 
@@ -420,6 +478,8 @@ static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view
         return std::make_unique<SimpleExtractor<FullThreats>>();
     if (name == "PP_3Wide")
         return std::make_unique<SimpleExtractor<PP_3Wide>>();
+    if (name == "Endgame")
+        return std::make_unique<SimpleExtractor<Endgame>>();
     if (name == "K32H3")
         return std::make_unique<SimpleExtractor<K32H3>>();
     return nullptr;

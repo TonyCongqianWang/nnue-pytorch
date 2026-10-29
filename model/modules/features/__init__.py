@@ -5,6 +5,7 @@ from typing import Annotated
 
 import tyro
 
+from .endgame import Endgame
 from .full_threats import FullThreats
 from .input_feature import InputFeature
 from .k32h3 import K32H3
@@ -12,6 +13,7 @@ from .pp_3wide import PP3Wide
 
 _FEATURE_COMPONENTS: dict[str, type[InputFeature]] = {
     "K32H3^": K32H3,
+    "Endgame": Endgame,
     "Full_Threats": FullThreats,
     "PP_3Wide": PP3Wide,
 }

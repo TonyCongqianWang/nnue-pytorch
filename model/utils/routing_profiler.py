@@ -42,7 +42,7 @@ def _print_tail_profile(model, layer_stacks, codebook, shift, role, file=None) -
     mat_id, k_us, k_them = decompose_router_index(all_ctx)
     mat_feats = router.material_decode_table[mat_id]
 
-    lut_np = ((lut >> shift) & 31).cpu().numpy()  # Extract the five-bit tail ID
+    lut_np = ((lut >> shift) & 63).cpu().numpy()  # Extract the six-bit tail ID
     t_np = mat_feats[:, 0].cpu().numpy()  # Non-king pieces: 0..15
     q_np = (mat_feats[:, 2] == 0).cpu().numpy()  # Queen-first heavy category
     k_us_np = k_us.cpu().numpy()  # 0..32

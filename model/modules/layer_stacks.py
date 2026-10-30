@@ -1,11 +1,10 @@
-
 import torch
 from torch import nn
 
 from ..quantize import QuantizationManager
 from .config import LayerStacksConfig
 from .moe_linear import ExpertParameters, MoeLinear
-from .router import CODEBOOK_DIM
+from .router import ADAPTER_RANK, CODEBOOK_DIM, NUM_FC0_EXPERTS
 
 
 class ExpertBank(nn.Module):
@@ -14,7 +13,7 @@ class ExpertBank(nn.Module):
         count: int,
         config: LayerStacksConfig,
         quantization: QuantizationManager,
-        rank: int = 32,
+        rank: int = ADAPTER_RANK,
         codebook_dim: int = CODEBOOK_DIM,
     ):
         super().__init__()
@@ -68,13 +67,21 @@ class ExpertBank(nn.Module):
 class LayerStacks(ExpertBank):
     """One full-width FC0 bank, followed by independent perspective tails."""
 
-    def __init__(self, count, config, quantization, rank=32, codebook_dim=CODEBOOK_DIM):
+    def __init__(
+        self,
+        count,
+        config,
+        quantization,
+        rank=ADAPTER_RANK,
+        codebook_dim=CODEBOOK_DIM,
+        fc0_count=NUM_FC0_EXPERTS,
+    ):
         super().__init__(count, config, quantization, rank, codebook_dim)
         self.opp = ExpertBank(count, config, quantization, rank, codebook_dim)
         self.l1 = MoeLinear(
             config.L1,
             config.L2,
-            2 * count,
+            fc0_count,
             rank=rank,
             codebook_dim=codebook_dim,
             quantization=quantization,
@@ -173,35 +180,37 @@ class LayerStacks(ExpertBank):
 
     @torch.no_grad()
     def get_coalesced_layer_stacks(self, codebook=None, orders=None):
+        """FC0 singletons, then STM and OPP (FC1, output) pairs, without copies."""
         cb1, cb2 = ((None, None), (None, None)) if codebook is None else codebook
-        layers = self.dense_layers()
-        parameters = [
-            layer.get_all_weights_and_biases(cb)
-            for layer, cb in zip(layers, (cb1[0], cb1[1], cb1[1], cb2[1], cb2[1]))
-        ]
         if orders is None:
             orders = (range(self.l1.count), range(self.count), range(self.count))
-        for i in range(self.l1.count):
-            role, expert = divmod(i, self.count)
-            result = []
-            for pos in (0, 1 + role * 2, 2 + role * 2):
-                layer = layers[pos]
-                index = orders[0][i] if pos == 0 else orders[role + 1][expert]
-                weights, biases = parameters[pos]
-                weight = weights[
-                    index * layer.out_features : (index + 1) * layer.out_features
-                ]
-                weight = self.quantization.clip_ls_weight(weight, layer.layer_key)
-                result.append(
-                    ExpertParameters(
-                        weight,
-                        biases[
-                            index * layer.bias_features : (index + 1)
-                            * layer.bias_features
-                        ],
+        groups = (
+            ((self.l1,), (cb1[0],), orders[0]),
+            ((self.l2, self.output), (cb1[1], cb1[1]), orders[1]),
+            ((self.opp.l2, self.opp.output), (cb2[1], cb2[1]), orders[2]),
+        )
+        for layers, codebooks, order in groups:
+            parameters = [
+                layer.get_all_weights_and_biases(cb)
+                for layer, cb in zip(layers, codebooks)
+            ]
+            for index in order:
+                result = []
+                for layer, (weights, biases) in zip(layers, parameters):
+                    weight = weights[
+                        index * layer.out_features : (index + 1) * layer.out_features
+                    ]
+                    weight = self.quantization.clip_ls_weight(weight, layer.layer_key)
+                    result.append(
+                        ExpertParameters(
+                            weight,
+                            biases[
+                                index * layer.bias_features : (index + 1)
+                                * layer.bias_features
+                            ],
+                        )
                     )
-                )
-            yield tuple(result)
+                yield tuple(result)
 
     @torch.no_grad()
     def coalesce_layer_stacks_inplace(self, codebook):

@@ -23,11 +23,11 @@ STM/OPP material embedding tables preserve role ordering. King squares and
 castling rights do not enter FC0 routing, even during training. The FT itself
 retains its king-dependent features.
 
-Each role separately routes 32 tail experts (FC1/output together) and 64 dynamic
+Each role separately routes 64 tail experts (FC1/output together) and 64 dynamic
 bias experts. These four routers retain the material/structured-king encoder:
 396 x 33 x 65 = 849,420 contexts per role, including castling-aware king
 coordinates. Codebooks have dimension 256; all weight and bias generators retain
-unit-L2 rank-32 bottlenecks.
+unit-L2 rank-64 bottlenecks.
 
 Hidden weight experts have separate squared and linear static biases. Dynamic
 biases add independent offsets for both activation paths at both hidden layers.
@@ -51,8 +51,8 @@ active-weight cache, inference copying, hysteresis or history-dependent routing.
 ## Routing, export and compatibility
 
 The perspective table has 849,420 uint32 entries. STM uses bits 0..15 and OPP
-bits 16..31. Within each role word tail is bits 0..4, biases 5..10, and bits
-11..15 are reserved and exported as zero. Decode the STM fields from the STM
+bits 16..31. Within each role word tail is bits 0..5, biases 6..11, and bits
+12..15 are reserved and exported as zero. Decode the STM fields from the STM
 context and OPP fields from the OPP context.
 
 A separate byte-aligned FC0 table has 156,816 uint8 entries (153.1 KiB):
@@ -62,16 +62,17 @@ index = material_stm * 396 + material_opp
 fc0_expert = fc0_table[index]  # 0..63
 ```
 
-After the FT, export stores 64 parameter triples. Triple i contains full-width
-FC0 expert i and tail expert i%32 from STM if i<32, otherwise OPP. These components
-are independently selected during evaluation; their shared storage index does
-not couple routing. This retains a compact engine implementation without unused
-FC0 copies. Each hidden layer stores its squared/linear int32 biases before its
-int8 weights; readouts store one bias. The uint32 perspective LUT follows, then
-the byte FC0 LUT, then the two 64x64 int32 dynamic-bias tables.
-Raw downstream weight storage is 2,170,880 bytes; the larger FC0 expert bank
+After the FT, export stores 64 full-width FC0 experts, followed by 64 STM tails
+and 64 OPP tails. Each FC0 record has its own input-layer hash and its static
+biases/weights. Each tail record has the complete downstream hash and stores
+FC1 followed by output parameters. The engine likewise keeps distinct FC0 and
+tail arrays, so increasing tail counts never duplicates FC0 matrices. Each hidden
+layer stores squared/linear int32 biases before int8 weights; readouts store one
+bias. The uint32 perspective LUT follows, then the byte FC0 LUT, then the two
+64x64 int32 dynamic-bias tables.
+Raw downstream weight storage is 2,244,608 bytes; the larger FC0 expert bank
 is intentional. The bias tables occupy 32 KiB. The architecture hash includes
-full-width FC0 dimensions and the 64/32/64 expert counts, rejecting the earlier
+full-width FC0 dimensions and the 64/64/64 expert counts, rejecting the earlier
 MoE7 format. The name and router tag remain MoE7 (`0x4D6F4537`); start a fresh run.
 
 All five banks sort independently by descending rank-0 validation traffic, with
@@ -84,7 +85,8 @@ contexts.
 
 ## Training and diagnostics
 
-Dense weight decay remains 1e-6; dynamic-bias generator decay is 1e-3. Static
+Dense weight decay remains 1e-6; the recipe also applies 1e-6 to virtual FT
+weights. Dynamic-bias generator decay is 1e-3. Static
 expert bias adapters have zero decay. Commitment, balance, diversity and softmax
 temperature settings are unchanged. FC0 contributes 1/2 of the weight-router
 loss budget, each tail 1/4, and each bias router 1/2 of the bias-router budget.

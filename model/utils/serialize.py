@@ -121,19 +121,14 @@ class NNUEWriter:
         self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
         self.write_feature_transformer(model)
         layer_stacks = model.layer_stacks
-        for bucket, (l1, l2, output) in enumerate(
+        for bucket, layers in enumerate(
             layer_stacks.get_coalesced_layer_stacks(model.router.codebook, role_orders)
         ):
-            self.int32(fc_hash)  # FC layers hash
-            self.write_fc_layer(
-                model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}"
-            )
-            self.write_fc_layer(
-                model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}"
-            )
-            self.write_fc_layer(
-                model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
-            )
+            first = len(layers) == 1
+            self.int32(self.fc0_hash(model) if first else fc_hash)
+            keys = ("ls_l1",) if first else ("ls_l2", "ls_output")
+            for layer, key in zip(layers, keys):
+                self.write_fc_layer(model, layer, key, f"bucket {bucket}")
 
         # 3. Downstream MoE7 Router Lookup Table (849,420 uint32 = 3,397,680 bytes)
         if self.verbose:
@@ -157,27 +152,30 @@ class NNUEWriter:
         self.write_tensor(q_biases)
 
     @staticmethod
-    def fc_hash(model: NNUEModel) -> int:
-        # InputSlice hash
-        prev_hash = 0xEC42E90D
-        prev_hash ^= model.L1 * 2
-
-        # Fully connected layers
-        layers = [
-            model.layer_stacks.l1,
-            model.layer_stacks.l2,
-            model.layer_stacks.output,
-        ]
+    def layer_hash(layers, prev_hash):
         for layer in layers:
-            layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features
-            layer_hash ^= prev_hash >> 1
-            layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+            layer_hash = (
+                (0xCC03DAE4 + layer.out_features)
+                ^ (prev_hash >> 1)
+                ^ ((prev_hash << 31) & 0xFFFFFFFF)
+            )
             if layer.out_features != 1:
-                # Clipped ReLU hash
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
-        return layer_hash
+        return prev_hash
+
+    @staticmethod
+    def fc0_hash(model):
+        return NNUEWriter.layer_hash(
+            (model.layer_stacks.l1,), 0xEC42E90D ^ (model.L1 * 2)
+        )
+
+    @staticmethod
+    def fc_hash(model):
+        return NNUEWriter.layer_hash(
+            (model.layer_stacks.l2, model.layer_stacks.output),
+            NNUEWriter.fc0_hash(model),
+        )
 
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
@@ -284,24 +282,26 @@ class NNUEReader:
         stacks = self.model.layer_stacks
         for layer in stacks.dense_layers():
             layer.init_coalesced_storage()
-        for i in range(stacks.l1.count):
-            role, expert = divmod(i, self.model.num_ls_buckets)
-            bank = stacks if role == 0 else stacks.opp
-            self.read_int32(fc_hash)
-            for layer, index in (
-                (stacks.l1, i),
-                (bank.l2, expert),
-                (bank.output, expert),
-            ):
-                self.read_fc_layer(
-                    layer.coalesced_weight[
-                        index * layer.out_features : (index + 1) * layer.out_features
-                    ],
-                    layer.coalesced_bias[
-                        index * layer.bias_features : (index + 1) * layer.bias_features
-                    ],
-                    layer.layer_key,
-                )
+        groups = (
+            ((stacks.l1,), stacks.l1.count, NNUEWriter.fc0_hash(self.model)),
+            ((stacks.l2, stacks.output), stacks.count, fc_hash),
+            ((stacks.opp.l2, stacks.opp.output), stacks.count, fc_hash),
+        )
+        for layers, count, expected_hash in groups:
+            for index in range(count):
+                self.read_int32(expected_hash)
+                for layer in layers:
+                    self.read_fc_layer(
+                        layer.coalesced_weight[
+                            index * layer.out_features : (index + 1)
+                            * layer.out_features
+                        ],
+                        layer.coalesced_bias[
+                            index * layer.bias_features : (index + 1)
+                            * layer.bias_features
+                        ],
+                        layer.layer_key,
+                    )
 
         router_table_bytes = ROUTER_TABLE_SIZE * 4
         raw_router = self.f.read(router_table_bytes)

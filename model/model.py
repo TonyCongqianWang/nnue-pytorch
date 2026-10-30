@@ -8,6 +8,7 @@ from .modules import (
     MoERouter,
     get_feature_cls,
 )
+from .modules.router import NUM_WEIGHT_EXPERTS
 from .quantize import QuantizationManager
 
 
@@ -28,7 +29,7 @@ class NNUEModel(nn.Module):
         hidden_sizes = (config.L2 // 2, config.L3 // 2)
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
-        self.num_ls_buckets = 32
+        self.num_ls_buckets = NUM_WEIGHT_EXPERTS
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
         self.feature_name = self.input.FEATURE_NAME

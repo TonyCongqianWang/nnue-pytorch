@@ -38,10 +38,11 @@ NUM_ENEMY_KINGS = 65
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
 NUM_FC0_EXPERTS = 64
 FC0_ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2
-NUM_WEIGHT_EXPERTS = 32
+NUM_WEIGHT_EXPERTS = 64
 NUM_BIAS_EXPERTS = 64
 NUM_BIASES = 64
-BIAS_RANK = 32
+ADAPTER_RANK = 64
+BIAS_RANK = ADAPTER_RANK
 CODEBOOK_DIM = 256
 ROUTER_HASH = 0x4D6F4537  # 'MoE7'
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
@@ -72,7 +73,7 @@ class BankSpec:
 BANK_SPECS = (BankSpec("fc0", -1, "fc0", 0, 6),) + tuple(
     BankSpec(f"{kind}_{role_name}", role, kind, role * 16 + shift, bits)
     for role, role_name in enumerate(("stm", "opp"))
-    for kind, shift, bits in (("downstream", 0, 5), ("biases", 5, 6))
+    for kind, shift, bits in (("downstream", 0, 6), ("biases", 6, 6))
 )
 MOE_BANKS = tuple(spec.name for spec in BANK_SPECS)
 MOE_LOSS_COMPONENTS = tuple(
@@ -324,11 +325,11 @@ class MoERouter(nn.Module):
         super().__init__()
         if not (
             1 <= num_fc0_experts <= 64
-            and 1 <= num_weight_experts <= 32
+            and 1 <= num_weight_experts <= 64
             and 1 <= num_bias_experts <= 64
         ):
             raise ValueError(
-                "MoE7 supports 64 FC0 experts, 32 tail experts and 64 biases per role"
+                "MoE7 supports 64 FC0 experts, 64 tail experts and 64 biases per role"
             )
         self.num_contexts = num_contexts
         self.num_fc0_experts = num_fc0_experts

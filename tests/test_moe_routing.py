@@ -74,8 +74,8 @@ def test_material_fc0_and_four_perspective_fields():
     r = MoERouter(num_contexts=2)
     entries = torch.tensor(
         [
-            31 | (63 << 5) | (29 << 16) | (62 << 21),
-            2 | (3 << 5) | (5 << 16) | (6 << 21),
+            63 | (63 << 6) | (59 << 16) | (62 << 22),
+            2 | (3 << 6) | (61 << 16) | (6 << 22),
         ],
         dtype=torch.int64,
     )
@@ -87,8 +87,8 @@ def test_material_fc0_and_four_perspective_fields():
     r.load_coalesced_biases(d)
     r.eval()
     ew1, ew2, d1, d2, *_ = r(torch.tensor([0]), torch.tensor([1]))
-    assert [x.item() for x in ew1] == [63, 31]
-    assert [x.item() for x in ew2] == [63, 5]
+    assert [x.item() for x in ew1] == [63, 63]
+    assert [x.item() for x in ew2] == [63, 61]
     torch.testing.assert_close(torch.cat(d1, 1), d[0, 63:64])
     torch.testing.assert_close(torch.cat(d2, 1), d[1, 6:7])
     assert torch.equal(r.get_lookup_table(), entries)
@@ -118,6 +118,10 @@ def test_fc0_material_pair_ignores_kings_and_preserves_role_order():
 def test_zero_bias_init_and_independent_codebooks():
     r = MoERouter(num_contexts=4)
     assert r.coalesced_biases.shape == (2, 64, 64)
+    assert r.bias_rank == 64
+    assert all(
+        head.down.out_features == head.up.in_features == 64 for head in r.bias_heads
+    )
     assert torch.count_nonzero(r.get_coalesced_bias_table()) == 0
     assert len(list(r.banks())) == 5
     assert len({p.data_ptr() for p in r.codebooks.values()}) == 5
@@ -142,7 +146,9 @@ def test_serialization_and_deserialization_roundtrip():
         m.layer_stacks.get_coalesced_layer_stacks(m.router.codebook),
         loaded.layer_stacks.get_coalesced_layer_stacks(),
     ):
-        for a, b, key in zip(old, new, ("ls_l1", "ls_l2", "ls_output")):
+        for a, b, key in zip(
+            old, new, ("ls_l1",) if len(old) == 1 else ("ls_l2", "ls_output")
+        ):
             ba, wa = m.quantization.quantize_fc_layer(a.bias, a.weight, key)
             bb, wb = loaded.quantization.quantize_fc_layer(b.bias, b.weight, key)
             assert torch.equal(ba, bb) and torch.equal(wa, wb)
@@ -154,7 +160,7 @@ def test_unit_l2_basis_initialization_preserves_layer_variance():
 
     torch.manual_seed(7)
     router = MoERouter(num_weight_experts=4, num_bias_experts=4)
-    for rank in (8, 32):
+    for rank in (8, 32, 64):
         layer = MoeLinear(256, 64, 4, rank=rank)
         weights = layer.get_delta_weights(router.codebook[0][0])
         expected_rms = (1.0 / (3 * layer.in_features)) ** 0.5
@@ -168,7 +174,7 @@ def test_export_traffic_sort_preserves_scores_and_training_ids():
     m = NNUEModel(DEFAULT_FEATURES, config)
     m.layer_stacks.coalesce_layer_stacks_inplace(m.router.codebook)
     m.router.lut.random_(0, 1 << 32)
-    m.router.lut.bitwise_and_(0x07FF07FF)
+    m.router.lut.bitwise_and_(0x0FFF0FFF)
     m.router.fc0_lut.random_(0, 64)
     m.router.lut_valid = True
     m.router.load_coalesced_biases(torch.randn(2, 64, 8) * 0.05)

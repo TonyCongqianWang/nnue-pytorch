@@ -86,7 +86,7 @@ def test_heavy_export_roundtrip():
 def make_stacks():
     torch.manual_seed(7)
     q = QuantizationManager(QuantizationConfig(), (2, 2))
-    stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), q)
+    stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), q, fc0_count=4)
     for layer in stacks.dense_layers():
         layer.is_coalesced = True
         layer.coalesced_weight.uniform_(-0.25, 0.5)
@@ -248,7 +248,7 @@ def test_engine_accumulator_paths():
 
 def test_default_moe7_shapes_and_mac_budget():
     stacks = LayerStacks(
-        32, LayerStacksConfig(), QuantizationManager(QuantizationConfig())
+        64, LayerStacksConfig(), QuantizationManager(QuantizationConfig())
     )
     assert (stacks.l1.in_features, stacks.l1.out_features) == (1024, 32)
     assert (stacks.l2.in_features, stacks.l2.out_features) == (64, 16)
@@ -260,6 +260,8 @@ def test_default_moe7_shapes_and_mac_budget():
     assert stacks.l2.bias_features == 32
     assert stacks.l1.count == 64
     assert not hasattr(stacks.opp, "l1")
+    assert stacks.count == stacks.opp.count == 64
+    assert all(layer.rank == 64 for layer in stacks.dense_layers())
     assert stacks.output.bias_features == 1
     assert stacks.quantization.weight_scales_dict["ls_l2_weight"] == 128
     assert macs == 35072  # Master: 34944; only the final scalar readout doubles.
@@ -281,6 +283,7 @@ def test_independent_generators_receive_gradients_without_optimizer():
         2,
         LayerStacksConfig(L1=4, L2=4, L3=4),
         QuantizationManager(QuantizationConfig(), (2, 2)),
+        fc0_count=4,
     )
     a, b, d1, d2, loss, *_ = router(
         torch.tensor([0, 1, 0, 1]), torch.tensor([1, 0, 1, 0])

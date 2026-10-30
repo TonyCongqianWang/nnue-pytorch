@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..quantize import QuantizationManager
-from .router import CODEBOOK_DIM, ieee_matmul_precision, rms_norm
+from .router import ADAPTER_RANK, CODEBOOK_DIM, ieee_matmul_precision, rms_norm
 
 try:
     from .grouped_linear import grouped_l1, grouped_l1_preferred
@@ -42,7 +42,7 @@ class MoeLinear(nn.Module):
         in_features: int,
         out_features: int,
         count: int,
-        rank: int = 32,
+        rank: int = ADAPTER_RANK,
         codebook_dim: int = CODEBOOK_DIM,
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,

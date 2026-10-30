@@ -64,6 +64,7 @@ def get_histogram_callback(hist_title: str, verbose: bool):
 
 
 from ..modules.router import (
+    FC0_ROUTER_TABLE_SIZE,
     NUM_BIAS_EXPERTS,
     ROUTER_TABLE_SIZE,
     get_router_hash,
@@ -94,9 +95,10 @@ class NNUEWriter:
         orders = model.router.export_permutations()
         router_table = model.router.export_lookup_table(orders)
         role_orders = tuple(
-            (orders[f"fc0_{role}"].tolist(), orders[f"downstream_{role}"].tolist())
-            for role in ("stm", "opp")
+            orders[name].tolist()
+            for name in ("fc0", "downstream_stm", "downstream_opp")
         )
+        fc0_table = model.router.export_fc0_lookup_table(orders)
         if self.verbose:
             for name in orders:
                 counts = getattr(model.router, f"validation_counts_{name}")
@@ -139,6 +141,7 @@ class NNUEWriter:
 
             print_routing_profile(model)
         self.write_tensor(router_table.to(torch.uint32))
+        self.write_tensor(fc0_table)
 
         # 4. Dynamic Biases Table (2 x 64 experts x 64 int32 values = 32,768 bytes)
         coalesced_biases = model.router.get_coalesced_bias_table()
@@ -179,7 +182,9 @@ class NNUEWriter:
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
         router_hash = get_router_hash(
-            model.router.num_weight_experts, model.router.num_bias_experts
+            model.router.num_weight_experts,
+            model.router.num_bias_experts,
+            model.router.num_fc0_experts,
         )
         net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2) ^ router_hash
         self.int32(net_hash)  # halfkp network hash
@@ -276,21 +281,27 @@ class NNUEReader:
 
         self.read_feature_transformer(self.model.input)
 
-        for bank in (self.model.layer_stacks, self.model.layer_stacks.opp):
-            layers = [bank.l1, bank.l2, bank.output]
-            for layer in layers:
-                layer.init_coalesced_storage()
-            for b in range(self.model.num_ls_buckets):
-                self.read_int32(fc_hash)
-                for layer in layers:
-                    out_f = layer.out_features
-                    self.read_fc_layer(
-                        layer.coalesced_weight[b * out_f : (b + 1) * out_f],
-                        layer.coalesced_bias[
-                            b * layer.bias_features : (b + 1) * layer.bias_features
-                        ],
-                        layer.layer_key,
-                    )
+        stacks = self.model.layer_stacks
+        for layer in stacks.dense_layers():
+            layer.init_coalesced_storage()
+        for i in range(stacks.l1.count):
+            role, expert = divmod(i, self.model.num_ls_buckets)
+            bank = stacks if role == 0 else stacks.opp
+            self.read_int32(fc_hash)
+            for layer, index in (
+                (stacks.l1, i),
+                (bank.l2, expert),
+                (bank.output, expert),
+            ):
+                self.read_fc_layer(
+                    layer.coalesced_weight[
+                        index * layer.out_features : (index + 1) * layer.out_features
+                    ],
+                    layer.coalesced_bias[
+                        index * layer.bias_features : (index + 1) * layer.bias_features
+                    ],
+                    layer.layer_key,
+                )
 
         router_table_bytes = ROUTER_TABLE_SIZE * 4
         raw_router = self.f.read(router_table_bytes)
@@ -298,7 +309,10 @@ class NNUEReader:
             raise EOFError(
                 f"Expected {router_table_bytes} bytes for router table, got {len(raw_router)}"
             )
-        self.model.router.load_lookup_table(raw_router)
+        raw_fc0 = self.f.read(FC0_ROUTER_TABLE_SIZE)
+        if len(raw_fc0) != FC0_ROUTER_TABLE_SIZE:
+            raise EOFError("Unexpected end of FC0 material router table")
+        self.model.router.load_lookup_table(raw_router, raw_fc0)
 
         raw_biases = self.tensor(
             np.int32, [2, NUM_BIAS_EXPERTS, self.model.router.num_biases]
@@ -310,7 +324,9 @@ class NNUEReader:
         self.read_int32(VERSION)  # version
         header_hash = self.read_int32()
         router_hash = get_router_hash(
-            self.model.router.num_weight_experts, self.model.router.num_bias_experts
+            self.model.router.num_weight_experts,
+            self.model.router.num_bias_experts,
+            self.model.router.num_fc0_experts,
         )
         expected_hash = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ router_hash
         if header_hash != expected_hash:

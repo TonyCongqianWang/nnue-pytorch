@@ -36,6 +36,8 @@ NUM_MATERIAL_STATES = 396
 NUM_OUR_KINGS = 33
 NUM_ENEMY_KINGS = 65
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES * NUM_OUR_KINGS * NUM_ENEMY_KINGS  # 849,420
+NUM_FC0_EXPERTS = 64
+FC0_ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2
 NUM_WEIGHT_EXPERTS = 32
 NUM_BIAS_EXPERTS = 64
 NUM_BIASES = 64
@@ -59,18 +61,18 @@ class BankSpec:
 
     @property
     def loss_weight(self):
-        # Average the two weight routers, preserving the original weight budget.
-        return 0.5 if self.bias else 0.25
+        # Half of the weight budget goes to FC0, half to the two tails.
+        return 0.5 if self.bias or self.kind == "fc0" else 0.25
 
     @property
     def mask(self):
         return (1 << self.bits) - 1
 
 
-BANK_SPECS = tuple(
+BANK_SPECS = (BankSpec("fc0", -1, "fc0", 0, 6),) + tuple(
     BankSpec(f"{kind}_{role_name}", role, kind, role * 16 + shift, bits)
     for role, role_name in enumerate(("stm", "opp"))
-    for kind, shift, bits in (("fc0", 0, 5), ("downstream", 5, 5), ("biases", 10, 6))
+    for kind, shift, bits in (("downstream", 0, 5), ("biases", 5, 6))
 )
 MOE_BANKS = tuple(spec.name for spec in BANK_SPECS)
 MOE_LOSS_COMPONENTS = tuple(
@@ -115,10 +117,11 @@ def codebook_diversity_loss(cb: torch.Tensor) -> torch.Tensor:
 def get_router_hash(
     num_weight_experts: int = NUM_WEIGHT_EXPERTS,
     num_bias_experts: int = NUM_BIAS_EXPERTS,
+    num_fc0_experts: int = NUM_FC0_EXPERTS,
 ) -> int:
     """Combines the architecture tag and expert counts into a 32-bit router hash."""
     return ROUTER_HASH ^ (
-        (num_bias_experts << 16) | (num_weight_experts << 8) | num_weight_experts
+        (num_bias_experts << 16) | (num_weight_experts << 8) | num_fc0_experts
     )
 
 
@@ -294,14 +297,12 @@ class BiasGenerator(nn.Module):
 
 
 class MoERouter(nn.Module):
-    """Four independent role-specific routers sharing material/king embeddings.
-
-    LUT bytes: STM weights, OPP weights, STM biases, OPP biases.
-    """
+    """One joint-material FC0 router and independent role tail/bias routers."""
 
     def __init__(
         self,
         num_contexts: int = ROUTER_TABLE_SIZE,
+        num_fc0_experts: int = NUM_FC0_EXPERTS,
         num_weight_experts: int = NUM_WEIGHT_EXPERTS,
         num_bias_experts: int = NUM_BIAS_EXPERTS,
         dim: int = CODEBOOK_DIM,
@@ -321,11 +322,16 @@ class MoERouter(nn.Module):
         hidden_sizes: tuple[int, int] = (16, 16),
     ):
         super().__init__()
-        if not (1 <= num_weight_experts <= 32 and 1 <= num_bias_experts <= 64):
+        if not (
+            1 <= num_fc0_experts <= 64
+            and 1 <= num_weight_experts <= 32
+            and 1 <= num_bias_experts <= 64
+        ):
             raise ValueError(
-                "MoE7 supports 32 experts per weight bank and 64 biases per role"
+                "MoE7 supports 64 FC0 experts, 32 tail experts and 64 biases per role"
             )
         self.num_contexts = num_contexts
+        self.num_fc0_experts = num_fc0_experts
         self.num_weight_experts = num_weight_experts
         self.num_bias_experts = num_bias_experts
         self.dim = dim
@@ -353,16 +359,17 @@ class MoERouter(nn.Module):
         self.embed_P = nn.Embedding(9, dim)
         self.embed_H = nn.Embedding(4, dim)
 
+        # Separate opponent material embeddings preserve STM/OPP ordering for FC0.
+        self.embed_opp_T = nn.Embedding(16, dim)
+        self.embed_opp_P = nn.Embedding(9, dim)
+        self.embed_opp_H = nn.Embedding(4, dim)
+
         # Structured spatial King embedding table
         self.king_embed = StructuredKingEmbedding(dim=dim)
 
         self.codebooks = nn.ParameterDict(
             {
-                spec.name: nn.Parameter(
-                    torch.empty(
-                        num_bias_experts if spec.bias else num_weight_experts, dim
-                    )
-                )
+                spec.name: nn.Parameter(torch.empty(self.bank_size(spec), dim))
                 for spec in BANK_SPECS
             }
         )
@@ -377,7 +384,7 @@ class MoERouter(nn.Module):
 
         for spec in BANK_SPECS:
             name = spec.name
-            count = num_bias_experts if spec.bias else num_weight_experts
+            count = self.bank_size(spec)
             self.register_buffer(
                 f"ema_traffic_{name}",
                 torch.full((count,), 1.0 / count),
@@ -402,10 +409,15 @@ class MoERouter(nn.Module):
             torch.zeros(num_contexts, dtype=torch.int64),
             persistent=False,
         )
+        self.register_buffer(
+            "fc0_lut",
+            torch.zeros(FC0_ROUTER_TABLE_SIZE, dtype=torch.uint8),
+            persistent=False,
+        )
         self.lut_valid: bool = False
         self.collect_lut_diagnostics: bool = False
         self.lut_margin_valid: bool = False
-        self.lut_margin_samples: int = 0
+        self.lut_margin_samples = [0] * len(BANK_SPECS)
         self.register_buffer(
             "lut_margin_stats", torch.zeros(len(BANK_SPECS), 3), persistent=False
         )
@@ -424,13 +436,16 @@ class MoERouter(nn.Module):
     def normalized_codebook(self, name):
         return center_and_rms_norm(self.codebooks[name], self.codebook_target_norm)
 
+    def bank_size(self, spec):
+        if spec.kind == "fc0":
+            return self.num_fc0_experts
+        return self.num_bias_experts if spec.bias else self.num_weight_experts
+
     @property
     def codebook(self):
+        fc0 = self.normalized_codebook("fc0")
         return tuple(
-            tuple(
-                self.normalized_codebook(f"{kind}_{role}")
-                for kind in ("fc0", "downstream")
-            )
+            (fc0, self.normalized_codebook(f"downstream_{role}"))
             for role in ("stm", "opp")
         )
 
@@ -460,11 +475,17 @@ class MoERouter(nn.Module):
     def export_lookup_table(self, orders):
         source = self.get_lookup_table()
         result = torch.zeros_like(source)
-        for spec in BANK_SPECS:
+        for spec in BANK_SPECS[1:]:
             inverse = torch.argsort(orders[spec.name])
             ids = (source >> spec.shift) & spec.mask
             result |= inverse[ids] << spec.shift
         return result
+
+    @torch.no_grad()
+    def export_fc0_lookup_table(self, orders):
+        self.get_lookup_table()
+        inverse = torch.argsort(orders["fc0"])
+        return inverse[self.fc0_lut.long()].to(torch.uint8)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -479,6 +500,9 @@ class MoERouter(nn.Module):
         nn.init.uniform_(self.embed_T.weight, -val, val)
         nn.init.uniform_(self.embed_P.weight, -val, val)
         nn.init.uniform_(self.embed_H.weight, -val, val)
+        nn.init.uniform_(self.embed_opp_T.weight, -val, val)
+        nn.init.uniform_(self.embed_opp_P.weight, -val, val)
+        nn.init.uniform_(self.embed_opp_H.weight, -val, val)
         for codebook in self.codebooks.values():
             nn.init.uniform_(codebook, -val, val)
         for head in self.bias_heads:
@@ -486,15 +510,36 @@ class MoERouter(nn.Module):
             nn.init.zeros_(head.up.weight)
             nn.init.zeros_(head.up.bias)
 
+    def get_material_vector(self, mat, opponent=False):
+        t, p, h = self.material_decode_table[mat].unbind(-1)
+        tables = (
+            (self.embed_opp_T, self.embed_opp_P, self.embed_opp_H)
+            if opponent
+            else (self.embed_T, self.embed_P, self.embed_H)
+        )
+        return tables[0](t) + tables[1](p) + tables[2](h)
+
+    def get_fc0_context_vector(self, c_us, c_them):
+        us = torch.div(c_us, NUM_OUR_KINGS * NUM_ENEMY_KINGS, rounding_mode="floor")
+        them = torch.div(c_them, NUM_OUR_KINGS * NUM_ENEMY_KINGS, rounding_mode="floor")
+        return center_and_rms_norm(
+            self.get_material_vector(us)
+            + self.get_material_vector(them, opponent=True),
+            self.codebook_target_norm,
+        )
+
+    def get_all_fc0_context_vectors(self):
+        mat = torch.arange(NUM_MATERIAL_STATES, device=self.embed_T.weight.device)
+        z = (
+            self.get_material_vector(mat)[:, None]
+            + self.get_material_vector(mat, opponent=True)[None]
+        )
+        return center_and_rms_norm(z.reshape(-1, self.dim), self.codebook_target_norm)
+
     def get_context_vector(self, c: torch.Tensor) -> torch.Tensor:
         """Computes, mean-centers, and RMS-normalizes context vector for batch of context indices c."""
         mat_id, k_us, k_them = decompose_router_index(c)
-        mat_feats = self.material_decode_table[mat_id]  # (B, 3)
-        t = mat_feats[:, 0]
-        p = mat_feats[:, 1]
-        h = mat_feats[:, 2]
-
-        z_mat = self.embed_T(t) + self.embed_P(p) + self.embed_H(h)
+        z_mat = self.get_material_vector(mat_id)
         z_king = self.king_embed(k_us, k_them)
         return center_and_rms_norm(z_mat + z_king, self.codebook_target_norm)
 
@@ -503,12 +548,8 @@ class MoERouter(nn.Module):
         device = self.embed_T.weight.device
 
         # Compute z_mat for all 396 material states
-        mat_feats = self.material_decode_table  # (396, 3)
-        z_mat = (
-            self.embed_T(mat_feats[:, 0])
-            + self.embed_P(mat_feats[:, 1])
-            + self.embed_H(mat_feats[:, 2])
-        )  # (396, dim)
+        mat = torch.arange(NUM_MATERIAL_STATES, device=device)
+        z_mat = self.get_material_vector(mat)
 
         # Compute z_king for all 33 x 65 = 2,145 king pairs
         all_kus = torch.arange(NUM_OUR_KINGS, device=device).repeat_interleave(
@@ -600,17 +641,27 @@ class MoERouter(nn.Module):
                 self.num_contexts, dtype=torch.int64, device=z_all.device
             )
             self.lut_margin_valid = False
+            z_fc0 = self.get_all_fc0_context_vectors()
+            fc0 = torch.empty(
+                FC0_ROUTER_TABLE_SIZE, dtype=torch.uint8, device=z_all.device
+            )
             for row, (name, _, _, _, cb) in enumerate(self.banks()):
-                shift = BANK_SPECS[row].shift
+                spec = BANK_SPECS[row]
+                vectors = z_fc0 if spec.kind == "fc0" else z_all
+                shift = spec.shift
                 margins = []
-                for start in range(0, self.num_contexts, 65536):
-                    z = z_all[start : start + 65536]
+                for start in range(0, len(vectors), 65536):
+                    z = vectors[start : start + 65536]
                     dist = (
                         z.square().sum(-1, keepdim=True)
                         + cb.square().sum(-1)[None]
                         - 2 * z @ cb.T
                     )
-                    packed[start : start + len(z)] |= dist.argmin(-1).long() << shift
+                    ids = dist.argmin(-1)
+                    if spec.kind == "fc0":
+                        fc0[start : start + len(z)] = ids.to(torch.uint8)
+                    else:
+                        packed[start : start + len(z)] |= ids.long() << shift
                     if self.collect_lut_diagnostics and len(cb) >= 2:
                         nearest = dist[::256].topk(2, largest=False).values
                         margins.append(nearest[:, 1] - nearest[:, 0])
@@ -621,8 +672,9 @@ class MoERouter(nn.Module):
                             [gaps.min(), gaps.mean(), (gaps <= 1e-6).float().mean()]
                         )
                     )
-                    self.lut_margin_samples = len(gaps)
+                    self.lut_margin_samples[row] = len(gaps)
                     self.lut_margin_valid = True
+            self.fc0_lut.copy_(fc0)
             self.lut.copy_(packed)
             self.lut_valid = True
             self.get_coalesced_bias_table()
@@ -634,11 +686,20 @@ class MoERouter(nn.Module):
         return self.lut
 
     @torch.no_grad()
-    def load_lookup_table(self, table: torch.Tensor | bytes | bytearray) -> None:
+    def load_lookup_table(
+        self,
+        table: torch.Tensor | bytes | bytearray,
+        fc0_table: torch.Tensor | bytes | bytearray,
+    ) -> None:
         if isinstance(table, (bytes, bytearray)):
             table = torch.frombuffer(bytearray(table), dtype=torch.uint32).to(
                 torch.int64
             )
+        if isinstance(fc0_table, (bytes, bytearray)):
+            fc0_table = torch.frombuffer(bytearray(fc0_table), dtype=torch.uint8)
+        if torch.any(fc0_table >= self.num_fc0_experts):
+            raise ValueError("Invalid FC0 expert in material router table")
+        self.fc0_lut.copy_(fc0_table.to(device=self.fc0_lut.device, dtype=torch.uint8))
         self.lut.copy_(table.to(device=self.lut.device, dtype=torch.int64))
         self.lut_valid = True
         self.lut_margin_valid = False
@@ -719,10 +780,11 @@ class MoERouter(nn.Module):
         chunks = (self.hidden_sizes[0],) * 2 + (self.hidden_sizes[1],) * 2
         if self.training:
             zs = (self.get_context_vector(c_us), self.get_context_vector(c_them))
+            z_fc0 = self.get_fc0_context_vector(c_us, c_them)
             indices, dynamic, parts = [[], []], [], []
             for spec, (_, _, hard, soft, cb) in zip(BANK_SPECS, self.banks()):
                 idx, zq, commit, balance = self.quantize(
-                    zs[spec.role],
+                    z_fc0 if spec.kind == "fc0" else zs[spec.role],
                     cb,
                     len(cb),
                     self.bias_temperature if spec.bias else self.temperature,
@@ -749,6 +811,9 @@ class MoERouter(nn.Module):
                     if fake_quantize and self.quantization is not None:
                         d = self.quantization.fake_quantize_dynamic_bias(d)
                     dynamic.append(d.split(chunks, dim=1))
+                elif spec.kind == "fc0":
+                    indices[0].append(idx)
+                    indices[1].append(idx)
                 else:
                     indices[spec.role].append(idx)
             parts = torch.stack(parts)
@@ -769,8 +834,18 @@ class MoERouter(nn.Module):
             self.update_lookup_table()
         packed = (self.lut[c_us.long()], self.lut[c_them.long()])
         ids = {}
+        material_us = torch.div(
+            c_us.long(), NUM_OUR_KINGS * NUM_ENEMY_KINGS, rounding_mode="floor"
+        )
+        material_them = torch.div(
+            c_them.long(), NUM_OUR_KINGS * NUM_ENEMY_KINGS, rounding_mode="floor"
+        )
         for spec in BANK_SPECS:
-            selected = (packed[spec.role] >> spec.shift) & spec.mask
+            selected = (
+                self.fc0_lut[material_us * NUM_MATERIAL_STATES + material_them].long()
+                if spec.kind == "fc0"
+                else (packed[spec.role] >> spec.shift) & spec.mask
+            )
             ids[spec.name] = selected
             if self.collect_lut_diagnostics:
                 counts = getattr(self, f"validation_counts_{spec.name}")
@@ -780,8 +855,8 @@ class MoERouter(nn.Module):
         table = self.get_coalesced_bias_table()
         zero = torch.zeros((), device=c_us.device)
         return (
-            (ids["fc0_stm"], ids["downstream_stm"]),
-            (ids["fc0_opp"], ids["downstream_opp"]),
+            (ids["fc0"], ids["downstream_stm"]),
+            (ids["fc0"], ids["downstream_opp"]),
             table[0, ids["biases_stm"]].split(chunks, 1),
             table[1, ids["biases_opp"]].split(chunks, 1),
             zero,

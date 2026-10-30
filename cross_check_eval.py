@@ -354,7 +354,6 @@ def init_random_weights(model: M.NNUEModel) -> None:
             model.layer_stacks.l1,
             model.layer_stacks.l2,
             model.layer_stacks.output,
-            model.layer_stacks.opp.l1,
             model.layer_stacks.opp.l2,
             model.layer_stacks.opp.output,
         ]:

@@ -892,7 +892,7 @@ class MoEDeadExpertReseeder(Callback):
                     router.lut_margin_stats[row].cpu().tolist()
                 )
                 geometry += (
-                    f"; LUT margin sample n={router.lut_margin_samples} "
+                    f"; LUT margin sample n={router.lut_margin_samples[row]} "
                     f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
                 )
             print(f"[Routing geometry {name}] {geometry}", flush=True)

@@ -179,8 +179,7 @@ class NNUE(nn.Module):
             {
                 "params": [
                     p
-                    for bank in (self.model.layer_stacks, self.model.layer_stacks.opp)
-                    for layer in (bank.l1, bank.l2, bank.output)
+                    for layer in self.model.layer_stacks.dense_layers()
                     for p in (layer.adapter_down, layer.adapter_up)
                 ],
                 "lr": LRs[4],
@@ -189,8 +188,7 @@ class NNUE(nn.Module):
             {
                 "params": [
                     layer.bias_adapter
-                    for bank in (self.model.layer_stacks, self.model.layer_stacks.opp)
-                    for layer in (bank.l1, bank.l2, bank.output)
+                    for layer in self.model.layer_stacks.dense_layers()
                 ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,

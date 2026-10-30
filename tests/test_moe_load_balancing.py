@@ -65,7 +65,7 @@ def test_role_losses_sum_and_traffic_updates_without_optimizer():
     torch.testing.assert_close(loss, r.loss_component_sum.sum())
     torch.testing.assert_close(commitment, r.loss_component_sum[::3].sum())
     torch.testing.assert_close(balance, r.loss_component_sum[1::3].sum())
-    assert len(r.loss_component_sum) == 18
+    assert len(r.loss_component_sum) == 15
     assert r.loss_component_batches == 1
     assert all(
         torch.isclose(hard.sum(), torch.tensor(1.0)) for _, _, hard, _, _ in r.banks()
@@ -87,14 +87,14 @@ def test_cached_lut_and_validation_counts():
     r(torch.tensor([0, 1]), torch.tensor([1, 0]))
     r.get_lookup_table()
     assert len(calls) == 1
-    assert r.lut_margin_stats.shape == (6, 3)
+    assert r.lut_margin_stats.shape == (5, 3)
     for name, _, _, _, _ in r.banks():
         assert getattr(r, "validation_counts_" + name).sum() == 2
-    assert r.reseed_dead_experts_from_traffic() == ([], [], [], [], [], [])
+    assert r.reseed_dead_experts_from_traffic() == ([], [], [], [], [])
     assert torch.equal(lut, r.get_lookup_table())
 
 
-def test_ddp_reseeding_synchronizes_all_six_banks(monkeypatch):
+def test_ddp_reseeding_synchronizes_all_five_banks(monkeypatch):
     from types import SimpleNamespace
 
     from trainer import callbacks
@@ -125,7 +125,7 @@ def test_ddp_reseeding_synchronizes_all_six_banks(monkeypatch):
     monkeypatch.setattr(callbacks.dist, "broadcast", broadcast)
     router.lut_valid = router.coalesced_valid = True
     callbacks.MoEDeadExpertReseeder().on_train_batch_end(trainer)
-    assert len(broadcasts) == 12
+    assert len(broadcasts) == 10
     assert not router.lut_valid and not router.coalesced_valid
     for _, parameter, _, _, _ in router.banks():
         assert torch.equal(

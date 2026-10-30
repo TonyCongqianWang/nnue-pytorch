@@ -87,20 +87,19 @@ def make_stacks():
     torch.manual_seed(7)
     q = QuantizationManager(QuantizationConfig(), (2, 2))
     stacks = LayerStacks(2, LayerStacksConfig(L1=4, L2=4, L3=4), q)
-    for bank in (stacks, stacks.opp):
-        for layer in (bank.l1, bank.l2, bank.output):
-            layer.is_coalesced = True
-            layer.coalesced_weight.uniform_(-0.25, 0.5)
-            layer.coalesced_bias.uniform_(-0.15, 0.25)
+    for layer in stacks.dense_layers():
+        layer.is_coalesced = True
+        layer.coalesced_weight.uniform_(-0.25, 0.5)
+        layer.coalesced_bias.uniform_(-0.15, 0.25)
     return stacks
 
 
 def reference(stacks, x, e1, e2, d1, d2):
     def project(layer, x, ids):
-        w = layer.coalesced_weight.reshape(2, layer.out_features, layer.in_features)[
-            ids
-        ]
-        b = layer.coalesced_bias.reshape(2, layer.bias_features)[ids]
+        w = layer.coalesced_weight.reshape(
+            layer.count, layer.out_features, layer.in_features
+        )[ids]
+        b = layer.coalesced_bias.reshape(layer.count, layer.bias_features)[ids]
         return (w @ x.unsqueeze(-1)).squeeze(-1), b
 
     def activate(a, b, ba, bb, ds, dt):
@@ -116,8 +115,10 @@ def reference(stacks, x, e1, e2, d1, d2):
             1,
         ).clamp(0, 127 / 128)
 
-    a, ba = project(stacks.l1, x, e1[0])
-    b, bb = project(stacks.opp.l1, x, e2[0])
+    raw, bias = project(stacks.l1, x, e1[0])
+    a, b = raw.chunk(2, 1)
+    sa, sb, la, lb = bias.chunk(4, 1)
+    ba, bb = torch.cat([sa, la], 1), torch.cat([sb, lb], 1)
     skip = (a[:, -2:-1] - a[:, -1:] + b[:, -2:-1] - b[:, -1:]) * 0.5
     h1 = activate(a, b, ba, bb, d1[:2], d2[:2])
     a, ba = project(stacks.l2, h1, e1[1])
@@ -141,10 +142,10 @@ def test_fixed_order_independent_full_readouts():
     )
     # Equal contexts/FT inputs do not force zero: role parameters are independent.
     d = tuple(torch.zeros(1, 2) for _ in range(4))
+    for layer in s.dense_layers():
+        layer.coalesced_weight.zero_()
+        layer.coalesced_bias.zero_()
     for bank in (s, s.opp):
-        for layer in (bank.l1, bank.l2, bank.output):
-            layer.coalesced_weight.zero_()
-            layer.coalesced_bias.zero_()
         bank.output.coalesced_bias.fill_(-0.25)
     assert (
         s(
@@ -164,15 +165,15 @@ def test_fixed_order_independent_full_readouts():
 )
 def test_common_scale_average(oa, ob, sa, sb):
     s = make_stacks()
-    for bank in (s, s.opp):
-        for layer in (bank.l1, bank.l2, bank.output):
-            layer.coalesced_weight.zero_()
-            layer.coalesced_bias.zero_()
+    for layer in s.dense_layers():
+        layer.coalesced_weight.zero_()
+        layer.coalesced_bias.zero_()
     for bank, o, skip in ((s, oa, sa), (s.opp, ob, sb)):
         bank.output.coalesced_bias.fill_(o / 16384)
-        bank.l1.coalesced_weight.reshape(2, 2, 4)[:, 0, 0] = skip / 32768
-        # Large, unequal activation biases must not enter the skip.
-        bank.l1.coalesced_bias.uniform_(-0.5, 0.5)
+    w = s.l1.coalesced_weight.reshape(4, 4, 4)
+    w[:, 0, 0], w[:, 2, 0] = sa / 32768, sb / 32768
+    # Large, unequal activation biases must not enter either half of the skip.
+    s.l1.coalesced_bias.uniform_(-0.5, 0.5)
     d = tuple(torch.zeros(1, 2) for _ in range(4))
     actual = s(
         torch.tensor([[1.0, 0, 0, 0]]),
@@ -249,14 +250,16 @@ def test_default_moe7_shapes_and_mac_budget():
     stacks = LayerStacks(
         32, LayerStacksConfig(), QuantizationManager(QuantizationConfig())
     )
-    assert (stacks.l1.in_features, stacks.l1.out_features) == (1024, 16)
+    assert (stacks.l1.in_features, stacks.l1.out_features) == (1024, 32)
     assert (stacks.l2.in_features, stacks.l2.out_features) == (64, 16)
     assert (stacks.output.in_features, stacks.output.out_features) == (128, 1)
-    macs = 2 * sum(
-        layer.in_features * layer.out_features
-        for layer in (stacks.l1, stacks.l2, stacks.output)
+    macs = sum(
+        layer.in_features * layer.out_features for layer in stacks.dense_layers()
     )
-    assert stacks.l1.bias_features == stacks.l2.bias_features == 32
+    assert stacks.l1.bias_features == 64
+    assert stacks.l2.bias_features == 32
+    assert stacks.l1.count == 64
+    assert not hasattr(stacks.opp, "l1")
     assert stacks.output.bias_features == 1
     assert stacks.quantization.weight_scales_dict["ls_l2_weight"] == 128
     assert macs == 35072  # Master: 34944; only the final scalar readout doubles.
@@ -269,6 +272,7 @@ def test_independent_generators_receive_gradients_without_optimizer():
     router = MoERouter(
         num_contexts=2,
         num_weight_experts=2,
+        num_fc0_experts=4,
         num_bias_experts=2,
         hidden_sizes=(2, 2),
         num_biases=8,
@@ -283,9 +287,8 @@ def test_independent_generators_receive_gradients_without_optimizer():
     )
     value = stacks(torch.rand(4, 4), router.codebook, a, b, d1, d2, False, False)
     (value.square().sum() + loss).backward()
-    for bank in (stacks, stacks.opp):
-        for layer in (bank.l1, bank.l2, bank.output):
-            assert layer.adapter_up.grad.abs().sum() > 0
+    for layer in stacks.dense_layers():
+        assert layer.adapter_up.grad.abs().sum() > 0
     for head in router.bias_heads:
         up, down = head.up, head.down
         assert up.weight.grad.abs().sum() > 0

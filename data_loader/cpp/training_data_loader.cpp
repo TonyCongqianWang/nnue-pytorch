@@ -292,6 +292,47 @@ struct FullThreats {
     }
 };
 
+struct AdvancedPawnPairs {
+    static constexpr std::string_view NAME                = "Advanced_Pawn_Pairs";
+    static constexpr int              INPUTS              = 16384;
+    static constexpr int              MAX_ACTIVE_FEATURES = 48;
+
+    static std::pair<int, int>
+    fill_features_sparse(const TrainingDataEntry& e, int* features, Color perspective) {
+        const auto& pos   = e.pos;
+        auto        pawns = pos.piecesBB(whitePawn) | pos.piecesBB(blackPawn);
+        auto        partners =
+          pos.piecesBB() & ~pawns & ~pos.piecesBB(whiteKing) & ~pos.piecesBB(blackKing);
+        if (partners.count() > 3)
+            return {0, INPUTS};
+        const int orient =
+          static_cast<int>(FullThreats::OrientTBL[static_cast<int>(perspective)]
+                                                 [static_cast<int>(pos.kingSquare(perspective))]);
+        int count = 0;
+        for (Square pawn : pawns)
+        {
+            const Color c            = pos.pieceAt(pawn).color();
+            const int   rank         = static_cast<int>(pawn) / 8;
+            const int   relativeRank = c == Color::White ? rank : 7 - rank;
+            if (relativeRank < 5 || relativeRank > 6)
+                continue;
+            const int pawnColor = static_cast<int>(c) ^ static_cast<int>(perspective);
+            const int pawnId =
+              pawnColor * 16 + (relativeRank - 5) * 8 + ((static_cast<int>(pawn) ^ orient) & 7);
+            for (Square partner : partners)
+            {
+                const Piece pc = pos.pieceAt(partner);
+                const int   pieceId =
+                  (static_cast<int>(pc.color()) ^ static_cast<int>(perspective)) * 4
+                  + static_cast<int>(pc.type()) - static_cast<int>(PieceType::Knight);
+                features[count++] =
+                  (pawnId * 8 + pieceId) * 64 + (static_cast<int>(partner) ^ orient);
+            }
+        }
+        return {count, INPUTS};
+    }
+};
+
 struct PP_3Wide {
     static constexpr std::string_view NAME = "PP_3Wide";
 
@@ -418,6 +459,8 @@ struct SimpleExtractor: IFeatureExtractor {
 static std::unique_ptr<IFeatureExtractor> make_single_extractor(std::string_view name) {
     if (name == "Full_Threats")
         return std::make_unique<SimpleExtractor<FullThreats>>();
+    if (name == "Advanced_Pawn_Pairs")
+        return std::make_unique<SimpleExtractor<AdvancedPawnPairs>>();
     if (name == "PP_3Wide")
         return std::make_unique<SimpleExtractor<PP_3Wide>>();
     if (name == "K32H3")

@@ -5,6 +5,7 @@ from typing import Annotated
 
 import tyro
 
+from .advanced_pawn_pairs import AdvancedPawnPairs
 from .full_threats import FullThreats
 from .input_feature import InputFeature
 from .k32h3 import K32H3
@@ -14,9 +15,10 @@ _FEATURE_COMPONENTS: dict[str, type[InputFeature]] = {
     "K32H3^": K32H3,
     "Full_Threats": FullThreats,
     "PP_3Wide": PP3Wide,
+    "Advanced_Pawn_Pairs": AdvancedPawnPairs,
 }
 
-DEFAULT_FEATURES = "Full_Threats+PP_3Wide+K32H3^"
+DEFAULT_FEATURES = "Full_Threats+PP_3Wide+Advanced_Pawn_Pairs+K32H3^"
 
 
 def get_feature_cls(name: str) -> list[Callable[[int], InputFeature]]:
@@ -53,6 +55,7 @@ def add_feature_args(parser: argparse.ArgumentParser) -> None:
 
 __all__ = [
     "K32H3",
+    "AdvancedPawnPairs",
     "FeatureConfig",
     "FullThreats",
     "InputFeature",

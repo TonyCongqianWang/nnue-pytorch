@@ -13,3 +13,26 @@ The current semantics are as follows:
 3. When converting .ckpt to .nnue - `--features` specifies the features as stored in the .ckpt file. The user must pass the correct feature set through `--features` because it can't be inferred from the .ckpt. If the features from `--features` and the saved model don't match it'll likely stack trace on some dimension mismatch.
 4. When converting .pt to .nnue - `--features` is ignored, the `feature_set` from the saved model is used, the weights are coalesced when writing the .nnue file.
 5. When converting .nnue to .pt - `--features` specifies the features in the .nnue file. The resulting .pt model has the same feature_set. Note that when resuming training this model can be converted to a compatible feature_set, see point 2.
+
+## Advanced pawn pairs
+
+The default experimental set is
+`Full_Threats+PP_3Wide+Advanced_Pawn_Pairs+K32H3^`.
+`Advanced_Pawn_Pairs` pairs actual pawns on their own sixth or seventh rank
+with every knight, bishop, rook, and queen of either color. Features are active
+only with at most five non-pawns total, counting both kings. Kings determine
+orientation, but are not pair partners. Both perspectives receive all pairs.
+
+The 16,384 unfactorized rows encode pawn color (2), advanced pawn square (16),
+partner color/type (8), and partner square (64). Orientation follows SFNNv19:
+reflect files when the perspective king is on files a-d, and flip ranks/colors
+for Black. There are at most 48 active rows per perspective (16 pawns times
+three non-king partners). At width 1,024, the exported int8 table occupies 16 MiB.
+It is serialized between `PP_3Wide` and `K32H3^`; the feature hash is `0x8D36B4E1`.
+The material condition limits active work, not parameter storage.
+
+Validation: `pytest -q tests/test_advanced_pawn_pairs.py
+ tests/test_serialization_roundtrip.py` checks independent index enumeration,
+color symmetry, the material cutoff, gradient flow, and serialization. The
+engine's `tests/advanced_pawn_pairs.sh`, run from `src/` after an AVX2 build,
+checks nonzero incremental accumulators against fresh full accumulators.

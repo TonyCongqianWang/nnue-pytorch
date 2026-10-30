@@ -28,9 +28,7 @@ def enemy_king_sq_name(sq: int) -> str:
 
 
 @torch.no_grad()
-def _print_weight_profile(
-    model, layer_stacks, codebook, shift, role, kind, file=None
-) -> None:
+def _print_tail_profile(model, layer_stacks, codebook, shift, role, file=None) -> None:
     """Prints the compact Expert Routing Profile card."""
     if file is None:
         file = sys.stdout
@@ -44,22 +42,20 @@ def _print_weight_profile(
     mat_id, k_us, k_them = decompose_router_index(all_ctx)
     mat_feats = router.material_decode_table[mat_id]
 
-    lut_np = ((lut >> shift) & 31).cpu().numpy()  # Extract 6 bits for weight experts
+    lut_np = ((lut >> shift) & 31).cpu().numpy()  # Extract the five-bit tail ID
     t_np = mat_feats[:, 0].cpu().numpy()  # Non-king pieces: 0..15
     q_np = (mat_feats[:, 2] == 0).cpu().numpy()  # Queen-first heavy category
     k_us_np = k_us.cpu().numpy()  # 0..32
     k_them_np = k_them.cpu().numpy()  # 0..64
 
-    layers = (
-        (layer_stacks.l1,) if kind == "fc0" else (layer_stacks.l2, layer_stacks.output)
-    )
+    layers = (layer_stacks.l2, layer_stacks.output)
     delta_w_layers = [layer.get_delta_weights(codebook) for layer in layers]
-    is_coalesced = getattr(layer_stacks.l1, "is_coalesced", False)
+    is_coalesced = getattr(layers[0], "is_coalesced", False)
     coalesced_deltas = []
     if is_coalesced:
         for layer in layers:
             w = layer.coalesced_weight.reshape(
-                NUM_WEIGHT_EXPERTS, BANK_SPECS, layer.out_features, -1
+                NUM_WEIGHT_EXPERTS, layer.out_features, -1
             )
             w_mean = w.mean(dim=0, keepdim=True)
             coalesced_deltas.append(w - w_mean)
@@ -165,21 +161,36 @@ def print_routing_profile(model, file=None):
     )
     for spec in BANK_SPECS:
         count = len(router.codebooks[spec.name])
-        counts = torch.bincount((lut >> spec.shift) & spec.mask, minlength=count).cpu()
+        ids = (
+            router.fc0_lut.long()
+            if spec.kind == "fc0"
+            else (lut >> spec.shift) & spec.mask
+        )
+        counts = torch.bincount(ids, minlength=count).cpu()
         mass = counts.float() / counts.sum()
         effective = (-(mass * mass.clamp_min(1e-12).log()).sum()).exp().item()
         print(
             f"{spec.name}: active={int((counts > 0).sum())}/{count}, effective={effective:.1f}",
             file=file,
         )
-        if not spec.bias:
+        if spec.kind == "fc0":
+            mat = router.material_decode_table.cpu().numpy()
+            pair = np.arange(len(ids))
+            for expert in range(count):
+                selected = pair[ids.cpu().numpy() == expert]
+                if len(selected):
+                    us, them = mat[selected // len(mat)], mat[selected % len(mat)]
+                    print(
+                        f"  #{expert:02d}: {len(selected)} material pairs; mean T/P STM={us[:, :2].mean(0)}, OPP={them[:, :2].mean(0)}",
+                        file=file,
+                    )
+        elif not spec.bias:
             bank = model.layer_stacks if spec.role == 0 else model.layer_stacks.opp
-            _print_weight_profile(
+            _print_tail_profile(
                 model,
                 bank,
                 router.normalized_codebook(spec.name),
                 spec.shift,
                 spec.name,
-                spec.kind,
                 file,
             )

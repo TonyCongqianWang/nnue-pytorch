@@ -401,8 +401,6 @@ def test_moe_optimizer_param_groups():
                 id(nnue.model.layer_stacks.l2.adapter_up),
                 id(nnue.model.layer_stacks.output.adapter_down),
                 id(nnue.model.layer_stacks.output.adapter_up),
-                id(nnue.model.layer_stacks.opp.l1.adapter_down),
-                id(nnue.model.layer_stacks.opp.l1.adapter_up),
                 id(nnue.model.layer_stacks.opp.l2.adapter_down),
                 id(nnue.model.layer_stacks.opp.l2.adapter_up),
                 id(nnue.model.layer_stacks.opp.output.adapter_down),

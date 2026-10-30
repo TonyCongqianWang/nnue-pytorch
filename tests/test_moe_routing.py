@@ -70,33 +70,57 @@ def test_structured_king_geometry():
     assert z_k.shape == (3, 256)
 
 
-def test_six_field_routing_and_bias_tables():
+def test_material_fc0_and_four_perspective_fields():
     r = MoERouter(num_contexts=2)
     entries = torch.tensor(
         [
-            31 | (30 << 5) | (63 << 10) | (29 << 16) | (28 << 21) | (62 << 26),
-            1 | (2 << 5) | (3 << 10) | (4 << 16) | (5 << 21) | (6 << 26),
+            31 | (63 << 5) | (29 << 16) | (62 << 21),
+            2 | (3 << 5) | (5 << 16) | (6 << 21),
         ],
         dtype=torch.int64,
     )
-    r.load_lookup_table(entries.to(torch.uint32).numpy().tobytes())
+    fc0 = torch.full((FC0_ROUTER_TABLE_SIZE,), 63, dtype=torch.uint8)
+    r.load_lookup_table(
+        entries.to(torch.uint32).numpy().tobytes(), fc0.numpy().tobytes()
+    )
     d = torch.arange(2 * 64 * 64, dtype=torch.float32).reshape(2, 64, 64) / 32768
     r.load_coalesced_biases(d)
     r.eval()
     ew1, ew2, d1, d2, *_ = r(torch.tensor([0]), torch.tensor([1]))
-    assert [x.item() for x in ew1] == [31, 30]
-    assert [x.item() for x in ew2] == [4, 5]
+    assert [x.item() for x in ew1] == [63, 31]
+    assert [x.item() for x in ew2] == [63, 5]
     torch.testing.assert_close(torch.cat(d1, 1), d[0, 63:64])
     torch.testing.assert_close(torch.cat(d2, 1), d[1, 6:7])
     assert torch.equal(r.get_lookup_table(), entries)
+    assert torch.equal(r.fc0_lut, fc0)
+
+
+def test_fc0_material_pair_ignores_kings_and_preserves_role_order():
+    r = MoERouter(dim=16)
+    us = torch.tensor([make_router_index(100, k, (k * 2) % 65) for k in range(33)])
+    them = torch.tensor(
+        [make_router_index(200, 32 - k, (k * 3) % 65) for k in range(33)]
+    )
+    z = r.get_fc0_context_vector(us, them)
+    torch.testing.assert_close(z, z[:1].expand_as(z), rtol=0, atol=0)
+    assert not torch.allclose(z, r.get_fc0_context_vector(them, us))
+    # Joint-material enumeration and the batched encoder must agree.
+    all_z = r.get_all_fc0_context_vectors()
+    torch.testing.assert_close(
+        z[0], all_z[100 * NUM_MATERIAL_STATES + 200], rtol=0, atol=0
+    )
+    r.eval()
+    r.update_lookup_table()
+    a, b, *_ = r(us, them)
+    assert torch.equal(a[0], b[0]) and a[0].unique().numel() == 1
 
 
 def test_zero_bias_init_and_independent_codebooks():
     r = MoERouter(num_contexts=4)
     assert r.coalesced_biases.shape == (2, 64, 64)
     assert torch.count_nonzero(r.get_coalesced_bias_table()) == 0
-    assert len(list(r.banks())) == 6
-    assert len({p.data_ptr() for p in r.codebooks.values()}) == 6
+    assert len(list(r.banks())) == 5
+    assert len({p.data_ptr() for p in r.codebooks.values()}) == 5
 
 
 def test_serialization_and_deserialization_roundtrip():
@@ -113,6 +137,7 @@ def test_serialization_and_deserialization_roundtrip():
         rtol=0,
         atol=0,
     )
+    assert torch.equal(m.router.fc0_lut, loaded.router.fc0_lut)
     for old, new in zip(
         m.layer_stacks.get_coalesced_layer_stacks(m.router.codebook),
         loaded.layer_stacks.get_coalesced_layer_stacks(),
@@ -137,16 +162,19 @@ def test_unit_l2_basis_initialization_preserves_layer_variance():
 
 
 def test_export_traffic_sort_preserves_scores_and_training_ids():
-    """Independently reorder all six banks and verify the remapped quantized model."""
+    """Independently reorder all five banks and verify the remapped quantized model."""
     torch.manual_seed(811)
     config = ModelConfig(L1=4, L2=4, L3=4)
     m = NNUEModel(DEFAULT_FEATURES, config)
     m.layer_stacks.coalesce_layer_stacks_inplace(m.router.codebook)
     m.router.lut.random_(0, 1 << 32)
+    m.router.lut.bitwise_and_(0x07FF07FF)
+    m.router.fc0_lut.random_(0, 64)
     m.router.lut_valid = True
     m.router.load_coalesced_biases(torch.randn(2, 64, 8) * 0.05)
     m.eval()
     original_ids = m.router.lut.clone()
+    original_fc0_ids = m.router.fc0_lut.clone()
     for spec in BANK_SPECS:
         counts = getattr(m.router, f"validation_counts_{spec.name}")
         # Different nontrivial orders for each bank, with ties.
@@ -165,6 +193,7 @@ def test_export_traffic_sort_preserves_scores_and_training_ids():
         NNUEReader(io.BytesIO(corrupt), DEFAULT_FEATURES, config)
     loaded = NNUEReader(io.BytesIO(writer.buf), DEFAULT_FEATURES, config).model.eval()
     assert torch.equal(original_ids, m.router.lut)
+    assert torch.equal(original_fc0_ids, m.router.fc0_lut)
     assert all(torch.equal(state[name], p) for name, p in m.named_parameters())
     # Export to the same quantized format with identity order for the reference.
     for spec in BANK_SPECS:
@@ -175,7 +204,7 @@ def test_export_traffic_sort_preserves_scores_and_training_ids():
         config,
     ).model.eval()
     x = torch.rand(97, 4)
-    u, t = torch.arange(97), torch.arange(97).flip(0)
+    u, t = torch.arange(97) * 2145, torch.arange(97).flip(0) * 2145
 
     def evaluate(model):
         a, b, da, db, *_ = model.router(u, t)

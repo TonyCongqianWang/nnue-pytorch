@@ -144,16 +144,6 @@ class NNUE(nn.Module):
         ft_wd = optimizer_config.ft_weight_decay
         virtual_ft_wd = optimizer_config.virtual_ft_weight_decay
         dense_wd = optimizer_config.dense_weight_decay
-        dynamic_bias_wd = optimizer_config.dynamic_bias_weight_decay
-
-        router_dyn_bias_params = list(self.model.router.bias_heads.parameters())
-        router_dyn_bias_ids = {id(p) for p in router_dyn_bias_params}
-        other_router_params = [
-            p
-            for p in self.model.router.parameters()
-            if id(p) not in router_dyn_bias_ids
-        ]
-
         train_params = [
             # Feature Transformer
             {
@@ -187,20 +177,15 @@ class NNUE(nn.Module):
             },
             {
                 "params": [
-                    layer.bias_adapter
+                    p
                     for layer in self.model.layer_stacks.dense_layers()
+                    for p in (layer.bias_adapter, layer.shared_bias)
                 ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
-            # Downstream role routers
             {
-                "params": router_dyn_bias_params,
-                "lr": LRs[0],
-                "weight_decay": dynamic_bias_wd,
-            },
-            {
-                "params": other_router_params,
+                "params": list(self.model.router.parameters()),
                 "lr": LRs[0],
                 "weight_decay": 0.0,
             },

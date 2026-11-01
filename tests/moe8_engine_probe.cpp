@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
                 return false;
             }
             auto trace = net->trace_evaluate(pos, *fresh, *freshCache);
-            if (trace.positional[0] != incremental)
+            if (trace.positional != incremental)
             {
                 std::cerr << "Trace mismatch at " << pos.fen() << '\n';
                 return false;

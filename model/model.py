@@ -26,7 +26,7 @@ class NNUEModel(nn.Module):
         self.L3 = config.L3
 
         self.quantize_config = config.quantize_config
-        hidden_sizes = (config.L2 // 2, config.L3 // 2)
+        hidden_sizes = (config.L2, config.L3)
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = NUM_WEIGHT_EXPERTS
@@ -36,22 +36,11 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.router = MoERouter(
-            quantization=self.quantization,
-            hidden_sizes=hidden_sizes,
-            num_biases=2 * sum(hidden_sizes),
             balance_cost=config.moe_weight_balance_cost,
-            bias_balance_cost=config.moe_bias_balance_cost,
             diversity_cost=config.moe_weight_diversity_cost,
-            bias_diversity_cost=config.moe_bias_diversity_cost,
             temperature=config.moe_weight_temperature,
-            bias_temperature=config.moe_bias_temperature,
         )
-        self.layer_stacks = LayerStacks(
-            self.num_ls_buckets,
-            config,
-            self.quantization,
-            codebook_dim=self.router.dim,
-        )
+        self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
         self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
@@ -130,8 +119,6 @@ class NNUEModel(nn.Module):
         (
             e1_w,
             e2_w,
-            dyn_b1,
-            dyn_b2,
             moe_loss,
             commit_loss,
             balance_loss,
@@ -153,8 +140,6 @@ class NNUEModel(nn.Module):
             self.router.codebook,
             e1_w,
             e2_w,
-            dyn_b1,
-            dyn_b2,
             fake_quantize_acts,
             fake_quantize_weights,
         )

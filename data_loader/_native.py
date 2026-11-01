@@ -81,7 +81,7 @@ class SparseBatch(ctypes.Structure):
             2 * size * max_active + size : 2 * size * max_active + 2 * size
         ].view(size)
 
-        # Keep perspective context indices as int64 for routing on the target device.
+        # Keep FC0-pair and tail context indices as int64 for routing on the target device.
         if not us.is_cuda and use_pinned_memory:
             them = torch.empty_like(us, pin_memory=True)
             them.fill_(1.0)

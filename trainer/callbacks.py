@@ -819,9 +819,7 @@ class MoEDeadExpertReseeder(Callback):
                     self._copy_optimizer_state(
                         trainer.optimizer, parameter, parent_tensor
                     )
-                    router.lut_valid = router.lut_margin_valid = (
-                        router.coalesced_valid
-                    ) = False
+                    router.lut_valid = router.lut_margin_valid = False
                 if rank == 0 and parents:
                     print(
                         f"[Step {trainer.global_step}] Reseeded {len(parents)} {name} expert(s): "

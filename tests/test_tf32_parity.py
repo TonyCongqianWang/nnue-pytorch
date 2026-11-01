@@ -39,6 +39,7 @@ def _make_layer_stacks(count):
         count,
         LayerStacksConfig(L1=1024, L2=32, L3=32),
         QuantizationManager(QuantizationConfig()),
+        fc0_count=count,
     ).cuda()
     with torch.no_grad():
         for p in layer.parameters():
@@ -61,22 +62,16 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
-    codebook = tuple(
-        tuple(torch.randn(count, layer.codebook_dim, device="cuda") for _ in range(2))
-        for _ in range(2)
-    )
-    biases = tuple(
-        torch.zeros(batch, width, device="cuda")
-        for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2
+    codebook = (
+        torch.randn(count, layer.l1.codebook_dim, device="cuda"),
+        torch.randn(count, layer.l2.codebook_dim, device="cuda"),
     )
     torch.backends.cuda.matmul.allow_tf32 = False
     expected = layer(
         x,
         codebook,
-        (ls_indices, ls_indices),
-        (ls_indices, ls_indices),
-        biases,
-        biases,
+        ls_indices,
+        ls_indices,
         True,
         True,
     )
@@ -84,10 +79,8 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
     actual = layer(
         x,
         codebook,
-        (ls_indices, ls_indices),
-        (ls_indices, ls_indices),
-        biases,
-        biases,
+        ls_indices,
+        ls_indices,
         True,
         True,
     )
@@ -123,22 +116,16 @@ def test_tf32_changes_forward_without_quantization():
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
     ) // 4
 
-    codebook = tuple(
-        tuple(torch.randn(8, layer.codebook_dim, device="cuda") for _ in range(2))
-        for _ in range(2)
-    )
-    biases = tuple(
-        torch.zeros(batch, width, device="cuda")
-        for width in (layer.l1.out_features,) * 2 + (layer.l2.out_features,) * 2
+    codebook = (
+        torch.randn(8, layer.l1.codebook_dim, device="cuda"),
+        torch.randn(8, layer.l2.codebook_dim, device="cuda"),
     )
     torch.backends.cuda.matmul.allow_tf32 = False
     expected = layer(
         x,
         codebook,
-        (ls_indices, ls_indices),
-        (ls_indices, ls_indices),
-        biases,
-        biases,
+        ls_indices,
+        ls_indices,
         False,
         False,
     )
@@ -146,10 +133,8 @@ def test_tf32_changes_forward_without_quantization():
     actual = layer(
         x,
         codebook,
-        (ls_indices, ls_indices),
-        (ls_indices, ls_indices),
-        biases,
-        biases,
+        ls_indices,
+        ls_indices,
         False,
         False,
     )

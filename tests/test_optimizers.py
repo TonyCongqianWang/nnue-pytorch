@@ -121,7 +121,6 @@ def test_nnue_integration_all_optimizers(optimizer_name):
 
     new_cfg = deepcopy(config)
     new_cfg.optimizer_config.dense_weight_decay = 1.0e-6
-    new_cfg.optimizer_config.dynamic_bias_weight_decay = 1.0e-6
     new_model = NNUE(config=new_cfg)
     new_model.configure_optimizers()
     new_model.load_state_dict(state)
@@ -371,7 +370,6 @@ def test_moe_optimizer_param_groups():
         optimizer_config=OptimizerConfig(
             ft_weight_decay=1e-4,
             dense_weight_decay=2e-4,
-            dynamic_bias_weight_decay=3e-4,
         ),
     )
     nnue = NNUE(config=config)
@@ -383,7 +381,6 @@ def test_moe_optimizer_param_groups():
 
     found_ft = False
     found_dense = False
-    found_dyn_bias = False
 
     for group in opt.param_groups:
         for p in group["params"]:
@@ -401,26 +398,10 @@ def test_moe_optimizer_param_groups():
                 id(nnue.model.layer_stacks.l2.adapter_up),
                 id(nnue.model.layer_stacks.output.adapter_down),
                 id(nnue.model.layer_stacks.output.adapter_up),
-                id(nnue.model.layer_stacks.opp.l2.adapter_down),
-                id(nnue.model.layer_stacks.opp.l2.adapter_up),
-                id(nnue.model.layer_stacks.opp.output.adapter_down),
-                id(nnue.model.layer_stacks.opp.output.adapter_up),
             }
             assert {id(p) for p in group["params"]} == expected_dense
-        elif group["weight_decay"] == 3e-4:
-            found_dyn_bias = True
-            expected_dyn_bias = {
-                id(p) for p in nnue.model.router.bias_heads.parameters()
-            }
-            assert {id(p) for p in group["params"]} == expected_dyn_bias
-
     assert found_ft
     assert found_dense
-    assert found_dyn_bias
     assert registered_params == all_model_params, (
         f"Missing {all_model_params - registered_params} params from optimizer!"
     )
-
-    # Test backward compatibility alias
-    cfg_alias = OptimizerConfig(factorized_weight_decay=4e-5)
-    assert cfg_alias.dynamic_bias_weight_decay == 4e-5

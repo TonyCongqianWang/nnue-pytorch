@@ -566,17 +566,18 @@ SparseBatch::~SparseBatch() {
 }
 
 static const auto MAT_ID_TABLE = [] {
-    std::array<std::array<std::array<uint16_t, 4>, 9>, 16> table{};
+    std::array<std::array<std::array<std::array<uint16_t, 2>, 4>, 9>, 16> table{};
     uint16_t                                               id = 0;
     for (int t = 0; t < 16; ++t)
         for (int p = 0; p <= std::min(8, t); ++p)
             for (int h = 0; h < 4; ++h)
                 if (t - p >= (h < 2 ? 1 : h == 2 ? 2 : 0))
-                    table[t][p][h] = id++;
+                    for (int wide = 0; wide <= int(p >= 2); ++wide)
+                        table[t][p][h][wide] = id++;
     return table;
 }();
 
-static int router_context(const Position& pos, Color perspective) {
+static int material_context(const Position& pos, Color perspective) {
     const int t = std::clamp(int(pos.piecesBB(perspective).count()) - 1, 0, 15);
     const int p =
       std::clamp(int(pos.piecesBB(Piece(PieceType::Pawn, perspective)).count()), 0, std::min(8, t));
@@ -586,25 +587,9 @@ static int router_context(const Position& pos, Color perspective) {
        : t - p >= 1 && pos.piecesBB(Piece(PieceType::Rook, perspective)).any()                 ? 1
        : t - p >= 2 && (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL) ? 2
                                                                                                : 3;
-    const auto rights = pos.castlingRights();
-    const auto ownRights =
-      perspective == Color::White ? CastlingRights::White : CastlingRights::Black;
-    const auto enemyRights =
-      perspective == Color::White ? CastlingRights::Black : CastlingRights::White;
-    auto own   = pos.kingSquare(perspective);
-    auto enemy = pos.kingSquare(!perspective);
-    if (perspective == Color::Black)
-    {
-        own   = own.flippedVertically();
-        enemy = enemy.flippedVertically();
-    }
-    const int ownSq = int(own), enemySq = int(enemy);
-    const int ownBucket = bool(rights & ownRights) && own == Square(fileE, rank1)
-                          ? 32
-                          : (ownSq / 8) * 4 + std::min(ownSq % 8, 7 - ownSq % 8);
-    const int enemyBucket =
-      bool(rights & enemyRights) && enemy == Square(fileE, rank8) ? 64 : enemySq;
-    return (MAT_ID_TABLE[t][p][h] * 33 + ownBucket) * 65 + enemyBucket;
+    const auto pawns = pos.piecesBB(Piece(PieceType::Pawn, perspective)).bits();
+    const int wide = p >= 2 && (pawns & 0x0707070707070707ULL) && (pawns & 0xE0E0E0E0E0E0E0E0ULL);
+    return MAT_ID_TABLE[t][p][h][wide];
 }
 
 void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingDataEntry& e) {
@@ -612,8 +597,13 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     outcome[i]      = (e.result + 1.0f) / 2.0f;
     score[i]        = e.score;
     const auto stm  = e.pos.sideToMove();
-    context_us[i]   = router_context(e.pos, stm);
-    context_them[i] = router_context(e.pos, !stm);
+    context_us[i] = material_context(e.pos, stm) * 676 + material_context(e.pos, !stm);
+    const int own = int(e.pos.kingSquare(stm)) ^ (56 * int(stm == Color::Black));
+    const int enemy = int(e.pos.kingSquare(!stm)) ^ (56 * int(stm == Color::White));
+    const int f1 = own % 8, f2 = enemy % 8;
+    const bool opposite = (f1 <= 2 && f2 >= 5) || (f2 <= 2 && f1 >= 5);
+    const int king = 4 * (own / 8 >= 2) + 2 * (own / 8 > enemy / 8) + opposite;
+    context_them[i] = context_us[i] * 8 + king;
     fill_features(fs, i, e);
 }
 

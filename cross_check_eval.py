@@ -326,7 +326,7 @@ def filter_fens(fens):
     return filtered_fens
 
 
-def init_random_weights(model: M.NNUEModel) -> None:
+def init_random_weights(model: M.NNUEModel, *, build_router_lut=True) -> None:
     """Initialize model weights across full dynamic range, hitting clipping bounds."""
     with torch.no_grad():
         touched = set()
@@ -354,20 +354,30 @@ def init_random_weights(model: M.NNUEModel) -> None:
             model.layer_stacks.l1,
             model.layer_stacks.l2,
             model.layer_stacks.output,
-            model.layer_stacks.opp.l2,
-            model.layer_stacks.opp.output,
         ]:
             ls.adapter_down.data.uniform_(-0.1, 0.1)
             touched.add(id(ls.adapter_down))
             ls.adapter_up.data.uniform_(-0.1, 0.1)
             touched.add(id(ls.adapter_up))
             ls.bias_adapter.data.uniform_(-0.1, 0.1)
+            ls.shared_bias.data.uniform_(-0.1, 0.1)
+            touched.add(id(ls.shared_bias))
             touched.add(id(ls.bias_adapter))
 
         for p in model.router.parameters():
             p.data.uniform_(-1.0, 1.0)
             touched.add(id(p))
-        model.router.update_lookup_table()
+        if build_router_lut:
+            model.router.update_lookup_table()
+        else:
+            # Codec/permutation tests can exercise all expert IDs without
+            # recomputing the production-sized learned LUT on the CPU.
+            for name, table, count in (
+                ("fc0", model.router.fc0_lut, model.router.num_fc0_experts),
+                ("tail", model.router.lut, model.router.num_weight_experts),
+            ):
+                table.copy_(torch.arange(len(table), device=table.device) % count)
+            model.router.lut_valid = True
 
         all_param_ids = {id(p) for p in model.parameters()}
         untouched = all_param_ids - touched

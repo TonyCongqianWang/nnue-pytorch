@@ -41,7 +41,7 @@ def test_balance_loss_bounds():
 
 @pytest.mark.parametrize("name", MOE_BANKS)
 def test_traffic_only_reseeding_per_bank(name):
-    r = MoERouter(num_contexts=2)
+    r = MoERouter(material_states=2, fc0_dim=8, dim=16)
     r.get_all_context_vectors = lambda: (_ for _ in ()).throw(
         AssertionError("No LUT rebuild for reseeding")
     )
@@ -58,14 +58,14 @@ def test_traffic_only_reseeding_per_bank(name):
 
 
 def test_role_losses_sum_and_traffic_updates_without_optimizer():
-    r = MoERouter(num_contexts=2)
+    r = MoERouter(material_states=2, fc0_dim=8, dim=16)
     # Function diagnostic only: no backward or parameter update.
     c = torch.tensor([0, 1])
     *_, loss, commitment, balance = r(c, c)
     torch.testing.assert_close(loss, r.loss_component_sum.sum())
     torch.testing.assert_close(commitment, r.loss_component_sum[::3].sum())
     torch.testing.assert_close(balance, r.loss_component_sum[1::3].sum())
-    assert len(r.loss_component_sum) == 15
+    assert len(r.loss_component_sum) == 6
     assert r.loss_component_batches == 1
     assert all(
         torch.isclose(hard.sum(), torch.tensor(1.0)) for _, _, hard, _, _ in r.banks()
@@ -73,33 +73,26 @@ def test_role_losses_sum_and_traffic_updates_without_optimizer():
 
 
 def test_cached_lut_and_validation_counts():
-    r = MoERouter(num_contexts=2)
+    r = MoERouter(material_states=2, fc0_dim=8, dim=16)
     r.eval()
-    calls = []
-
-    def contexts():
-        calls.append(1)
-        return r.codebook[0][0][:2].detach()
-
-    r.get_all_context_vectors = contexts
     r.collect_lut_diagnostics = True
-    lut = r.get_lookup_table().clone()
+    lut = tuple(t.clone() for t in r.get_lookup_table())
     r(torch.tensor([0, 1]), torch.tensor([1, 0]))
     r.get_lookup_table()
-    assert len(calls) == 1
-    assert r.lut_margin_stats.shape == (5, 3)
+    assert r.lut_valid
+    assert r.lut_margin_stats.shape == (2, 3)
     for name, _, _, _, _ in r.banks():
         assert getattr(r, "validation_counts_" + name).sum() == 2
-    assert r.reseed_dead_experts_from_traffic() == ([], [], [], [], [])
-    assert torch.equal(lut, r.get_lookup_table())
+    assert r.reseed_dead_experts_from_traffic() == ([], [])
+    assert all(torch.equal(a, b) for a, b in zip(lut, r.get_lookup_table()))
 
 
-def test_ddp_reseeding_synchronizes_all_five_banks(monkeypatch):
+def test_ddp_reseeding_synchronizes_both_banks(monkeypatch):
     from types import SimpleNamespace
 
     from trainer import callbacks
 
-    router = MoERouter(num_contexts=2)
+    router = MoERouter(material_states=2, fc0_dim=8, dim=16)
     state = {}
     for _, parameter, _, _, _ in router.banks():
         moment = torch.zeros_like(parameter)
@@ -123,10 +116,10 @@ def test_ddp_reseeding_synchronizes_all_five_banks(monkeypatch):
             tensor[1] = 0  # Receive rank 0's parent map.
 
     monkeypatch.setattr(callbacks.dist, "broadcast", broadcast)
-    router.lut_valid = router.coalesced_valid = True
+    router.lut_valid = True
     callbacks.MoEDeadExpertReseeder().on_train_batch_end(trainer)
-    assert len(broadcasts) == 10
-    assert not router.lut_valid and not router.coalesced_valid
+    assert len(broadcasts) == 4
+    assert not router.lut_valid
     for _, parameter, _, _, _ in router.banks():
         assert torch.equal(
             state[parameter]["exp_avg"][1], state[parameter]["exp_avg"][0]

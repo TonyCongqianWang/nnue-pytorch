@@ -380,13 +380,31 @@ class SimpleTrainer:
             if (batch_idx + 1) % self.log_every_n_steps == 0 or (
                 batch_idx + 1
             ) == self.num_training_batches:
-                keys = [key for key in ("train_loss", "sf_loss", "moe_loss") if key in self.callback_metrics]
-                current_lambda = self.model.current_lambda.mean()
-                scalars = torch.stack([torch.as_tensor(self.callback_metrics[key], device=current_lambda.device) for key in keys] + [current_lambda]).tolist()
+                keys = [
+                    key
+                    for key in ("train_loss", "sf_loss", "moe_loss")
+                    if key in self.callback_metrics
+                ]
+                current_lambda = _unwrap_module(self.model).current_lambda.mean()
+                scalars = torch.stack(
+                    [
+                        torch.as_tensor(
+                            self.callback_metrics[key], device=current_lambda.device
+                        )
+                        for key in keys
+                    ]
+                    + [current_lambda]
+                ).tolist()
                 self.callback_metrics.update(zip(keys, scalars[:-1]))
-                self.callback_metrics["lr"] = sum(group["lr"] for group in self.optimizer.param_groups) / len(self.optimizer.param_groups)
+                self.callback_metrics["lr"] = sum(
+                    group["lr"] for group in self.optimizer.param_groups
+                ) / len(self.optimizer.param_groups)
                 self.callback_metrics["lambda"] = scalars[-1]
-                self._log_metrics({key: self.callback_metrics[key] for key in (*keys, "lr", "lambda")},
+                self._log_metrics(
+                    {
+                        key: self.callback_metrics[key]
+                        for key in (*keys, "lr", "lambda")
+                    },
                     step=self.global_step,
                 )
 

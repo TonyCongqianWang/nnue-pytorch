@@ -8,8 +8,8 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cross_check_eval import init_random_weights
 import ftperm
+from cross_check_eval import init_random_weights
 from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
@@ -20,19 +20,29 @@ def _generate_synthetic_batch(batch_size: int = 16, device: str = "cpu"):
     us = torch.randint(0, 2, (batch_size, 1), device=device)
     them = 1 - us
     # The PSQ component has 704 real features per bucket; generate active indices within bounds
-    white_indices = torch.randint(0, 704, (batch_size, 30), dtype=torch.int32, device=device)
-    black_indices = torch.randint(0, 704, (batch_size, 30), dtype=torch.int32, device=device)
+    white_indices = torch.randint(
+        0, 704, (batch_size, 30), dtype=torch.int32, device=device
+    )
+    black_indices = torch.randint(
+        0, 704, (batch_size, 30), dtype=torch.int32, device=device
+    )
     # Pad with -1
     white_indices = torch.cat(
-        [white_indices, torch.full((batch_size, 2), -1, dtype=torch.int32, device=device)],
+        [
+            white_indices,
+            torch.full((batch_size, 2), -1, dtype=torch.int32, device=device),
+        ],
         dim=1,
     )
     black_indices = torch.cat(
-        [black_indices, torch.full((batch_size, 2), -1, dtype=torch.int32, device=device)],
+        [
+            black_indices,
+            torch.full((batch_size, 2), -1, dtype=torch.int32, device=device),
+        ],
         dim=1,
     )
-    c_us = torch.randint(0, 810810, (batch_size,), device=device)
-    c_them = torch.randint(0, 810810, (batch_size,), device=device)
+    c_them = torch.randint(0, 3655808, (batch_size,), device=device)
+    c_us = c_them // 8
     return us, them, white_indices, black_indices, c_us, c_them
 
 
@@ -42,7 +52,7 @@ def test_ftperm_forward_parity():
 
     config = ModelConfig()
     model_orig = NNUEModel(feature_name=DEFAULT_FEATURES, config=config)
-    init_random_weights(model_orig)
+    init_random_weights(model_orig, build_router_lut=False)
     model_orig.eval()
 
     model_orig.input.coalesce()
@@ -57,19 +67,31 @@ def test_ftperm_forward_parity():
 
     # 1. Unquantized forward parity
     with torch.no_grad():
-        out_orig = model_orig.forward(*batch, fake_quantize_acts=False, fake_quantize_weights=False)
-        out_perm = model_perm.forward(*batch, fake_quantize_acts=False, fake_quantize_weights=False)
+        out_orig = model_orig.forward(
+            *batch, fake_quantize_acts=False, fake_quantize_weights=False
+        )
+        out_perm = model_perm.forward(
+            *batch, fake_quantize_acts=False, fake_quantize_weights=False
+        )
 
     max_diff_float = (out_orig - out_perm).abs().max().item()
-    assert max_diff_float < 1e-4, f"Float forward mismatch after ftperm: max diff {max_diff_float}"
+    assert max_diff_float < 1e-4, (
+        f"Float forward mismatch after ftperm: max diff {max_diff_float}"
+    )
 
     # 2. Fake-quantized forward parity
     with torch.no_grad():
-        out_orig_q = model_orig.forward(*batch, fake_quantize_acts=True, fake_quantize_weights=True)
-        out_perm_q = model_perm.forward(*batch, fake_quantize_acts=True, fake_quantize_weights=True)
+        out_orig_q = model_orig.forward(
+            *batch, fake_quantize_acts=True, fake_quantize_weights=True
+        )
+        out_perm_q = model_perm.forward(
+            *batch, fake_quantize_acts=True, fake_quantize_weights=True
+        )
 
     max_diff_q = (out_orig_q - out_perm_q).abs().max().item()
-    assert max_diff_q < 1e-4, f"Quantized forward mismatch after ftperm: max diff {max_diff_q}"
+    assert max_diff_q < 1e-4, (
+        f"Quantized forward mismatch after ftperm: max diff {max_diff_q}"
+    )
 
 
 def test_ftperm_serialization_roundtrip():
@@ -78,7 +100,7 @@ def test_ftperm_serialization_roundtrip():
 
     config = ModelConfig()
     model = NNUEModel(feature_name=DEFAULT_FEATURES, config=config)
-    init_random_weights(model)
+    init_random_weights(model, build_router_lut=False)
     model.eval()
 
     model.clip_weights(include_input=True)
@@ -98,7 +120,9 @@ def test_ftperm_serialization_roundtrip():
     batch = _generate_synthetic_batch(batch_size=16)
 
     with torch.no_grad():
-        out_perm = model.forward(*batch, fake_quantize_acts=True, fake_quantize_weights=True)
+        out_perm = model.forward(
+            *batch, fake_quantize_acts=True, fake_quantize_weights=True
+        )
         out_deserialized = deserialized_model.forward(
             *batch, fake_quantize_acts=True, fake_quantize_weights=True
         )

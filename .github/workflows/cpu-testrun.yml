@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: c9bc9c1c62ab51563b16bd08b384db0afd5e018b
+          ref: dbc194db3296c3285dde841afebf10c99d8c0042
           path: Stockfish
           persist-credentials: false
 
@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: c9bc9c1c62ab51563b16bd08b384db0afd5e018b
+          ref: dbc194db3296c3285dde841afebf10c99d8c0042
           path: Stockfish
           persist-credentials: false
 
@@ -89,10 +89,10 @@ jobs:
           cd Stockfish/src
           make -j build
 
-      - name: Perform MoE7 CPU Regression Tests
+      - name: Perform MoE8 CPU Checks
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_moe7.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_moe8.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q
 
       - name: Perform Cross-Check Evaluation on Random Net
         run: |

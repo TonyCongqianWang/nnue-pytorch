@@ -63,12 +63,40 @@ def get_histogram_callback(hist_title: str, verbose: bool):
     return histogram_callback
 
 
-from ..modules.router import (
-    FC0_ROUTER_TABLE_SIZE,
-    NUM_BIAS_EXPERTS,
-    ROUTER_TABLE_SIZE,
-    get_router_hash,
-)
+from ..modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE, get_router_hash
+
+
+def pack_lookup_table(values, bits):
+    """LSB-first IDs, byte-aligned per table; unused final bits are zero."""
+    values = torch.as_tensor(values).detach().cpu().numpy().astype(np.uint16)
+    if np.any(values >= (1 << bits)):
+        raise ValueError("Expert ID exceeds packed width")
+    chunks = []
+    for start in range(0, len(values), 65536):
+        block = values[start : start + 65536]
+        binary = ((block[:, None] >> np.arange(bits, dtype=np.uint16)) & 1).astype(
+            np.uint8
+        )
+        chunks.append(np.packbits(binary.ravel(), bitorder="little").tobytes())
+    return b"".join(chunks)
+
+
+def unpack_lookup_table(data, count, bits):
+    expected = (count * bits + 7) // 8
+    if len(data) != expected:
+        raise EOFError(f"Expected {expected} packed LUT bytes, got {len(data)}")
+    used = count * bits % 8
+    if used and data[-1] >> used:
+        raise ValueError("Nonzero packed LUT padding")
+    binary = np.unpackbits(np.frombuffer(data, dtype=np.uint8), bitorder="little")[
+        : count * bits
+    ]
+    values = (
+        binary.reshape(count, bits).astype(np.uint16)
+        * (1 << np.arange(bits, dtype=np.uint16))
+    ).sum(1, dtype=np.uint16)
+    return torch.from_numpy(values.astype(np.int64))
+
 
 # hardcoded for now
 VERSION = 0x6A448AFA
@@ -102,77 +130,92 @@ class NNUEWriter:
 
     def __init__(
         self,
-        model: NNUEModel,
-        description: str | None = None,
-        verbose: bool = False,
-        exporter: BufferExporter | CountingExporter | None = None,
+        model,
+        description=None,
+        verbose=None,
+        exporter=None,
+        histogram_mode="aggregate",
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
-
-        self.verbose = verbose
-
-        if exporter is None:
-            exporter = BufferExporter()
-        self.exporter = exporter
-        # Ensure lookup table is populated and valid upfront
-        orders = model.router.export_permutations()
-        router_table = model.router.export_lookup_table(orders)
-        role_orders = tuple(
-            orders[name].tolist()
-            for name in ("fc0", "downstream_stm", "downstream_opp")
+        if histogram_mode not in ("none", "aggregate", "all"):
+            raise ValueError("histogram_mode must be none, aggregate or all")
+        self.histogram_mode = (
+            ("all" if verbose else "none") if verbose is not None else histogram_mode
         )
-        fc0_table = model.router.export_fc0_lookup_table(orders)
-        if self.verbose:
-            for name in orders:
-                counts = getattr(model.router, f"validation_counts_{name}")
-                source = (
-                    "validation traffic"
-                    if counts.sum() > 0
-                    else "identity (no validation traffic)"
-                )
-                print(
-                    f"Export order {name}: {source}; new -> training IDs {orders[name].tolist()}"
-                )
-
+        self.verbose = self.histogram_mode != "none"
+        self.exporter = BufferExporter() if exporter is None else exporter
+        self._layer_histograms = {}
         fc_hash = self.fc_hash(model)
-
-        # 1. Plaintext header
         self.write_header(model, fc_hash, description)
-
-        # 2. Payload (Feature Transformer + Layer Stacks)
-        self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
+        # Counting must not build multi-million-context LUTs or coalesce weights.
+        if isinstance(self.exporter, CountingExporter):
+            self.exporter.size += self._payload_size(model)
+            return
+        orders = model.router.export_permutations()
+        fc0_table, tail_table = model.router.export_lookup_tables(orders)
+        bank_orders = tuple(orders[name].tolist() for name in ("fc0", "tail"))
+        self.int32(model.feature_hash ^ (model.L1 * 2))
         self.write_feature_transformer(model)
-        layer_stacks = model.layer_stacks
         for bucket, layers in enumerate(
-            layer_stacks.get_coalesced_layer_stacks(model.router.codebook, role_orders)
+            model.layer_stacks.get_coalesced_layer_stacks(
+                model.router.codebook, bank_orders
+            )
         ):
             first = len(layers) == 1
             self.int32(self.fc0_hash(model) if first else fc_hash)
             keys = ("ls_l1",) if first else ("ls_l2", "ls_output")
+            bank = "FC0" if first else "tail"
+            expert = bucket if first else bucket - model.layer_stacks.l1.count
             for layer, key in zip(layers, keys):
-                self.write_fc_layer(model, layer, key, f"bucket {bucket}")
-
-        # 3. Downstream MoE7 Router Lookup Table (849,420 uint32 = 3,397,680 bytes)
+                self.write_fc_layer(model, layer, key, f"{bank} expert {expert}")
+        self.exporter.extend(pack_lookup_table(fc0_table, 6))
+        self.exporter.extend(pack_lookup_table(tail_table, 9))
+        if self.histogram_mode == "aggregate":
+            for name, values in self._layer_histograms.items():
+                get_histogram_callback("all experts", True)(name, torch.cat(values))
         if self.verbose:
             from .routing_profiler import print_routing_profile
 
             print_routing_profile(model)
-        self.write_tensor(router_table.to(torch.uint32))
-        self.write_tensor(fc0_table)
+            if self.histogram_mode == "all":
+                for name, order in orders.items():
+                    print(f"Export {name}, new -> training IDs: {order.tolist()}")
 
-        # 4. Dynamic Biases Table (2 x 64 experts x 64 int32 values = 32,768 bytes)
-        coalesced_biases = model.router.get_coalesced_bias_table()
-        coalesced_biases = torch.stack(
-            [
-                coalesced_biases[i, orders[f"biases_{role}"]]
-                for i, role in enumerate(("stm", "opp"))
-            ]
+    @staticmethod
+    def _payload_size(model):
+        size = 4 + model.L1 * 2
+        size += sum(
+            f.NUM_REAL_FEATURES
+            * model.L1
+            * torch.empty((), dtype=f.EXPORT_WEIGHT_DTYPE).element_size()
+            for f in model.input.features
         )
-        q_biases = model.quantization.quantize_dynamic_bias(
-            coalesced_biases, get_histogram_callback("dynamic_bias", self.verbose)
-        )
-        self.write_tensor(q_biases)
+
+        def layer_size(layer):
+            return layer.bias_features * 4 + layer.out_features * (
+                (layer.in_features + 31) // 32 * 32
+            )
+
+        stacks = model.layer_stacks
+        size += stacks.l1.count * (4 + layer_size(stacks.l1))
+        size += stacks.count * (4 + layer_size(stacks.l2) + layer_size(stacks.output))
+        size += (model.router.fc0_lut.numel() * 6 + 7) // 8
+        size += (model.router.lut.numel() * 9 + 7) // 8
+        return size
+
+    def _layer_histogram_callback(self, desc):
+        if self.histogram_mode == "none":
+            return None
+        if self.histogram_mode == "all":
+            return get_histogram_callback(desc, True)
+
+        def collect(name, values):
+            self._layer_histograms.setdefault(name, []).append(
+                values.detach().flatten().cpu()
+            )
+
+        return collect
 
     @property
     def buf(self) -> bytearray:
@@ -208,9 +251,8 @@ class NNUEWriter:
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
         router_hash = get_router_hash(
-            model.router.num_weight_experts,
-            model.router.num_bias_experts,
             model.router.num_fc0_experts,
+            model.router.num_weight_experts,
         )
         net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2) ^ router_hash
         self.int32(net_hash)  # halfkp network hash
@@ -267,7 +309,7 @@ class NNUEWriter:
             raise RuntimeError("layer_key required for quantization.")
 
         bias, weight = model.quantization.quantize_fc_layer(
-            bias, weight, layer_key, get_histogram_callback(desc, self.verbose)
+            bias, weight, layer_key, self._layer_histogram_callback(desc)
         )
 
         # FC inputs are padded to 32 elements by spec.
@@ -313,7 +355,6 @@ class NNUEReader:
         groups = (
             ((stacks.l1,), stacks.l1.count, NNUEWriter.fc0_hash(self.model)),
             ((stacks.l2, stacks.output), stacks.count, fc_hash),
-            ((stacks.opp.l2, stacks.opp.output), stacks.count, fc_hash),
         )
         for layers, count, expected_hash in groups:
             for index in range(count):
@@ -331,30 +372,21 @@ class NNUEReader:
                         layer.layer_key,
                     )
 
-        router_table_bytes = ROUTER_TABLE_SIZE * 4
-        raw_router = self.f.read(router_table_bytes)
-        if len(raw_router) != router_table_bytes:
-            raise EOFError(
-                f"Expected {router_table_bytes} bytes for router table, got {len(raw_router)}"
-            )
-        raw_fc0 = self.f.read(FC0_ROUTER_TABLE_SIZE)
-        if len(raw_fc0) != FC0_ROUTER_TABLE_SIZE:
-            raise EOFError("Unexpected end of FC0 material router table")
-        self.model.router.load_lookup_table(raw_router, raw_fc0)
-
-        raw_biases = self.tensor(
-            np.int32, [2, NUM_BIAS_EXPERTS, self.model.router.num_biases]
+        fc0_bytes = (FC0_ROUTER_TABLE_SIZE * 6 + 7) // 8
+        tail_bytes = (ROUTER_TABLE_SIZE * 9 + 7) // 8
+        self.model.router.load_lookup_tables(
+            unpack_lookup_table(self.f.read(fc0_bytes), FC0_ROUTER_TABLE_SIZE, 6),
+            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, 9),
         )
-        biases = self.model.quantization.dequantize_dynamic_bias(raw_biases)
-        self.model.router.load_coalesced_biases(biases)
+        if self.f.read(1):
+            raise ValueError("Unexpected trailing network data")
 
     def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
         header_hash = self.read_int32()
         router_hash = get_router_hash(
-            self.model.router.num_weight_experts,
-            self.model.router.num_bias_experts,
             self.model.router.num_fc0_experts,
+            self.model.router.num_weight_experts,
         )
         expected_hash = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ router_hash
         if header_hash != expected_hash:

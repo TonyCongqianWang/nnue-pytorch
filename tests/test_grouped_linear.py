@@ -115,7 +115,7 @@ def test_grouped_partial_output_tiles(outputs, monkeypatch):
 @pytest.mark.skipif(
     not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
 )
-@pytest.mark.parametrize("count", [1, 3, 4, 16, 32, 256])
+@pytest.mark.parametrize("count", [1, 3, 4, 16, 32, 256, 512])
 @pytest.mark.parametrize("concentrated", [False, True])
 @pytest.mark.parametrize("quantize", [False, True])
 def test_grouped_variable_stack_count(count, concentrated, quantize, monkeypatch):
@@ -334,3 +334,11 @@ def test_grouped_fallback_compiles(count, device):
     reference_gradients = torch.autograd.grad(expected.sum(), parameters)
     for grad, ref_grad in zip(gradients, reference_gradients):
         torch.testing.assert_close(grad, ref_grad, atol=3e-5, rtol=3e-4)
+
+
+@pytest.mark.skipif(
+    not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
+)
+@pytest.mark.parametrize("width,outputs", [(64, 32), (128, 1)])
+def test_moe8_512_tail_routing_and_gradients(width, outputs, monkeypatch):
+    _check_forward_and_all_gradients(width, 257, False, True, outputs, 512, monkeypatch)

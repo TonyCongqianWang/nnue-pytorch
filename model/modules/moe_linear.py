@@ -63,6 +63,7 @@ class MoeLinear(nn.Module):
         self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
         self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
         self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
+        self.shared_bias = nn.Parameter(torch.zeros(self.bias_features))
 
         self.register_buffer(
             "coalesced_weight",
@@ -102,7 +103,7 @@ class MoeLinear(nn.Module):
                 F.linear(h, self.adapter_up).reshape(
                     self.out_features, self.in_features
                 ),
-                F.linear(h, self.bias_adapter),
+                (F.linear(h, self.bias_adapter) + self.shared_bias),
             )
 
     def get_delta_weights(self, codebook):
@@ -111,7 +112,9 @@ class MoeLinear(nn.Module):
         )
 
     def get_delta_biases(self, codebook):
-        return F.linear(self._bottleneck(codebook), self.bias_adapter)
+        return (
+            F.linear(self._bottleneck(codebook), self.bias_adapter) + self.shared_bias
+        )
 
     def get_all_weights_and_biases(self, codebook=None):
         if self.is_coalesced:
@@ -126,7 +129,9 @@ class MoeLinear(nn.Module):
                 F.linear(h, self.adapter_up)
                 .reshape(self.count * self.out_features, self.in_features)
                 .contiguous(),
-                F.linear(h, self.bias_adapter).reshape(-1).contiguous(),
+                (F.linear(h, self.bias_adapter) + self.shared_bias)
+                .reshape(-1)
+                .contiguous(),
             )
 
     def forward(
@@ -158,10 +163,10 @@ class MoeLinear(nn.Module):
             and torch.version.hip is None
             and x.dtype == flat_w.dtype == flat_b.dtype == torch.float32
             and not torch.is_autocast_enabled()
-            and 128 <= self.in_features <= 4096
-            and self.in_features % 128 == 0
+            and 64 <= self.in_features <= 4096
+            and self.in_features % 64 == 0
             and 1 <= self.out_features <= 128
-            and 1 <= self.count <= 256
+            and 1 <= self.count <= 512
             and grouped_l1_preferred(self.count)
             and x.ndim == 2
             and x.shape[0] > 0
@@ -218,6 +223,7 @@ class MoeLinear(nn.Module):
         self.adapter_down.zero_()
         self.adapter_up.zero_()
         self.bias_adapter.zero_()
+        self.shared_bias.zero_()
         self.is_coalesced = True
 
     @torch.no_grad()

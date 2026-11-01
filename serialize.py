@@ -37,8 +37,9 @@ class SerializeConfig:
     """Deprecated alias for compression."""
 
     histogram: bool = False
-    """Print a histogram and min/max stats of the quantized values of every
-    exported layer."""
+    """Print per-expert histograms (alias for --histogram-mode all)."""
+    histogram_mode: Literal["none", "aggregate", "all"] = "aggregate"
+    """Quantized stats: aggregate across experts by default; all prints each expert."""
 
     ft_perm: str | None = None
     """Path to a file that defines the permutation to use on the feature transformer."""
@@ -213,7 +214,11 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
 
         writer = M.NNUEWriter(
-            nnue.model, model_description, verbose=serialize_config.histogram
+            nnue.model,
+            model_description,
+            histogram_mode="all"
+            if serialize_config.histogram
+            else serialize_config.histogram_mode,
         )
         buf = writer.buf
 

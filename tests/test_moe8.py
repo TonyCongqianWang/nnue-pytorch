@@ -210,11 +210,11 @@ def test_common_scale_rounding(output, sa, sb):
 
 def test_default_shapes_and_independent_router_sizes():
 
-    s = LayerStacks(512, LayerStacksConfig(), QuantizationManager(QuantizationConfig()))
+    s = LayerStacks(256, LayerStacksConfig(), QuantizationManager(QuantizationConfig()))
     assert [
         (l.count, l.in_features, l.out_features, l.rank, l.codebook_dim)
         for l in s.dense_layers()
-    ] == [(64, 1024, 32, 64, 256), (512, 64, 32, 512, 2048), (512, 128, 1, 512, 2048)]
+    ] == [(64, 1024, 32, 64, 256), (256, 64, 32, 512, 2048), (256, 128, 1, 512, 2048)]
     assert sum(l.in_features * l.out_features for l in s.dense_layers()) == 34944
     assert not hasattr(s, "opp")
 

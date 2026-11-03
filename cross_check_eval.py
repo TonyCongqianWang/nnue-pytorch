@@ -355,6 +355,9 @@ def init_random_weights(model: M.NNUEModel, *, build_router_lut=True) -> None:
             model.layer_stacks.l2,
             model.layer_stacks.output,
         ]:
+            if ls.shared_weight is not None:
+                ls.shared_weight.data.uniform_(-0.25, 0.25)
+                touched.add(id(ls.shared_weight))
             ls.adapter_down.data.uniform_(-0.1, 0.1)
             touched.add(id(ls.adapter_down))
             ls.adapter_up.data.uniform_(-0.1, 0.1)

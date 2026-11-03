@@ -35,7 +35,7 @@ def print_routing_profile(model, file=None):
     tables = router.get_lookup_table()
     material = router.material_decode_table.cpu().numpy()
     print(
-        "\nMoE8 routing profiles: LUT-weighted context means; IDs are training IDs. Export sorts by validation traffic.",
+        "\nMoE8.5 routing profiles: LUT-weighted context means; IDs are training IDs. Export sorts by validation traffic.",
         file=file,
     )
     for name, table in zip(MOE_BANKS, tables):

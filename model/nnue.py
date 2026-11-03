@@ -165,7 +165,13 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Independent role-specific dense hypernetworks.
+            # Common FC0 path, coalesced into each expert at export.
+            {
+                "params": [self.model.layer_stacks.l1.shared_weight],
+                "lr": LRs[2],
+                "weight_decay": optimizer_config.factorized_weight_decay,
+            },
+            # Expert-generating hypernetworks.
             {
                 "params": [
                     p

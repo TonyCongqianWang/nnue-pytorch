@@ -381,6 +381,7 @@ def test_moe_optimizer_param_groups():
 
     found_ft = False
     found_dense = False
+    found_factorized = False
 
     for group in opt.param_groups:
         for p in group["params"]:
@@ -389,6 +390,9 @@ def test_moe_optimizer_param_groups():
 
         if group["weight_decay"] == 1e-4:
             found_ft = True
+        elif group["weight_decay"] == 4e-5:
+            found_factorized = True
+            assert group["params"] == [nnue.model.layer_stacks.l1.shared_weight]
         elif group["weight_decay"] == 2e-4:
             found_dense = True
             expected_dense = {
@@ -400,6 +404,7 @@ def test_moe_optimizer_param_groups():
                 id(nnue.model.layer_stacks.output.adapter_up),
             }
             assert {id(p) for p in group["params"]} == expected_dense
+    assert found_factorized
     assert found_ft
     assert found_dense
     assert registered_params == all_model_params, (

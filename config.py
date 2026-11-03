@@ -24,6 +24,9 @@ class TrainingConfig:
     validation_size: int = 0
     """Number of positions in validation epoch (<= 0 disables validation)."""
 
+    final_validation_multiplier: int = 1
+    """Validation work multiplier at the completed final epoch (fresh stream batches)."""
+
     check_val_every_n_epoch: int = 1
     """Number of epochs between validation (has to be >= 1)."""
 
@@ -131,6 +134,8 @@ class TrainingConfig:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."
             )
+        if self.final_validation_multiplier < 1:
+            raise ValueError("final_validation_multiplier must be >= 1")
         if self.check_val_every_n_epoch < 1:
             raise ValueError(
                 "check_val_every_n_epoch has to be >= 1, "

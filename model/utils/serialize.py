@@ -170,7 +170,7 @@ class NNUEWriter:
             for layer, key in zip(layers, keys):
                 self.write_fc_layer(model, layer, key, f"{bank} expert {expert}")
         self.exporter.extend(pack_lookup_table(fc0_table, 6))
-        self.exporter.extend(pack_lookup_table(tail_table, 9))
+        self.exporter.extend(pack_lookup_table(tail_table, 8))
         if self.histogram_mode == "aggregate":
             for name, values in self._layer_histograms.items():
                 get_histogram_callback("all experts", True)(name, torch.cat(values))
@@ -201,7 +201,7 @@ class NNUEWriter:
         size += stacks.l1.count * (4 + layer_size(stacks.l1))
         size += stacks.count * (4 + layer_size(stacks.l2) + layer_size(stacks.output))
         size += (model.router.fc0_lut.numel() * 6 + 7) // 8
-        size += (model.router.lut.numel() * 9 + 7) // 8
+        size += (model.router.lut.numel() * 8 + 7) // 8
         return size
 
     def _layer_histogram_callback(self, desc):
@@ -373,10 +373,10 @@ class NNUEReader:
                     )
 
         fc0_bytes = (FC0_ROUTER_TABLE_SIZE * 6 + 7) // 8
-        tail_bytes = (ROUTER_TABLE_SIZE * 9 + 7) // 8
+        tail_bytes = (ROUTER_TABLE_SIZE * 8 + 7) // 8
         self.model.router.load_lookup_tables(
             unpack_lookup_table(self.f.read(fc0_bytes), FC0_ROUTER_TABLE_SIZE, 6),
-            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, 9),
+            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, 8),
         )
         if self.f.read(1):
             raise ValueError("Unexpected trailing network data")

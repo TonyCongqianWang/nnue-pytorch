@@ -38,6 +38,7 @@ class LayerStacks(nn.Module):
             quantization=quantization,
             layer_key="ls_l1",
             dual_bias=True,
+            factorized=True,
         )
         self.l2 = MoeLinear(
             2 * config.L2,
@@ -58,8 +59,6 @@ class LayerStacks(nn.Module):
             quantization=quantization,
             layer_key="ls_output",
         )
-        with torch.no_grad():
-            self.output.bias_adapter.zero_()
 
     def dense_layers(self):
         return self.l1, self.l2, self.output

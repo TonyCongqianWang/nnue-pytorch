@@ -1,6 +1,7 @@
 """Plain-Python training callbacks for SimpleTrainer."""
 
 import copy
+import csv
 import math
 import os
 import re
@@ -394,7 +395,10 @@ class CheckpointManager(Callback):
             os.makedirs(dirpath, exist_ok=True)
 
         last_path = os.path.join(dirpath, "last.ckpt")
-        if self.save_last and self._last_save_epoch != trainer.current_epoch:
+        if self.save_last and (
+            self._last_save_epoch != trainer.current_epoch
+            or getattr(trainer, "validation_is_final", False)
+        ):
             trainer.save_checkpoint(last_path)
         # Wait for asynchronous writes so post-training code (e.g. the
         # SWA checkpoint renames in train.py) sees complete files.
@@ -834,22 +838,33 @@ class MoEDeadExpertReseeder(Callback):
         router = _unwrap_module(trainer.model).model.router
         for name, _, _, _, _ in router.banks():
             getattr(router, f"validation_counts_{name}").zero_()
-        router.collect_lut_diagnostics = getattr(
-            trainer, "rank", 0
-        ) == 0 and not getattr(trainer, "sanity_checking", False)
+        final = getattr(trainer, "validation_is_final", False)
+        router.validation_joint_counts.zero_()
+        router.collect_joint_diagnostics = final and not trainer.sanity_checking
+        router.collect_lut_diagnostics = (
+            final or getattr(trainer, "rank", 0) == 0
+        ) and not trainer.sanity_checking
 
     @torch.no_grad()
     @torch.compiler.disable
     def on_validation_epoch_end(self, trainer):
-        if getattr(trainer, "rank", 0) != 0 or getattr(
-            trainer, "sanity_checking", False
-        ):
+        if getattr(trainer, "sanity_checking", False):
             return
         from model.modules.router import MOE_LOSS_COMPONENTS, ieee_matmul_precision
 
         from .engine import _unwrap_module
 
         router = _unwrap_module(trainer.model).model.router
+        final = getattr(trainer, "validation_is_final", False)
+        if final and getattr(trainer, "world_size", 1) > 1:
+            # One small collective per table, only at the final boundary.
+            for name in ("fc0", "tail"):
+                dist.all_reduce(getattr(router, f"validation_counts_{name}"))
+            dist.all_reduce(router.validation_joint_counts)
+        router.collect_lut_diagnostics = router.collect_joint_diagnostics = False
+        if getattr(trainer, "rank", 0) != 0:
+            return
+        scope = "all ranks" if final else "rank-0"
         # These are training snapshots. Validation must not alter traffic EMAs.
         for row, (name, _, hard, soft, codebook) in enumerate(router.banks()):
             hard = hard.detach().float().cpu()
@@ -882,8 +897,9 @@ class MoEDeadExpertReseeder(Callback):
                 (-(observed * observed.clamp_min(1e-12).log()).sum()).exp().item()
             )
             print(
-                f"[Validation routing {name}, rank-0] active={int((counts > 0).sum())}/{k} "
-                f"effective={observed_effective:.1f} min={observed.min():.3g} max={observed.max():.3g}",
+                f"[Validation routing {name}, {scope}] active={int((counts > 0).sum())}/{k} "
+                f"effective={observed_effective:.1f} min={observed.min():.3g} max={observed.max():.3g} "
+                f"n={int(counts.sum())} min_count={int(counts.min())}",
                 flush=True,
             )
             geometry = f"max_cos={max_cosine:.5f} pair={pair}"
@@ -896,7 +912,8 @@ class MoEDeadExpertReseeder(Callback):
                     f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
                 )
             print(f"[Routing geometry {name}] {geometry}", flush=True)
-        router.collect_lut_diagnostics = False
+        if final:
+            self._save_final_routing(trainer, router)
         terms = [
             f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
             for name in MOE_LOSS_COMPONENTS
@@ -945,3 +962,55 @@ class MoEDeadExpertReseeder(Callback):
         for key in ("exp_avg", "exp_avg_sq"):
             if key in state and state[key] is not None:
                 state[key].index_fill_(0, idx_tensor, 0.0)
+
+    @staticmethod
+    def _save_final_routing(trainer, router):
+        """Persist exact final counts without flooding logs with expert rows."""
+        directory = getattr(
+            getattr(trainer, "logger", None), "log_dir", trainer.default_root_dir
+        )
+        path = os.path.join(directory, "final-routing.csv")
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["bank", "fc0_id", "tail_id", "count", "fraction"])
+            for name in ("fc0", "tail"):
+                counts = getattr(router, f"validation_counts_{name}").cpu()
+                total = max(int(counts.sum()), 1)
+                for i, count in enumerate(counts.tolist()):
+                    writer.writerow(
+                        [
+                            name,
+                            i if name == "fc0" else "",
+                            i if name == "tail" else "",
+                            count,
+                            count / total,
+                        ]
+                    )
+            joint = router.validation_joint_counts.cpu()
+            total = max(int(joint.sum()), 1)
+            for i in joint.nonzero().flatten().tolist():
+                count = int(joint[i])
+                writer.writerow(
+                    [
+                        "joint",
+                        i // router.num_weight_experts,
+                        i % router.num_weight_experts,
+                        count,
+                        count / total,
+                    ]
+                )
+
+        def entropy(counts):
+            p = counts.double() / counts.sum().clamp_min(1)
+            return float(-(p * p.clamp_min(1e-300).log2()).sum())
+
+        h0 = entropy(router.validation_counts_fc0.cpu())
+        ht = entropy(router.validation_counts_tail.cpu())
+        hj = entropy(joint)
+        print(
+            f"[Final routing, all ranks] n={int(joint.sum())} H(fc0)={h0:.4f} "
+            f"H(tail)={ht:.4f} H(joint)={hj:.4f} "
+            f"H(tail|fc0)={hj - h0:.4f}; counts: {path}",
+            flush=True,
+        )

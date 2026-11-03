@@ -16,7 +16,7 @@ from model.utils.serialize import (
 )
 
 
-@pytest.mark.parametrize("bits", [6, 9])
+@pytest.mark.parametrize("bits", [6, 8])
 @pytest.mark.parametrize("count", [0, 1, 7, 8, 65535, 65536, 65537])
 def test_packed_ids_across_chunk_and_byte_boundaries(bits, count):
     x = torch.arange(count) % (1 << bits)
@@ -26,7 +26,7 @@ def test_packed_ids_across_chunk_and_byte_boundaries(bits, count):
     if count:
         with pytest.raises(EOFError):
             unpack_lookup_table(data[:-1], count, bits)
-    if count == 1:
+    if count == 1 and bits % 8:
         corrupt = bytearray(data)
         corrupt[-1] |= 128
         with pytest.raises(ValueError):
@@ -58,7 +58,7 @@ def make_model():
     m = NNUEModel(DEFAULT_FEATURES, ModelConfig(L1=4, L2=4, L3=4))
     m.layer_stacks.coalesce_layer_stacks_inplace(m.router.codebook)
     m.router.fc0_lut.copy_(torch.arange(len(m.router.fc0_lut)) % 64)
-    m.router.lut.copy_(torch.arange(len(m.router.lut)) % 512)
+    m.router.lut.copy_(torch.arange(len(m.router.lut)) % 256)
     m.router.lut_valid = True
     return m.eval()
 
@@ -67,7 +67,7 @@ def test_sorted_export_roundtrip_counting_and_packed_tables():
     m = make_model()
     state = {k: v.clone() for k, v in m.named_parameters()}
     m.router.validation_counts_fc0.copy_(torch.arange(64) % 7)
-    m.router.validation_counts_tail.copy_(torch.arange(512) % 11)
+    m.router.validation_counts_tail.copy_(torch.arange(256) % 11)
     writer = NNUEWriter(m, description="MoE8", verbose=False)
     loaded = NNUEReader(
         io.BytesIO(writer.buf), DEFAULT_FEATURES, ModelConfig(L1=4, L2=4, L3=4)
@@ -113,7 +113,7 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
         assert text.count("all experts " + layer + "_weight:") == 1
         assert text.count("all experts " + layer + "_bias:") == 1
     assert "expert 0 ls_" not in text
-    assert "FC0: 64 experts" in text and "TAIL: 512 experts" in text
+    assert "FC0: 64 experts" in text and "TAIL: 256 experts" in text
     assert "Wide % u/o" in text and "+---" in text
     NNUEWriter(m, histogram_mode="none")
     assert capsys.readouterr().out == ""

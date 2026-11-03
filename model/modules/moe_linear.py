@@ -47,6 +47,7 @@ class MoeLinear(nn.Module):
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,
         dual_bias: bool = False,
+        factorized: bool = False,
     ):
         super().__init__()
 
@@ -64,6 +65,12 @@ class MoeLinear(nn.Module):
         self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
         self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
         self.shared_bias = nn.Parameter(torch.zeros(self.bias_features))
+        self.register_parameter(
+            "shared_weight",
+            nn.Parameter(torch.zeros(out_features, in_features))
+            if factorized
+            else None,
+        )
 
         self.register_buffer(
             "coalesced_weight",
@@ -85,8 +92,7 @@ class MoeLinear(nn.Module):
         bound_up = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
         nn.init.uniform_(self.adapter_up, -bound_up, bound_up)
 
-        bound_bias = 1.0 / math.sqrt(self.rank) if self.rank > 0 else 0.0
-        nn.init.uniform_(self.bias_adapter, -bound_bias, bound_bias)
+        nn.init.zeros_(self.bias_adapter)
 
     def _bottleneck(self, codebook: torch.Tensor) -> torch.Tensor:
         if codebook.shape[-1] != self.codebook_dim:
@@ -96,15 +102,18 @@ class MoeLinear(nn.Module):
             )
         return rms_norm(F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0)
 
+    def _expand_weights(self, h):
+        weight = F.linear(h, self.adapter_up).reshape(
+            *h.shape[:-1], self.out_features, self.in_features
+        )
+        return weight if self.shared_weight is None else weight + self.shared_weight
+
     def get_expert_weight_and_bias(self, c):
         with ieee_matmul_precision():
             h = self._bottleneck(c)
-            return (
-                F.linear(h, self.adapter_up).reshape(
-                    self.out_features, self.in_features
-                ),
-                (F.linear(h, self.bias_adapter) + self.shared_bias),
-            )
+            return self._expand_weights(h), F.linear(
+                h, self.bias_adapter
+            ) + self.shared_bias
 
     def get_delta_weights(self, codebook):
         return F.linear(self._bottleneck(codebook), self.adapter_up).view(
@@ -126,7 +135,7 @@ class MoeLinear(nn.Module):
         with ieee_matmul_precision():
             h = self._bottleneck(codebook)
             return (
-                F.linear(h, self.adapter_up)
+                self._expand_weights(h)
                 .reshape(self.count * self.out_features, self.in_features)
                 .contiguous(),
                 (F.linear(h, self.bias_adapter) + self.shared_bias)
@@ -224,6 +233,8 @@ class MoeLinear(nn.Module):
         self.adapter_up.zero_()
         self.bias_adapter.zero_()
         self.shared_bias.zero_()
+        if self.shared_weight is not None:
+            self.shared_weight.zero_()
         self.is_coalesced = True
 
     @torch.no_grad()
@@ -233,5 +244,7 @@ class MoeLinear(nn.Module):
         self.adapter_up.copy_(
             permuted.view(self.out_features * self.in_features, self.rank)
         )
+        if self.shared_weight is not None:
+            self.shared_weight.copy_(self.shared_weight[:, permutation])
         if self.is_coalesced:
             self.coalesced_weight.copy_(self.coalesced_weight[:, permutation])

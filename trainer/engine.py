@@ -7,6 +7,7 @@ while keeping `model.NNUE` as a plain `torch.nn.Module`.
 from __future__ import annotations
 
 import inspect
+import itertools
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -105,7 +106,12 @@ class SimpleTrainer:
         world_size: int,
         local_rank: int,
         checkpoint_writer: Any | None = None,
+        final_validation_multiplier: int = 1,
     ):
+        if final_validation_multiplier < 1:
+            raise ValueError("final_validation_multiplier must be >= 1")
+        self.final_validation_multiplier = final_validation_multiplier
+        self.validation_is_final = False
         self.model = model
         self.optimizer = optimizer
         self.max_epochs = max_epochs
@@ -323,11 +329,16 @@ class SimpleTrainer:
             self.current_epoch = epoch
             self._train_epoch(train_loader)
 
-            if (
-                val_loader is not None
-                and (self.current_epoch + 1) % self.check_val_every_n_epoch == 0
+            final = epoch + 1 == self.max_epochs and not self.should_stop
+            if val_loader is not None and (
+                (epoch + 1) % self.check_val_every_n_epoch == 0
+                or (final and self.final_validation_multiplier > 1)
             ):
-                self.validate(val_loader)
+                self.validate(
+                    val_loader,
+                    repeats=self.final_validation_multiplier if final else 1,
+                    final=final and self.final_validation_multiplier > 1,
+                )
 
             if self.should_stop:
                 break
@@ -463,12 +474,15 @@ class SimpleTrainer:
     # ------------------------------------------------------------------
     # Validation loop
     # ------------------------------------------------------------------
-    def validate(self, val_loader):
+    def validate(self, val_loader, *, repeats=1, final=False):
         if val_loader is None:
             return
 
+        if repeats < 1:
+            raise ValueError("validation repeats must be >= 1")
+        self.validation_is_final = final
         self.num_val_batches = (
-            len(val_loader) if hasattr(val_loader, "__len__") else None
+            len(val_loader) * repeats if hasattr(val_loader, "__len__") else None
         )
 
         self._call_callbacks("on_validation_start", self)
@@ -482,7 +496,12 @@ class SimpleTrainer:
         num_val_batches = 0
 
         with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
+            # Each iteration advances the persistent native stream; never cache
+            # or replay batches to obtain the longer final validation sample.
+            batches = itertools.chain.from_iterable(
+                iter(val_loader) for _ in range(repeats)
+            )
+            for batch_idx, batch in enumerate(batches):
                 batch = self._move_batch_to_device(batch)
 
                 self._call_callbacks(

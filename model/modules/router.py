@@ -34,12 +34,12 @@ KING_STATES = 8
 FC0_ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2
 ROUTER_TABLE_SIZE = FC0_ROUTER_TABLE_SIZE * KING_STATES
 NUM_FC0_EXPERTS = 64
-NUM_WEIGHT_EXPERTS = 512
+NUM_WEIGHT_EXPERTS = 256
 FC0_CODEBOOK_DIM = 256
 CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
-ROUTER_HASH = 0x4D6F4538
+ROUTER_HASH = 0x4D6F3835
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -177,10 +177,10 @@ class MoERouter(nn.Module):
         super().__init__()
         if not (
             1 < num_fc0_experts <= 64
-            and 1 < num_weight_experts <= 512
+            and 1 < num_weight_experts <= 256
             and 1 <= material_states <= NUM_MATERIAL_STATES
         ):
-            raise ValueError("MoE8 supports 64 FC0 and 512 tail experts")
+            raise ValueError("MoE8.5 supports 64 FC0 and 256 tail experts")
         self.num_fc0_experts, self.num_weight_experts = (
             num_fc0_experts,
             num_weight_experts,
@@ -216,7 +216,15 @@ class MoERouter(nn.Module):
             self.register_buffer(
                 f"ema_soft_{name}", torch.full((count,), 1 / count), persistent=False
             )
-            self.register_buffer(f"validation_counts_{name}", torch.zeros(count))
+            self.register_buffer(
+                f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
+            )
+        self.register_buffer(
+            "validation_joint_counts",
+            torch.zeros(num_fc0_experts * num_weight_experts, dtype=torch.int64),
+            persistent=False,
+        )
+        self.collect_joint_diagnostics = False
         self.register_buffer(
             "fc0_lut",
             torch.zeros(material_states**2, dtype=torch.long),
@@ -483,5 +491,8 @@ class MoERouter(nn.Module):
             for name, index in zip(MOE_BANKS, ids):
                 count = getattr(self, f"validation_counts_{name}")
                 count.scatter_add_(0, index, torch.ones_like(index, dtype=count.dtype))
+        if self.collect_joint_diagnostics:
+            pair = ids[0] * self.num_weight_experts + ids[1]
+            self.validation_joint_counts.scatter_add_(0, pair, torch.ones_like(pair))
         zero = torch.zeros((), device=c_fc0.device)
         return *ids, zero, zero, zero

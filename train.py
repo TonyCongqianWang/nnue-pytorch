@@ -395,6 +395,7 @@ def main():
         schedulers=schedulers,
         max_epochs=args.max_epochs,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
+        final_validation_multiplier=args.final_validation_multiplier,
         gradient_clip_val=2.0,
         log_every_n_steps=refresh_rate,
         default_root_dir=logdir,

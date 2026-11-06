@@ -38,7 +38,7 @@ FC0_CODEBOOK_DIM = 256
 CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
-ROUTER_HASH = 0x4D6F3835
+ROUTER_HASH = 0x4D6F3836
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -179,7 +179,7 @@ class MoERouter(nn.Module):
             and 1 < num_weight_experts <= 256
             and 1 <= material_states <= NUM_MATERIAL_STATES
         ):
-            raise ValueError("MoE8.5 supports 64 FC0 and 256 tail experts")
+            raise ValueError("MoE8.6 supports 64 FC0 and 256 tail experts")
         self.num_fc0_experts, self.num_weight_experts = (
             num_fc0_experts,
             num_weight_experts,

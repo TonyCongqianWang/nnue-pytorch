@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: ef95b13dd6feb625a8580e775dc433b956273328
+          ref: 71321b5cc9c5da4ed78cbaf7df03061dfe2c3453
           path: Stockfish
           persist-credentials: false
 
@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: ef95b13dd6feb625a8580e775dc433b956273328
+          ref: 71321b5cc9c5da4ed78cbaf7df03061dfe2c3453
           path: Stockfish
           persist-credentials: false
 
@@ -89,7 +89,7 @@ jobs:
           cd Stockfish/src
           make -j build
 
-      - name: Perform MoE8 CPU Checks
+      - name: Perform MoE8.6 CPU Checks
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
             env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_moe85.py tests/test_moe8.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q

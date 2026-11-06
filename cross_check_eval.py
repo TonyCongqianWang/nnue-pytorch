@@ -372,8 +372,6 @@ def init_random_weights(model: M.NNUEModel, *, build_router_lut=True) -> None:
             ls.adapter_up.data.uniform_(-0.1, 0.1)
             touched.add(id(ls.adapter_up))
             ls.bias_adapter.data.uniform_(-0.1, 0.1)
-            ls.shared_bias.data.uniform_(-0.1, 0.1)
-            touched.add(id(ls.shared_bias))
             touched.add(id(ls.bias_adapter))
 
         for p in model.router.parameters():

@@ -244,6 +244,7 @@ def main():
             nnue = torch.load(
                 args.resume_from_model, weights_only=False, map_location="cpu"
             )
+            nnue.model.validate_architecture()
             nnue.train()
         except ModuleNotFoundError as e:
             raise RuntimeError(

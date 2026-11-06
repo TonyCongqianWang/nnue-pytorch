@@ -12,6 +12,7 @@ def load_model(
 ) -> NNUEModel:
     if filename.endswith(".pt"):
         model = torch.load(filename, map_location="cpu", weights_only=False)
+        model.model.validate_architecture()
         model.eval()
         return model.model
 

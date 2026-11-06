@@ -148,6 +148,7 @@ def main():
         nnue.eval()
     elif args.source.endswith(".pt"):
         nnue = torch.load(args.source, map_location="cpu", weights_only=False)
+        nnue.model.validate_architecture()
         metadata = getattr(nnue, "runtime_metadata", None)
     elif args.source.endswith(".nnue"):
         with open(args.source, "rb") as f:

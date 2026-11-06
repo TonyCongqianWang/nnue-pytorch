@@ -219,7 +219,7 @@ def test_default_shapes_and_independent_router_sizes():
     assert not hasattr(s, "opp")
 
 
-def test_generator_gradients_and_shared_offsets_without_optimizer():
+def test_generator_gradients_and_expert_biases_without_optimizer():
     from model.modules.router import MoERouter
 
     router = MoERouter(
@@ -243,13 +243,13 @@ def test_generator_gradients_and_shared_offsets_without_optimizer():
             layer.adapter_up.grad is not None and layer.adapter_up.grad.abs().sum() > 0
         )
         assert (
-            layer.shared_bias.grad is not None
-            and layer.shared_bias.grad.abs().sum() > 0
+            layer.bias_adapter.grad is not None
+            and layer.bias_adapter.grad.abs().sum() > 0
         )
+        assert not hasattr(layer, "shared_bias")
     for layer, cb in zip(
         s.dense_layers(), (router.codebook[0], router.codebook[1], router.codebook[1])
     ):
         layer.bias_adapter.data.zero_()
-        layer.shared_bias.data.fill_(0.125)
         _, bias = layer.get_all_weights_and_biases(cb)
-        torch.testing.assert_close(bias, torch.full_like(bias, 0.125))
+        assert torch.count_nonzero(bias) == 0

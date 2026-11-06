@@ -64,7 +64,6 @@ class MoeLinear(nn.Module):
         self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
         self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
         self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
-        self.shared_bias = nn.Parameter(torch.zeros(self.bias_features))
         self.register_parameter(
             "shared_weight",
             nn.Parameter(torch.zeros(out_features, in_features))
@@ -111,9 +110,7 @@ class MoeLinear(nn.Module):
     def get_expert_weight_and_bias(self, c):
         with ieee_matmul_precision():
             h = self._bottleneck(c)
-            return self._expand_weights(h), F.linear(
-                h, self.bias_adapter
-            ) + self.shared_bias
+            return self._expand_weights(h), F.linear(h, self.bias_adapter)
 
     def get_delta_weights(self, codebook):
         return F.linear(self._bottleneck(codebook), self.adapter_up).view(
@@ -121,9 +118,7 @@ class MoeLinear(nn.Module):
         )
 
     def get_delta_biases(self, codebook):
-        return (
-            F.linear(self._bottleneck(codebook), self.bias_adapter) + self.shared_bias
-        )
+        return F.linear(self._bottleneck(codebook), self.bias_adapter)
 
     def get_all_weights_and_biases(self, codebook=None):
         if self.is_coalesced:
@@ -138,9 +133,7 @@ class MoeLinear(nn.Module):
                 self._expand_weights(h)
                 .reshape(self.count * self.out_features, self.in_features)
                 .contiguous(),
-                (F.linear(h, self.bias_adapter) + self.shared_bias)
-                .reshape(-1)
-                .contiguous(),
+                F.linear(h, self.bias_adapter).reshape(-1).contiguous(),
             )
 
     def forward(
@@ -232,7 +225,6 @@ class MoeLinear(nn.Module):
         self.adapter_down.zero_()
         self.adapter_up.zero_()
         self.bias_adapter.zero_()
-        self.shared_bias.zero_()
         if self.shared_weight is not None:
             self.shared_weight.zero_()
         self.is_coalesced = True

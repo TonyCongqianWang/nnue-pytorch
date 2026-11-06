@@ -47,6 +47,15 @@ class NNUEModel(nn.Module):
 
         self.input.init_weights()
 
+    def validate_architecture(self):
+        if any(
+            hasattr(layer, "shared_bias") for layer in self.layer_stacks.dense_layers()
+        ):
+            raise ValueError(
+                "MoE8.6 requires expert-only biases; earlier .pt models are incompatible. "
+                "Start a fresh MoE8.6 training pipeline."
+            )
+
     @torch.no_grad()
     def clip_weights(self, include_input):
         """

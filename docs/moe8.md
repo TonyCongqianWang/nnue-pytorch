@@ -1,8 +1,11 @@
-# MoE8.5: joint routing and one full-width downstream network
+# MoE8.6: joint routing and expert-only biases
 
-MoE8.5 retains upstream SFNNv19 block-major FT/Finny storage and the strict
+MoE8.6 retains upstream SFNNv19 block-major FT/Finny storage and the strict
 opposing-side K32H3 rule: opposing queen, otherwise opposing rook, otherwise
-neither. It is incompatible with earlier MoE network files, including MoE8.
+neither. It is incompatible with earlier MoE checkpoints, .pt models and
+network files, including MoE8.5. There is no migration or backward-compatible
+loading path; training starts fresh. Its nettest recipe uses FT clipping
+interval 1024 in every stage.
 
 ## Network
 
@@ -10,7 +13,7 @@ Widths are L1=1024, L2=L3=32. A 64-expert FC0 bank performs one conventional
 full-width sparse projection. A 256-expert tail bank supplies the full-width
 FC1 and scalar output projections. Both consume all relevant activations;
 there are no perspective permutations, duplicate projections, or dynamic bias
-banks. Each generated affine has a shared static bias; hidden layers retain
+banks. Each generated affine has expert-only biases; hidden layers retain
 separate squared and linear bias paths. Native linear projections omit bias.
 
 FC0 uses a rank-64 adapter and dimension-256 codebook. Tail adapters are rank
@@ -21,8 +24,9 @@ validation traffic and its LUT remapped accordingly.
 FC0 has a shared weight matrix initialized to zero and a normally initialized
 expert expansion. The base is coalesced into expert weights before QAT and
 export, with no extra engine work. The base uses factorized weight decay
-4e-5; generators retain dense decay 1e-6. All expert bias projections and
-shared biases initialize to zero. Bottleneck norms remain unchanged. FT
+4e-5; generators retain dense decay 1e-6. All expert bias projections
+initialize to zero. There are no shared downstream bias parameters or
+optimizer entries. Bottleneck norms remain unchanged. FT
 forward weights are rounded without clipping; downstream generated weights
 retain their existing forward clamp.
 

@@ -183,9 +183,8 @@ class NNUE(nn.Module):
             },
             {
                 "params": [
-                    p
+                    layer.bias_adapter
                     for layer in self.model.layer_stacks.dense_layers()
-                    for p in (layer.bias_adapter, layer.shared_bias)
                 ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,

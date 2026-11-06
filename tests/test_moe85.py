@@ -1,4 +1,4 @@
-"""MoE8.5 checks use initialization/inference only; no training or optimizer steps."""
+"""Factorized MoE checks use initialization/inference only; no optimizer steps."""
 
 import csv
 from types import SimpleNamespace

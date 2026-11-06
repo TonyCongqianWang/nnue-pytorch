@@ -221,6 +221,8 @@ def main():
     if args.target.endswith(".ckpt"):
         raise ValueError("Cannot convert into .ckpt")
     elif args.target.endswith(".pt"):
+        # Storage stays portable; runtime metadata retains the generation backend.
+        nnue.to("cpu")
         torch.save(nnue, args.target)
     elif target_is_nnue:
         if os.path.isdir(args.target):

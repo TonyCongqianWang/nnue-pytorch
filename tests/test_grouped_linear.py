@@ -366,5 +366,5 @@ def test_grouped_fallback_compiles(count, device):
     not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
 )
 @pytest.mark.parametrize("width,outputs", [(64, 32), (128, 1)])
-def test_moe8_512_tail_routing_and_gradients(width, outputs, monkeypatch):
+def test_large_tail_routing_and_gradients(width, outputs, monkeypatch):
     _check_forward_and_all_gradients(width, 257, False, True, outputs, 512, monkeypatch)

@@ -6,11 +6,15 @@ import torch
 from test_routing_contexts import get_context_indices
 
 from data_loader import stream
+from model import NNUE, ModelConfig, NNUEConfig
 from model.modules.config import LayerStacksConfig
+from model.modules.features import DEFAULT_FEATURES
 from model.modules.features.k32h3 import K32H3, InverseKingBuckets
 from model.modules.layer_stacks import LayerStacks
+from model.modules.moe_linear import MoeLinear
 from model.modules.router import decode_material_state, decompose_router_index
 from model.quantize import QuantizationConfig, QuantizationManager
+from model.utils.load_model import load_model
 
 
 @pytest.mark.parametrize("heavy", ["q", "r", "", "Q", "R"])
@@ -89,10 +93,10 @@ def test_engine_accumulator_paths():
     import random
     import subprocess
 
-    probe = os.environ.get("MOE8_ENGINE_PROBE")
-    net = os.environ.get("MOE8_TEST_NET")
+    probe = os.environ.get("NNUE_ENGINE_PROBE")
+    net = os.environ.get("NNUE_TEST_NET")
     if not probe or not net:
-        pytest.skip("Set MOE8_ENGINE_PROBE and MOE8_TEST_NET for engine integration")
+        pytest.skip("Set NNUE_ENGINE_PROBE and NNUE_TEST_NET for engine integration")
     episodes = [
         ("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1", ["e4d5"]),
         ("4k3/8/8/3r4/4P3/8/8/4K3 w - - 0 1", ["e4d5"]),
@@ -253,3 +257,52 @@ def test_generator_gradients_and_expert_biases_without_optimizer():
         layer.bias_adapter.data.zero_()
         _, bias = layer.get_all_weights_and_biases(cb)
         assert torch.count_nonzero(bias) == 0
+
+
+def test_factorized_initialization_and_all_coalescing_paths():
+    torch.manual_seed(9)
+    layer = MoeLinear(8, 4, 3, rank=4, codebook_dim=8, dual_bias=True, factorized=True)
+    cb = torch.nn.functional.normalize(torch.randn(3, 8), dim=1)
+    assert torch.count_nonzero(layer.shared_weight) == 0
+    assert torch.count_nonzero(layer.adapter_up) > 0
+    assert torch.count_nonzero(layer.bias_adapter) == 0
+    with torch.no_grad():
+        layer.shared_weight.uniform_(-0.1, 0.1)
+    weights, biases = layer.get_all_weights_and_biases(cb)
+    expected = layer.get_delta_weights(cb) + layer.shared_weight
+    torch.testing.assert_close(weights, expected.flatten(0, 1))
+    assert torch.count_nonzero(biases) == 0
+    for i in range(3):
+        w, b = layer.get_expert_weight_and_bias(cb[i])
+        torch.testing.assert_close(w, expected[i])
+        assert torch.count_nonzero(b) == 0
+    permutation = list(reversed(range(8)))
+    layer.permute_inputs(permutation)
+    torch.testing.assert_close(
+        layer.get_all_weights_and_biases(cb)[0], weights[:, permutation]
+    )
+    layer.coalesce_weights(cb)
+    torch.testing.assert_close(layer.coalesced_weight, weights[:, permutation])
+
+
+def test_old_checkpoint_and_pickled_model_are_rejected(tmp_path):
+    config = ModelConfig(L1=4, L2=4, L3=4)
+    nnue = NNUE(NNUEConfig(model_config=config))
+    assert all(
+        not hasattr(layer, "shared_bias")
+        for layer in nnue.model.layer_stacks.dense_layers()
+    )
+    state = nnue.state_dict()
+    state["model.layer_stacks.l1.shared_bias"] = torch.zeros(8)
+    with pytest.raises(RuntimeError, match="shared_bias"):
+        nnue.load_state_dict(state)
+
+    # Pickle bypasses constructors; reject legacy parameters rather than
+    # quietly evaluating a model while ignoring its old shared contribution.
+    nnue.model.layer_stacks.l1.register_parameter(
+        "shared_bias", torch.nn.Parameter(torch.ones(8))
+    )
+    path = tmp_path / "old.pt"
+    torch.save(nnue, path)
+    with pytest.raises(ValueError, match="incompatible"):
+        load_model(str(path), DEFAULT_FEATURES, config)

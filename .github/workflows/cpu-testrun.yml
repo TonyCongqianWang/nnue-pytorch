@@ -9,6 +9,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Match the engine's NNUE_TEST_SMALL build. Adapter/codebook dimensions are
+# training-only; the coalesced inference net has four FC0 and four tail experts.
+env:
+  SMALL_MODEL: >-
+    --l1=256 --moe-fc0-experts=4 --moe-tail-experts=4
+    --moe-fc0-codebook-dim=8 --moe-tail-codebook-dim=8
+    --moe-fc0-rank=4 --moe-tail-rank=4
+
 jobs:
   train-and-cross-check:
     if: github.event.pull_request.draft == false
@@ -35,24 +43,29 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: 71321b5cc9c5da4ed78cbaf7df03061dfe2c3453
+          ref: 1b581a1b0a4b765ce8e01f1a994537d6c1f0daef
           path: Stockfish
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          make -j build
+          make -j2 build ARCH=x86-64-avx2 EXTRACXXFLAGS=-DNNUE_TEST_SMALL
 
       - name: Perform Test Run of entire Training Pipeline on CPU
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            python -u tests/test_training_pipeline_run.py -y --device cpu --test-dir /data/logs/training/runs/unittests_train_pipeline_cpu
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -u tests/test_training_pipeline_run.py \
+            -y --device cpu --num_workers 1 --batch-size 32 --epoch-size 256 --validation-size 128 --ft-optimize-count 128 \
+            $SMALL_MODEL --test-dir /data/logs/training/runs/unittests_train_pipeline_cpu
 
       - name: Perform Cross-Check Evaluation
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --skip-setup --non-interactive --exec \
-            python -u cross_check_eval.py --net /data/logs/training/runs/unittests_train_pipeline_cpu/training_logs/version_2/checkpoints/last.nnue --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' \
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -u cross_check_eval.py \
+            --net /data/logs/training/runs/unittests_train_pipeline_cpu/training_logs/version_2/checkpoints/last.nnue \
+            --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device=cpu --count 512 $SMALL_MODEL \
+            --max-error 2 --max-ckpt-error 0 \
             --checkpoint /data/logs/training/runs/unittests_train_pipeline_cpu/training_logs/version_2/checkpoints/last.ckpt
 
   cross-check-random:
@@ -80,21 +93,23 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: 71321b5cc9c5da4ed78cbaf7df03061dfe2c3453
+          ref: 1b581a1b0a4b765ce8e01f1a994537d6c1f0daef
           path: Stockfish
           persist-credentials: false
 
       - name: Compile Compatible Stockfish
         run: |
           cd Stockfish/src
-          make -j build
+          make -j2 build ARCH=x86-64-avx2 EXTRACXXFLAGS=-DNNUE_TEST_SMALL
 
-      - name: Perform MoE8.6 CPU Checks
+      - name: Perform MoE CPU Checks
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_moe85.py tests/test_moe8.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_model_cli.py tests/test_moe_architecture.py tests/test_final_validation.py tests/test_moe_routing.py tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q
 
       - name: Perform Cross-Check Evaluation on Random Net
         run: |
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
-            python -u cross_check_eval.py --random-weights --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device='cpu' --count 1024 --seed 42 --max-error 2.0 --max-ckpt-error 0.1
+            env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -u cross_check_eval.py --random-weights \
+            --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device=cpu \
+            --count 512 --seed 42 --max-error 2 --max-ckpt-error 0 $SMALL_MODEL

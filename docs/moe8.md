@@ -52,10 +52,41 @@ separate GPU diagnostic; matching precision is not a bit-identity guarantee
 across hardware or software versions.
 
 CPU DDP tests retain native material/king contexts, two-rank synchronization,
-validation and checkpointing, using test-only four-expert, eight-dimensional
+validation and checkpointing, using CLI-configured four-expert, eight-dimensional
 routers and rank-four adapters. GPU kernel cases use representative shapes
 instead of a full Cartesian sweep. No production architecture defaults are
 reduced for testing.
+
+The architecture can be reduced entirely through the shared model CLI flags:
+`--l1`, `--l2`, `--l3`, `--moe-fc0-experts`, `--moe-tail-experts`,
+`--moe-fc0-codebook-dim`, `--moe-tail-codebook-dim`, `--moe-fc0-rank`, and
+`--moe-tail-rank`. The codebook dimensions also set the corresponding context
+embedding widths. Pass identical model flags to training, serialization and
+crosscheck. Production defaults remain 64/256 experts, dimensions 256/2048,
+and ranks 64/512. Material/king context encoding is unchanged.
+
+CPU pipeline CI uses the following small model for every stage, including
+model/checkpoint resume, export, FT permutation and crosscheck:
+
+```sh
+--l1=256 --moe-fc0-experts=4 --moe-tail-experts=4 \
+--moe-fc0-codebook-dim=8 --moe-tail-codebook-dim=8 \
+--moe-fc0-rank=4 --moe-tail-rank=4
+```
+
+The matching Stockfish build uses `EXTRACXXFLAGS=-DNNUE_TEST_SMALL` and retains
+32-neuron hidden layers for its SIMD paths. This is a compile-time CI preset;
+ordinary builds retain the production architecture. Arbitrary smaller Python
+models remain useful for trainer-only testing, but engine crosscheck requires
+matching exported widths and expert counts. Adapter ranks/codebook widths
+are coalesced away and do not affect the inference layout. The pipeline
+test script forwards model flags to every subprocess and accepts separate
+batch/epoch/validation/FT-optimization sizes, with small values selected in CI.
+
+Tests are organized by current behavior (`test_moe_architecture.py`,
+`test_final_validation.py`, `test_model_cli.py`) rather than historical MoE
+version numbers. DDP tests invoke `train.py` directly, without a model factory
+substitution.
 
 FC0 scale is 256; FC1 and output scales are 128. Both bias-free FC0 differences
 (raw outputs 14−15 and 30−31) contribute equally to the skip. Float inference
@@ -104,11 +135,11 @@ stage reduces the batch size to 65536.
 
 ## CPU validation
 
-Run `pytest tests/test_moe8.py tests/test_moe_routing.py
+Run `pytest tests/test_moe_architecture.py tests/test_moe_routing.py
  tests/test_routing_contexts.py tests/test_moe_load_balancing.py -q`.
-The optional incremental probe in `tests/moe8_engine_probe.cpp` links against
+The optional incremental probe in `tests/moe_engine_probe.cpp` links against
 a compatible engine's object files except main.o, with matching SIMD/compiler
-flags. Set `MOE8_ENGINE_PROBE` and `MOE8_TEST_NET` to enable the engine test.
+flags. Set `NNUE_ENGINE_PROBE` and `NNUE_TEST_NET` to enable the engine test.
 It compares forward/backward incremental updates, fresh reconstruction and
 trace output across captures, promotions, castling and legal move sequences.
 CUDA grouped-linear tests include all 512 experts, but require a GPU. No local

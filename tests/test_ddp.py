@@ -20,7 +20,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from ddp_small_model import install
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import NNUE, NNUEConfig
@@ -123,9 +122,14 @@ def _sync_worker(rank, world_size, port, root_dir, num_batches):
     rank, world_size, local_rank = init_distributed("gloo", device_type="cpu")
     try:
         torch.manual_seed(0)
-        install()
         config = NNUEConfig()
         config.model_config.L1 = 32
+        config.model_config.moe_fc0_experts = 4
+        config.model_config.moe_tail_experts = 4
+        config.model_config.moe_fc0_codebook_dim = 8
+        config.model_config.moe_tail_codebook_dim = 8
+        config.model_config.moe_fc0_rank = 4
+        config.model_config.moe_tail_rank = 4
         # RangerLite hands back its lookahead weights at the end of an epoch,
         # which equal the initial ones until its first merge (5 steps)
         config.optimizer_config.optimizer_name = "adamw"
@@ -222,10 +226,16 @@ def test_train_script_two_ranks(tmp_path):
         "torch.distributed.run",
         "--standalone",
         f"--nproc_per_node={WORLD_SIZE}",
-        os.path.join(REPO_ROOT, "tests", "ddp_small_model.py"),
+        "train.py",
         str(data),
         "--accelerator=cpu",
         "--l1=32",
+        "--moe-fc0-experts=4",
+        "--moe-tail-experts=4",
+        "--moe-fc0-codebook-dim=8",
+        "--moe-tail-codebook-dim=8",
+        "--moe-fc0-rank=4",
+        "--moe-tail-rank=4",
         f"--batch-size={batch_size}",
         f"--epoch-size={epoch_size}",
         "--validation-size=512",

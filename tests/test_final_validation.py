@@ -1,4 +1,4 @@
-"""Factorized MoE checks use initialization/inference only; no optimizer steps."""
+"""Final validation stream, global routing counts and checkpoint boundaries."""
 
 import csv
 from types import SimpleNamespace
@@ -6,36 +6,9 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from model.modules.moe_linear import MoeLinear
 from model.modules.router import MoERouter
 from trainer.callbacks import CheckpointManager, MoEDeadExpertReseeder
 from trainer.engine import SimpleTrainer
-
-
-def test_factorized_initialization_and_all_coalescing_paths():
-    torch.manual_seed(9)
-    layer = MoeLinear(8, 4, 3, rank=4, codebook_dim=8, dual_bias=True, factorized=True)
-    cb = torch.nn.functional.normalize(torch.randn(3, 8), dim=1)
-    assert torch.count_nonzero(layer.shared_weight) == 0
-    assert torch.count_nonzero(layer.adapter_up) > 0
-    assert torch.count_nonzero(layer.bias_adapter) == 0
-    with torch.no_grad():
-        layer.shared_weight.uniform_(-0.1, 0.1)
-    weights, biases = layer.get_all_weights_and_biases(cb)
-    expected = layer.get_delta_weights(cb) + layer.shared_weight
-    torch.testing.assert_close(weights, expected.flatten(0, 1))
-    assert torch.count_nonzero(biases) == 0
-    for i in range(3):
-        w, b = layer.get_expert_weight_and_bias(cb[i])
-        torch.testing.assert_close(w, expected[i])
-        assert torch.count_nonzero(b) == 0
-    permutation = list(reversed(range(8)))
-    layer.permute_inputs(permutation)
-    torch.testing.assert_close(
-        layer.get_all_weights_and_biases(cb)[0], weights[:, permutation]
-    )
-    layer.coalesce_weights(cb)
-    torch.testing.assert_close(layer.coalesced_weight, weights[:, permutation])
 
 
 class ValidationModel(nn.Module):

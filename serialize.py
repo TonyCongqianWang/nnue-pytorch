@@ -16,11 +16,10 @@ except ImportError as e:
     DataloaderSkipConfig = None
 
 import model as M
-from model.utils.serialize import CountingExporter, NNUEWriter
+from model.utils.serialize import CountingExporter, NNUEWriter, prepare_for_export
 from runtime import (
     MatmulPrecision,
     configure_runtime,
-    prepare_for_export,
     resolve_device,
 )
 

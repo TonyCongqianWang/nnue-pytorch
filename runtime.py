@@ -87,13 +87,3 @@ def configure_runtime(
         result["device_capability"] = torch.cuda.get_device_capability(device)
     print(f"Runtime: {result}", flush=True)
     return result
-
-
-@torch.no_grad()
-def prepare_for_export(model, *, rebuild_router=True):
-    """Prepare on the selected device; only integer byte packing moves to CPU."""
-    model.eval()
-    model.clip_weights(include_input=True)
-    if rebuild_router and not model.layer_stacks.l1.is_coalesced:
-        model.router.lut_valid = False
-    return model

@@ -13,6 +13,16 @@ from ..model import NNUEModel
 from ..modules.moe_linear import ExpertParameters
 
 
+@torch.no_grad()
+def prepare_for_export(model, *, rebuild_router=True):
+    """Prepare on the selected device; only integer byte packing moves to CPU."""
+    model.eval()
+    model.clip_weights(include_input=True)
+    if rebuild_router and not model.layer_stacks.l1.is_coalesced:
+        model.router.lut_valid = False
+    return model
+
+
 def ascii_hist(name, x, bins=7):
     start, end = int(x.min()), int(x.max())
     if start >= end - bins:

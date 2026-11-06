@@ -15,10 +15,10 @@ from tyro.conf import OmitArgPrefixes
 import data_loader
 import ftperm
 import model as M
+from model.utils.serialize import prepare_for_export
 from runtime import (
     MatmulPrecision,
     configure_runtime,
-    prepare_for_export,
     resolve_device,
 )
 

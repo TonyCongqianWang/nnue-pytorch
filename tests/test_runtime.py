@@ -12,8 +12,8 @@ from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
 from model.modules.router import ieee_matmul_precision
-from model.utils.serialize import NNUEReader, NNUEWriter
-from runtime import configure_runtime, prepare_for_export, resolve_device
+from model.utils.serialize import NNUEReader, NNUEWriter, prepare_for_export
+from runtime import configure_runtime, resolve_device
 
 
 def test_device_auto_fallback_and_explicit_unavailable(monkeypatch):

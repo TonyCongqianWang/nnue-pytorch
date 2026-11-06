@@ -2,7 +2,12 @@ import torch
 from torch import nn
 
 from .config import ModelConfig
-from .modules import ComposedFeatureTransformer, LayerStacks, get_feature_cls
+from .modules import (
+    ComposedFeatureTransformer,
+    LayerStacks,
+    MoERouter,
+    get_feature_cls,
+)
 from .quantize import QuantizationManager
 
 
@@ -20,19 +25,48 @@ class NNUEModel(nn.Module):
         self.L3 = config.L3
 
         self.quantize_config = config.quantize_config
-        self.quantization = QuantizationManager(config.quantize_config)
+        hidden_sizes = (config.L2, config.L3)
+        self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
-        self.num_ls_buckets = 32
+        self.num_ls_buckets = config.moe_tail_experts
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
-        self.layer_stacks = LayerStacks(self.num_ls_buckets, config, self.quantization)
+        self.router = MoERouter(
+            num_fc0_experts=config.moe_fc0_experts,
+            num_weight_experts=config.moe_tail_experts,
+            fc0_dim=config.moe_fc0_codebook_dim,
+            dim=config.moe_tail_codebook_dim,
+            balance_cost=config.moe_weight_balance_cost,
+            diversity_cost=config.moe_weight_diversity_cost,
+            temperature=config.moe_weight_temperature,
+        )
+        self.layer_stacks = LayerStacks(
+            self.num_ls_buckets,
+            config,
+            self.quantization,
+            rank=config.moe_tail_rank,
+            codebook_dim=config.moe_tail_codebook_dim,
+            fc0_count=config.moe_fc0_experts,
+            fc0_rank=config.moe_fc0_rank,
+            fc0_dim=config.moe_fc0_codebook_dim,
+        )
+        self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
         self.input.init_weights()
+
+    def validate_architecture(self):
+        if any(
+            hasattr(layer, "shared_bias") for layer in self.layer_stacks.dense_layers()
+        ):
+            raise ValueError(
+                "MoE8.6 requires expert-only biases; earlier .pt models are incompatible. "
+                "Start a fresh MoE8.6 training pipeline."
+            )
 
     @torch.no_grad()
     def clip_weights(self, include_input):
@@ -69,7 +103,6 @@ class NNUEModel(nn.Module):
     @torch.no_grad()
     def zero_virtual_weights(self) -> None:
         self.input.zero_virtual_weights()
-        self.layer_stacks.zero_virtual_weights()
 
     def forward_ft(
         self,
@@ -89,9 +122,9 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
 
-    def calculate_buckets(self, piece_count: torch.Tensor, queen_bucket: torch.Tensor):
-        pc_bucket = (piece_count - 1) // 4
-        return pc_bucket * 4 + queen_bucket
+    def calculate_buckets(self, c_us: torch.Tensor, c_them: torch.Tensor):
+        e1_w, e2_w, *_ = self.router(c_us, c_them)
+        return e1_w, e2_w
 
     def forward(
         self,
@@ -99,12 +132,21 @@ class NNUEModel(nn.Module):
         them: torch.Tensor,
         white_indices: torch.Tensor,
         black_indices: torch.Tensor,
-        piece_count: torch.Tensor,
-        queen_bucket: torch.Tensor,
+        c_us: torch.Tensor,
+        c_them: torch.Tensor,
         fake_quantize_acts: bool = True,
         fake_quantize_weights: bool = True,
     ):
-        layer_stack_indices = self.calculate_buckets(piece_count, queen_bucket)
+        (
+            e1_w,
+            e2_w,
+            moe_loss,
+            commit_loss,
+            balance_loss,
+        ) = self.router(c_us, c_them, fake_quantize=fake_quantize_weights)
+        self.moe_loss = moe_loss
+        self.commit_loss = commit_loss
+        self.balance_loss = balance_loss
 
         l0_ = self.forward_ft(
             us,
@@ -115,7 +157,12 @@ class NNUEModel(nn.Module):
             fake_quantize_weights,
         )
         x = self.layer_stacks(
-            l0_, layer_stack_indices, fake_quantize_acts, fake_quantize_weights
+            l0_,
+            self.router.codebook,
+            e1_w,
+            e2_w,
+            fake_quantize_acts,
+            fake_quantize_weights,
         )
 
         return x

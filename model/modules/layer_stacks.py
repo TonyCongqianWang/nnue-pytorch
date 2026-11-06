@@ -1,111 +1,151 @@
-from collections.abc import Generator
-
 import torch
 from torch import nn
 
-from ..quantize import QuantizationManager
-from .config import LayerStacksConfig
-from .stacked_linear import FactorizedStackedLinear, StackedLinear
+from .moe_linear import ExpertParameters, MoeLinear
+from .router import (
+    ADAPTER_RANK,
+    CODEBOOK_DIM,
+    FC0_ADAPTER_RANK,
+    FC0_CODEBOOK_DIM,
+    NUM_FC0_EXPERTS,
+)
 
 
 class LayerStacks(nn.Module):
+    """One full-width expert per layer; FC1 and output share a tail ID."""
+
     def __init__(
-        self, count: int, config: LayerStacksConfig, quantization: QuantizationManager
+        self,
+        count,
+        config,
+        quantization,
+        rank=ADAPTER_RANK,
+        codebook_dim=CODEBOOK_DIM,
+        fc0_count=NUM_FC0_EXPERTS,
+        fc0_rank=FC0_ADAPTER_RANK,
+        fc0_dim=FC0_CODEBOOK_DIM,
     ):
         super().__init__()
-
-        self.count = count
-        self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
-        self.quantization = quantization
-
-        # Factorizer only for the first layer because later
-        # there's a non-linearity and factorization breaks.
-        # This is by design. The weights in the further layers should be
-        # able to diverge a lot.
-        self.l1 = FactorizedStackedLinear(
-            2 * self.L1 // 2, self.L2, count, quantization, "ls_l1"
+        if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
+            raise ValueError("MoE8 requires equal even hidden widths, at least four")
+        self.count, self.quantization = count, quantization
+        self.l1 = MoeLinear(
+            config.L1,
+            config.L2,
+            fc0_count,
+            rank=fc0_rank,
+            codebook_dim=fc0_dim,
+            quantization=quantization,
+            layer_key="ls_l1",
+            dual_bias=True,
+            factorized=True,
         )
-        self.l2 = StackedLinear(self.L2 * 2, self.L3, count, quantization, "ls_l2")
-
-        self.output = StackedLinear(
-            self.L2 * 2 + self.L3 * 2, 1, count, quantization, "ls_output"
+        self.l2 = MoeLinear(
+            2 * config.L2,
+            config.L3,
+            count,
+            rank=rank,
+            codebook_dim=codebook_dim,
+            quantization=quantization,
+            layer_key="ls_l2",
+            dual_bias=True,
+        )
+        self.output = MoeLinear(
+            2 * (config.L2 + config.L3),
+            1,
+            count,
+            rank=rank,
+            codebook_dim=codebook_dim,
+            quantization=quantization,
+            layer_key="ls_output",
         )
 
-        with torch.no_grad():
-            self.output.linear.bias.zero_()
+    def dense_layers(self):
+        return self.l1, self.l2, self.output
 
     def forward(
         self,
-        x: torch.Tensor,
-        ls_indices: torch.Tensor,
-        fake_quantize_acts: bool = True,
-        fake_quantize_weights: bool = True,
+        x,
+        codebook,
+        fc0,
+        tail,
+        fake_quantize_acts=True,
+        fake_quantize_weights=True,
     ):
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights)
+        cb0, cbt = (None, None) if codebook is None else codebook
 
-        # Extract the short-path skip connection before fake quantization
-        l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-        l1x_ = l1c_
+        def hidden(raw, bias):
+            sq, lin = bias.chunk(2, dim=1)
+            sq = (raw + sq).square()
+            lin = raw + lin
+            if fake_quantize_acts:
+                sq = self.quantization.fake_quantize_ls_act(sq)
+                lin = self.quantization.fake_quantize_ls_act(lin)
+            return self.quantization.clip_ls_act(
+                torch.cat([sq * self.quantization.sqr_crelu_correction_factor, lin], 1)
+            )
 
-        l1_sqr = torch.pow(l1x_, 2.0)
-        if fake_quantize_acts:
-            l1_sqr = self.quantization.fake_quantize_ls_act(l1_sqr)
-
-        l1_sqr = l1_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        if fake_quantize_acts:
-            l1x_ = self.quantization.fake_quantize_ls_act(l1x_)
-
-        l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
-        l1x_ = self.quantization.clip_ls_act(l1x_)
-
-        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights)
-        l2x_ = l2c_
-
-        l2_sqr = torch.pow(l2x_, 2.0)
-        if fake_quantize_acts:
-            l2_sqr = self.quantization.fake_quantize_ls_act(l2_sqr)
-
-        l2_sqr = l2_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        if fake_quantize_acts:
-            l2x_ = self.quantization.fake_quantize_ls_act(l2x_)
-
-        l2x_ = torch.cat([l2_sqr, l2x_], dim=1)
-        l2x_ = self.quantization.clip_ls_act(l2x_)
-
-        l3_input = torch.cat([l1x_, l2x_], dim=1)
-
-        l3c_ = self.output(l3_input, ls_indices, fake_quantize_weights)
-
-        if fake_quantize_acts:
-            l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
-
-        l3x_ = l3c_ + l1x_out
-        if fake_quantize_acts:
-            l3x_ = self.quantization.fake_quantize_output(l3x_)
-
-        assert l3x_.shape[1] == 1, (
-            f"Expected output shape (batch_size, 1), got {l3x_.shape}"
+        raw, bias = self.l1(x, cb0, fc0, fake_quantize_weights)
+        a, b = raw.chunk(2, dim=1)
+        sa, sb = a[:, -2:-1] - a[:, -1:], b[:, -2:-1] - b[:, -1:]
+        h1 = hidden(raw, bias)
+        raw, bias = self.l2(h1, cbt, tail, fake_quantize_weights)
+        h2 = hidden(raw, bias)
+        output, bias = self.output(
+            torch.cat([h1, h2], 1), cbt, tail, fake_quantize_weights
         )
-        return l3x_
+        output = output + bias
+        value = output + (sa + sb) * 0.5
+        if fake_quantize_acts:
+            scale = self.quantization.weight_scales_dict["ls_l1_bias"]
+            hard = (
+                torch.trunc(
+                    (
+                        2 * torch.round(output * scale)
+                        + torch.round(sa * scale)
+                        + torch.round(sb * scale)
+                    )
+                    * 0.5
+                )
+                / scale
+            )
+            value = value + (hard - value).detach()
+            value = self.quantization.fake_quantize_output(value)
+        return value
 
     @torch.no_grad()
-    def zero_virtual_weights(self) -> None:
-        self.l1.zero_virtual_weights()
+    def get_coalesced_layer_stacks(self, codebook=None, orders=None):
+        cb0, cbt = (None, None) if codebook is None else codebook
+        if orders is None:
+            orders = range(self.l1.count), range(self.count)
+        for layers, cbs, order in [
+            ((self.l1,), (cb0,), orders[0]),
+            ((self.l2, self.output), (cbt, cbt), orders[1]),
+        ]:
+            params = [
+                layer.get_all_weights_and_biases(cb) for layer, cb in zip(layers, cbs)
+            ]
+            for index in order:
+                result = []
+                for layer, (weights, biases) in zip(layers, params):
+                    weight = weights[
+                        index * layer.out_features : (index + 1) * layer.out_features
+                    ]
+                    weight = self.quantization.clip_ls_weight(weight, layer.layer_key)
+                    result.append(
+                        ExpertParameters(
+                            weight,
+                            biases[
+                                index * layer.bias_features : (index + 1)
+                                * layer.bias_features
+                            ],
+                        )
+                    )
+                yield tuple(result)
 
     @torch.no_grad()
-    def get_coalesced_layer_stacks(
-        self,
-    ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        # During training the buckets are represented by a single, wider, layer.
-        # This representation needs to be transformed into individual layers
-        # for the serializer, because the buckets are interpreted as separate layers.
-        for i in range(self.count):
-            yield self.l1.at_index(i), self.l2.at_index(i), self.output.at_index(i)
-
-    @torch.no_grad()
-    def coalesce_layer_stacks_inplace(self) -> None:
-        self.l1.coalesce_weights()
+    def coalesce_layer_stacks_inplace(self, codebook):
+        for layer, cb in zip(
+            self.dense_layers(), (codebook[0], codebook[1], codebook[1])
+        ):
+            layer.coalesce_weights(cb)

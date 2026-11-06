@@ -10,6 +10,6 @@ class LayerStacksConfig:
     L1: Annotated[int, tyro.conf.arg(name="l1")] = 1024
     """Size of first hidden layer."""
     L2: Annotated[int, tyro.conf.arg(name="l2")] = 32
-    """Size of second hidden layer."""
+    """Raw FC0 output width."""
     L3: Annotated[int, tyro.conf.arg(name="l3")] = 32
-    """Size of third hidden layer."""
+    """Raw FC1 output width (must match FC0)."""

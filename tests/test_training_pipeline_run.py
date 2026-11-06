@@ -4,10 +4,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from model.config import ModelConfig
 from model.modules.features import DEFAULT_FEATURES
 
 
@@ -58,7 +60,27 @@ def main():
         default=DEFAULT_FEATURES,
         help=f"Feature set to use (default: {DEFAULT_FEATURES})",
     )
+    ModelConfig.add_model_args(parser)
+    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--epoch-size", type=int, default=10000)
+    parser.add_argument("--validation-size", type=int, default=5000)
+    parser.add_argument("--ft-optimize-count", type=int, default=1000)
     args = parser.parse_args()
+    model_config = ModelConfig.get_model_config(args)
+    model_args = shlex.join(
+        [
+            f"--features={args.features}",
+            *(
+                "--"
+                + f.name.lower().replace("_", "-")
+                + "="
+                + str(getattr(model_config, f.name))
+                for f in fields(ModelConfig)
+                if type(f.default) is int
+            ),
+        ]
+    )
+    resumed_batch_size = args.batch_size * 2
 
     # --- 1. Evaluate Device Arguments ---
     try:
@@ -113,15 +135,15 @@ def main():
     python_executable = shlex.quote(sys.executable)
     # --- 4. Define Pipeline Commands ---
     pipeline = [
-        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size 1024 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=2 --swa-start-epoch=1 --default_root_dir "{test_dir_str}" {train_device_arg} {train_workers_arg}',
+        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size {args.batch_size} {model_args} --epoch-size {args.epoch_size} --max_epochs=2 --swa-start-epoch=1 --default_root_dir "{test_dir_str}" {train_device_arg} {train_workers_arg}',
         f"{python_executable} -c \"import torch; ckpt=torch.load('{test_dir_str}/training_logs/version_0/checkpoints/last.ckpt', map_location='cpu', weights_only=False); print('Checkpoint keys:', list(ckpt.keys())); assert 'epoch' in ckpt and 'global_step' in ckpt and 'state_dict' in ckpt\"",
-        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_0/checkpoints/last.ckpt "{test_dir_str}"/training_logs/version_0/checkpoints/last.pt --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}',
-        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size 2048 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=2 --swa-start-epoch=2 --default_root_dir "{test_dir_str}" --resume-from-model="{test_dir_str}"/training_logs/version_0/checkpoints/last.pt --validation-size=5000 {train_device_arg} {train_workers_arg}',
-        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size 2048 --l1=1024 --features={args.features} --epoch-size 10000 --max_epochs=4 --swa-start-epoch=2 --default_root_dir "{test_dir_str}" --resume-from-checkpoint="{test_dir_str}"/training_logs/version_1/checkpoints/last.ckpt --validation-size=5000 {train_device_arg} {train_workers_arg}',
-        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.ckpt "{test_dir_str}"/training_logs/version_2/checkpoints/last.pt --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}',
-        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.pt "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue --features={args.features} --l1=1024 {serialize_device_arg} {serialize_workers_arg}',
-        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue --ft_optimize_data=./.pgo/small.binpack --features={args.features} --l1=1024 --ft_optimize --ft_optimize_count=1000 {serialize_device_arg} {serialize_workers_arg}',
-        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue --features={args.features} --l1=1024 --out-sha {serialize_device_arg} {serialize_workers_arg}',
+        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_0/checkpoints/last.ckpt "{test_dir_str}"/training_logs/version_0/checkpoints/last.pt {model_args} {serialize_device_arg} {serialize_workers_arg}',
+        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size {resumed_batch_size} {model_args} --epoch-size {args.epoch_size} --max_epochs=2 --swa-start-epoch=2 --default_root_dir "{test_dir_str}" --resume-from-model="{test_dir_str}"/training_logs/version_0/checkpoints/last.pt --validation-size={args.validation_size} {train_device_arg} {train_workers_arg}',
+        f'{python_executable} -u train.py ./.pgo/small.binpack --batch-size {resumed_batch_size} {model_args} --epoch-size {args.epoch_size} --max_epochs=4 --swa-start-epoch=2 --default_root_dir "{test_dir_str}" --resume-from-checkpoint="{test_dir_str}"/training_logs/version_1/checkpoints/last.ckpt --validation-size={args.validation_size} {train_device_arg} {train_workers_arg}',
+        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.ckpt "{test_dir_str}"/training_logs/version_2/checkpoints/last.pt {model_args} {serialize_device_arg} {serialize_workers_arg}',
+        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.pt "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue {model_args} {serialize_device_arg} {serialize_workers_arg}',
+        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue --ft_optimize_data=./.pgo/small.binpack {model_args} --ft_optimize --ft_optimize_count={args.ft_optimize_count} {serialize_device_arg} {serialize_workers_arg}',
+        f'{python_executable} -u serialize.py "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue "{test_dir_str}"/training_logs/version_2/checkpoints/last.nnue {model_args} --out-sha {serialize_device_arg} {serialize_workers_arg}',
     ]
 
     # --- 5. Execute ---

@@ -123,6 +123,8 @@ class NNUE(nn.Module):
                 # TerminateOnNaN checks at logging boundaries; non-finite
                 # losses still propagate into the epoch metric.
                 "train_loss_epoch": MeanMetric(nan_strategy="disable"),
+                "train_sf_loss_epoch": MeanMetric(nan_strategy="disable"),
+                "train_moe_loss_epoch": MeanMetric(nan_strategy="disable"),
                 "val_loss_epoch": MeanMetric(nan_strategy="disable"),
                 "test_loss_epoch": MeanMetric(nan_strategy="disable"),
             }
@@ -142,8 +144,6 @@ class NNUE(nn.Module):
         ft_wd = optimizer_config.ft_weight_decay
         virtual_ft_wd = optimizer_config.virtual_ft_weight_decay
         dense_wd = optimizer_config.dense_weight_decay
-        factorized_wd = optimizer_config.factorized_weight_decay
-
         train_params = [
             # Feature Transformer
             {
@@ -165,45 +165,33 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Dense Layer Stacks
+            # Common FC0 path, coalesced into each expert at export.
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.weight],
+                "params": [self.model.layer_stacks.l1.shared_weight],
                 "lr": LRs[2],
-                "weight_decay": factorized_wd,
+                "weight_decay": optimizer_config.factorized_weight_decay,
             },
+            # Expert-generating hypernetworks.
             {
-                "params": [self.model.layer_stacks.l1.factorized_linear.bias],
-                "lr": LRs[3],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.l1.linear.weight],
+                "params": [
+                    p
+                    for layer in self.model.layer_stacks.dense_layers()
+                    for p in (layer.adapter_down, layer.adapter_up)
+                ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
             {
-                "params": [self.model.layer_stacks.l1.linear.bias],
+                "params": [
+                    layer.bias_adapter
+                    for layer in self.model.layer_stacks.dense_layers()
+                ],
                 "lr": LRs[5],
                 "weight_decay": 0.0,
             },
             {
-                "params": [self.model.layer_stacks.l2.linear.weight],
-                "lr": LRs[6],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.l2.linear.bias],
-                "lr": LRs[7],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.weight],
-                "lr": LRs[8],
-                "weight_decay": dense_wd,
-            },
-            {
-                "params": [self.model.layer_stacks.output.linear.bias],
-                "lr": LRs[9],
+                "params": list(self.model.router.parameters()),
+                "lr": LRs[0],
                 "weight_decay": 0.0,
             },
         ]
@@ -245,7 +233,10 @@ class NNUE(nn.Module):
 
     def on_train_epoch_end(self):
         self.optimizer_wrapper.on_train_epoch_end(self)
-        self.loss_metrics["train_loss_epoch"].reset()
+        for name in ("train_loss_epoch", "train_sf_loss_epoch", "train_moe_loss_epoch"):
+            self.loss_metrics[name].reset()
+        self.model.router.loss_component_sum.zero_()
+        self.model.router.loss_component_batches.zero_()
 
     def on_validation_epoch_start(self):
         self.optimizer_wrapper.on_validation_epoch_start(self)
@@ -260,6 +251,8 @@ class NNUE(nn.Module):
         self.loss_metrics["test_loss_epoch"].reset()
 
     def on_save_checkpoint(self, checkpoint):
+        if hasattr(self, "runtime_metadata"):
+            checkpoint["runtime"] = self.runtime_metadata
         self.optimizer_wrapper.on_save_checkpoint(self, checkpoint)
         self.lambda_scheduler.on_save_checkpoint(checkpoint)
 
@@ -325,15 +318,31 @@ class NNUE(nn.Module):
             and self.optimizer_wrapper is not None
             and getattr(self.optimizer_wrapper, "optimizer", None) is not None
         ):
-            self.optimizer_wrapper.optimizer.load_state_dict(optimizer_state)
+            opt = self.optimizer_wrapper.optimizer
+            configured_wds = [group.get("weight_decay") for group in opt.param_groups]
+            opt.load_state_dict(optimizer_state)
+            for group, wd in zip(opt.param_groups, configured_wds):
+                if wd is not None:
+                    group["weight_decay"] = wd
 
     # --- Training step implementation ---
 
     def train_step(self, batch, current_epoch, global_step):
         _ = current_epoch
-        loss = self.compute_loss(batch, global_step)
-        self.loss_metrics["train_loss_epoch"].update(loss)
-        return {"loss": loss, "train_loss": loss.detach()}
+        total_loss, sf_loss, moe_loss, commit_loss, balance_loss = self.compute_loss(
+            batch, global_step, return_details=True
+        )
+        self.loss_metrics["train_loss_epoch"].update(total_loss.detach())
+        self.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
+        self.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
+        return {
+            "loss": total_loss,
+            "train_loss": total_loss.detach(),
+            "sf_loss": sf_loss.detach(),
+            "moe_loss": moe_loss.detach(),
+            "commit_loss": commit_loss.detach(),
+            "balance_loss": balance_loss.detach(),
+        }
 
     @torch.no_grad()
     def val_step(self, batch, current_epoch, global_step):
@@ -349,7 +358,12 @@ class NNUE(nn.Module):
         self.loss_metrics["test_loss_epoch"].update(loss)
         return {"test_loss": loss}
 
-    def compute_loss(self, batch: tuple[Tensor, ...], current_step: int):
+    def compute_loss(
+        self,
+        batch: tuple[Tensor, ...],
+        current_step: int,
+        return_details: bool = False,
+    ):
         (
             us,
             them,
@@ -357,23 +371,29 @@ class NNUE(nn.Module):
             black_indices,
             _outcome,
             _score,
-            piece_count,
-            queen_bucket,
+            context_us,
+            context_them,
         ) = batch
         scorenet = self.model(
             us,
             them,
             white_indices,
             black_indices,
-            piece_count,
-            queen_bucket,
+            context_us,
+            context_them,
             self.config.use_fake_act_quantization,
             self.config.use_fake_weight_quantization,
         )
-        return self.compute_loss_with_scorenet(scorenet, batch, current_step)
+        return self.compute_loss_with_scorenet(
+            scorenet, batch, current_step, return_details=return_details
+        )
 
     def compute_loss_with_scorenet(
-        self, scorenet: Tensor, batch: tuple[Tensor, ...], current_step: int
+        self,
+        scorenet: Tensor,
+        batch: tuple[Tensor, ...],
+        current_step: int,
+        return_details: bool = False,
     ):
         (
             _us,
@@ -405,4 +425,24 @@ class NNUE(nn.Module):
             scorenet, score, outcome, self.config.loss_params, actual_lambda
         )
 
-        return sf_loss
+        moe_loss = (
+            self.model.moe_loss
+            if self.training and getattr(self.model, "moe_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+        commit_loss = (
+            self.model.commit_loss
+            if self.training and getattr(self.model, "commit_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+        balance_loss = (
+            self.model.balance_loss
+            if self.training and getattr(self.model, "balance_loss", None) is not None
+            else torch.tensor(0.0, device=sf_loss.device)
+        )
+
+        total_loss = sf_loss + moe_loss
+
+        if return_details:
+            return total_loss, sf_loss, moe_loss, commit_loss, balance_loss
+        return total_loss

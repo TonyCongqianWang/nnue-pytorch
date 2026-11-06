@@ -15,6 +15,7 @@ import data_loader
 import model as M
 from config import TrainingConfig
 from data_loader.config import DataloaderDDPConfig
+from runtime import configure_runtime, resolve_device
 from trainer.callbacks import (
     CheckpointManager,
     ExplicitSWA,
@@ -171,12 +172,7 @@ def main():
 
     accelerator = args.accelerator
     if accelerator == "auto":
-        if torch.cuda.is_available():
-            accelerator = "cuda"
-        elif torch.backends.mps.is_available():
-            accelerator = "mps"
-        else:
-            accelerator = "cpu"
+        accelerator = resolve_device().type
 
     if args.compile_backend == "cudagraphs" and accelerator != "cuda":
         raise ValueError(
@@ -269,23 +265,20 @@ def main():
     np.random.seed(args.seed)
     torch.backends.cudnn.benchmark = True
 
-    if accelerator == "cuda":
-        # With act and weight fake-quantization on, every dense GEMM input is
-        # k/128 (k <= 127) and every weight k/256 or k/128, all exact in TF32's
-        # 11-bit significand, and products are exact in the fp32 accumulator:
-        # the forward is bit-identical and only backward matmuls round (~5e-4
-        # relative). Set the flag explicitly so training no longer depends on
-        # container images exporting TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, which
-        # is worth ~9% at the production shapes. Unquantized runs keep fp32.
-        quantized = (
+    device = resolve_device(
+        f"cuda:{local_rank}" if accelerator == "cuda" else accelerator
+    )
+    nnue.runtime_metadata = configure_runtime(
+        device,
+        args.matmul_precision,
+        quantized=(
             args.nnue_config.use_fake_act_quantization
             and args.nnue_config.use_fake_weight_quantization
-        )
-        override = os.environ.get("NNUE_TF32", "")
-        enable_tf32 = (override == "1") if override else quantized
-        torch.backends.cuda.matmul.allow_tf32 = enable_tf32
-        if is_master_process():
-            print(f"cuBLAS TF32 matmul: {enable_tf32} (quantized={quantized})")
+        ),
+    )
+    nnue.runtime_metadata["compile_backend"] = (
+        args.compile_backend if accelerator != "mps" else None
+    )
 
     logdir = args.default_root_dir if args.default_root_dir else "logs/"
     tb_logger = TensorBoardLogger(logdir)
@@ -325,13 +318,6 @@ def main():
         # The loss itself is a long eager pointwise chain outside the model;
         # compiling it fuses those kernels.
         nnue.enable_compiled_loss()
-
-    if accelerator == "cuda":
-        device = torch.device(f"cuda:{local_rank}")
-    elif accelerator == "mps":
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
 
     train, val = make_data_loaders(
         train_datasets,

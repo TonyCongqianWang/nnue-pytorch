@@ -18,15 +18,14 @@ def ieee_matmul_precision():
         yield
         return
 
+    # Only the modern matmul-precision API: mixing it with the legacy
+    # allow_tf32 knob is rejected by recent torch builds.
     prev_precision = torch.get_float32_matmul_precision()
-    prev_tf32 = torch.backends.cuda.matmul.allow_tf32
     try:
         torch.set_float32_matmul_precision("highest")
-        torch.backends.cuda.matmul.allow_tf32 = False
         yield
     finally:
         torch.set_float32_matmul_precision(prev_precision)
-        torch.backends.cuda.matmul.allow_tf32 = prev_tf32
 
 
 NUM_MATERIAL_STATES = 676

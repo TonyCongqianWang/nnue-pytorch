@@ -17,6 +17,12 @@ except ImportError as e:
 
 import model as M
 from model.utils.serialize import CountingExporter, NNUEWriter
+from runtime import (
+    MatmulPrecision,
+    configure_runtime,
+    prepare_for_export,
+    resolve_device,
+)
 
 
 @dataclass(frozen=True)
@@ -58,8 +64,11 @@ class SerializeConfig:
     """Whether to run FT optimization on the resolved torch device.
     Disable this to force FT optimization to run on the CPU instead."""
 
-    device: int | Literal["cpu", "mps"] = 0
-    """Device to use for ft_optimize acceleration."""
+    device: str = "auto"
+    """Device for the complete export: auto, cpu, mps, cuda:N (or numeric N)."""
+
+    matmul_precision: MatmulPrecision = "auto"
+    """Dense precision policy; auto follows checkpoint metadata when available."""
 
     loader_num_workers: int = 4
     """Number of workers to use for data loading during FT optimization."""
@@ -129,15 +138,18 @@ def main():
     target_is_nnue = serialize_config.out_sha or args.target.endswith(".nnue")
 
     model_description = serialize_config.description
+    metadata = None
     if args.source.endswith(".ckpt"):
         checkpoint = torch.load(
             args.source, map_location=torch.device("cpu"), weights_only=False
         )
+        metadata = checkpoint.get("runtime")
         nnue = M.NNUE(config=nnue_config)
         nnue.load_state_dict(checkpoint["state_dict"])
         nnue.eval()
     elif args.source.endswith(".pt"):
-        nnue = torch.load(args.source, weights_only=False)
+        nnue = torch.load(args.source, map_location="cpu", weights_only=False)
+        metadata = getattr(nnue, "runtime_metadata", None)
     elif args.source.endswith(".nnue"):
         with open(args.source, "rb") as f:
             nnue = M.NNUE(
@@ -154,8 +166,12 @@ def main():
     else:
         raise ValueError("Invalid network input format.")
 
-    # Guarantee weights are clipped within valid range before export or optimization
-    nnue.model.clip_weights(include_input=True)
+    device = resolve_device(serialize_config.device, metadata)
+    nnue.runtime_metadata = configure_runtime(
+        device, serialize_config.matmul_precision, metadata=metadata
+    )
+    nnue.to(device)
+    prepare_for_export(nnue.model)
 
     if serialize_config.ft_optimize and serialize_config.ft_perm is not None:
         raise ValueError("Options --ft_perm and --ft_optimize are mutually exclusive.")
@@ -197,7 +213,7 @@ def main():
             serialize_config.ft_optimize_data,
             serialize_config.ft_optimize_count,
             use_cupy=serialize_config.use_cupy,
-            device=serialize_config.device,
+            device=str(device),
             loader_num_workers=serialize_config.loader_num_workers,
             loader_config=serialize_config.dataloader_config,
         )

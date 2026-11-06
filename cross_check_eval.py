@@ -5,7 +5,6 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Literal
 
 import chess
 import numpy as np
@@ -16,6 +15,12 @@ from tyro.conf import OmitArgPrefixes
 import data_loader
 import ftperm
 import model as M
+from runtime import (
+    MatmulPrecision,
+    configure_runtime,
+    prepare_for_export,
+    resolve_device,
+)
 
 
 @dataclass(frozen=True)
@@ -36,8 +41,11 @@ class CrossCheckConfig:
     checkpoint: str | None = None
     """Optional checkpoint (used instead of nnue for local eval)."""
 
-    device: Literal["cuda", "mps", "cpu"] = "cuda"
-    """Device for the NNUE model."""
+    device: str = "auto"
+    """Device for evaluation and export: auto, cpu, mps, cuda:N (or numeric N)."""
+
+    matmul_precision: MatmulPrecision = "auto"
+    """Dense precision policy; auto follows checkpoint metadata when available."""
 
     count: int = 8 * 2**10
     """Number of positions to process."""
@@ -51,7 +59,7 @@ class CrossCheckConfig:
     min_r2: float | None = None
     """Minimum allowed R^2 score between quantized NNUE and engine evaluations."""
 
-    max_ckpt_error: float | None = None
+    max_ckpt_error: float | None = 0.0
     """Maximum allowed absolute error between quantized CKPT and quantized NNUE evaluations."""
 
     max_perm_error: float | None = 0.0
@@ -86,6 +94,7 @@ def make_fen_batch_provider(data_path, batch_size):
     )
 
 
+@torch.inference_mode()
 def eval_model_batch(
     model: M.NNUEModel,
     batch: data_loader.SparseBatchPtr,
@@ -397,7 +406,7 @@ def init_random_weights(model: M.NNUEModel, *, build_router_lut=True) -> None:
 
 def create_permuted_model(base_model: M.NNUEModel) -> M.NNUEModel:
     model_perm = copy.deepcopy(base_model)
-    model_perm.clip_weights(include_input=True)
+    prepare_for_export(model_perm, rebuild_router=False)
     if not getattr(model_perm.layer_stacks.l1, "is_coalesced", False):
         model_perm.input.coalesce()
         model_perm.layer_stacks.coalesce_layer_stacks_inplace(
@@ -528,6 +537,17 @@ def main():
     batch_size = 1024
     temp_files = []
 
+    checkpoint = None
+    if cross_check_config.checkpoint:
+        checkpoint = torch.load(
+            cross_check_config.checkpoint, map_location="cpu", weights_only=False
+        )
+    metadata = checkpoint.get("runtime") if checkpoint is not None else None
+    device = str(resolve_device(cross_check_config.device, metadata))
+    configure_runtime(
+        torch.device(device), cross_check_config.matmul_precision, metadata=metadata
+    )
+
     try:
         ckpt_model = None
         secondary_net_path = None
@@ -536,11 +556,18 @@ def main():
         sf_comp_title = "SF (PERM) VS SF (NO-PERM)"
 
         if cross_check_config.random_weights:
-            init_model = M.NNUEModel(
-                feature_name=nnue_config.features,
-                config=nnue_config.model_config,
+            init_model = (
+                M.NNUEModel(
+                    feature_name=nnue_config.features,
+                    config=nnue_config.model_config,
+                )
+                .to(device)
+                .eval()
             )
-            init_random_weights(init_model)
+            # CPU CI checks codec/arithmetic with all expert IDs, avoiding a
+            # production-size learned LUT sweep. GPU checks exercise learning's
+            # full context-to-expert computation as well.
+            init_random_weights(init_model, build_router_lut=device.startswith("cuda"))
 
             # 1. Unpermuted network (temp_noperm)
             with tempfile.NamedTemporaryFile(suffix=".nnue", delete=False) as temp_file:
@@ -566,27 +593,23 @@ def main():
             sf_comp_title = "SF (PERM) VS SF (NO-PERM)"
 
             nnue = read_model(net_path, config=nnue_config)
-            init_model.to(cross_check_config.device)
+            init_model.to(device)
             init_model.eval()
             ckpt_model = init_model
 
         elif cross_check_config.checkpoint:
-            checkpoint = torch.load(
-                cross_check_config.checkpoint, map_location="cpu", weights_only=False
-            )
             ckpt = M.NNUE(config=nnue_config)
             ckpt.load_state_dict(checkpoint["state_dict"])
-            ckpt.to(cross_check_config.device)
+            ckpt.to(device)
             ckpt.eval()
-            ckpt_model = ckpt.model
+            ckpt_model = prepare_for_export(ckpt.model)
+            print("Checkpoint-Q uses the same FT projection and device as export.")
 
             # 1. Unpermuted network serialized from checkpoint
             with tempfile.NamedTemporaryFile(suffix=".nnue", delete=False) as temp_file:
                 temp_noperm_path = temp_file.name
             temp_files.append(temp_noperm_path)
-            ckpt_cpu = copy.deepcopy(ckpt_model).to("cpu")
-            ckpt_cpu.clip_weights(include_input=True)
-            writer_noperm = M.NNUEWriter(ckpt_cpu, verbose=False)
+            writer_noperm = M.NNUEWriter(ckpt_model, verbose=False)
             with open(temp_noperm_path, "wb") as f:
                 f.write(writer_noperm.buf)
 
@@ -598,7 +621,7 @@ def main():
             if cross_check_config.net:
                 net_path = cross_check_config.net
             else:
-                model_perm = create_permuted_model(ckpt_cpu)
+                model_perm = create_permuted_model(ckpt_model)
                 with tempfile.NamedTemporaryFile(
                     suffix=".nnue", delete=False
                 ) as temp_file:
@@ -616,7 +639,7 @@ def main():
             nnue = read_model(net_path, config=nnue_config)
 
             # Re-permute in-memory from loaded net to test SF (ORIG) vs SF (PERM)
-            model_perm = create_permuted_model(copy.deepcopy(nnue).to("cpu"))
+            model_perm = create_permuted_model(nnue.to(device))
             with tempfile.NamedTemporaryFile(suffix=".nnue", delete=False) as temp_file:
                 temp_perm_path = temp_file.name
             temp_files.append(temp_perm_path)
@@ -629,7 +652,7 @@ def main():
             sf_secondary_name = "SF (PERM)"
             sf_comp_title = "SF (ORIG) VS SF (PERM)"
 
-        nnue.to(cross_check_config.device)
+        nnue.to(device)
         nnue.eval()
         nnue_model = nnue
 
@@ -639,7 +662,7 @@ def main():
             net_path,
             nnue_model,
             ckpt_model,
-            cross_check_config.device,
+            device,
             cross_check_config.max_ckpt_error,
             secondary_net_path=secondary_net_path,
             sf_primary_name=sf_primary_name,
@@ -673,19 +696,11 @@ def main():
                 [0] * len(fens),
             )
             if ckpt_model:
-                ckpt_evals += eval_model_batch(
-                    ckpt_model, b, cross_check_config.device, False
-                )
-                ckpt_quantized_evals += eval_model_batch(
-                    ckpt_model, b, cross_check_config.device, True
-                )
+                ckpt_evals += eval_model_batch(ckpt_model, b, device, False)
+                ckpt_quantized_evals += eval_model_batch(ckpt_model, b, device, True)
 
-            nnue_evals += eval_model_batch(
-                nnue_model, b, cross_check_config.device, False
-            )
-            nnue_quantized_evals += eval_model_batch(
-                nnue_model, b, cross_check_config.device, True
-            )
+            nnue_evals += eval_model_batch(nnue_model, b, device, False)
+            nnue_quantized_evals += eval_model_batch(nnue_model, b, device, True)
             data_loader.destroy_sparse_batch(b)
 
             engine_evals += eval_engine_batch(
@@ -795,16 +810,12 @@ def main():
             and ckpt_q_stats is not None
             and cross_check_config.max_ckpt_error is not None
         ):
-            three_sigma_err = ckpt_q_stats.get(
-                "three_sigma_abs_error", ckpt_q_stats["max_abs_error"]
-            )
             max_ckpt_err = ckpt_q_stats["max_abs_error"]
             threshold = cross_check_config.max_ckpt_error
-            # Pass if 3-sigma error is within threshold (even if rare outlier exceeds max)
-            if min(three_sigma_err, max_ckpt_err) > threshold:
+            if max_ckpt_err > threshold:
                 raise RuntimeError(
-                    f"Cross-check error threshold exceeded: CKPT (Q) vs NNUE (Q) 3-sigma error "
-                    f"{three_sigma_err:.4f} (max {max_ckpt_err:.4f}) > {threshold:.4f}"
+                    f"Cross-check error threshold exceeded: CKPT (Q) vs NNUE (Q) max error "
+                    f"{max_ckpt_err:.4f} > {threshold:.4f}"
                 )
 
         if cross_check_config.max_error is not None and q_stats is not None:

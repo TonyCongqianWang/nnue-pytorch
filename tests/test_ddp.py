@@ -20,9 +20,11 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from ddp_small_model import install
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import NNUE, NNUEConfig
+from model.modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE
 from trainer.engine import SimpleTrainer, init_distributed
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,8 +90,10 @@ def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active):
             indices.append(idx)
         outcome = torch.randint(0, 3, (batch_size, 1), generator=gen).float() / 2
         score = torch.randn(batch_size, 1, generator=gen) * 300
-        c_us = torch.randint(0, 849420, (batch_size,), generator=gen)
-        c_them = torch.randint(0, 849420, (batch_size,), generator=gen)
+        # The two router banks need asymmetric index ranges: the fc0 bank is
+        # pair-composed, the tail bank king-composed.
+        c_us = torch.randint(0, FC0_ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
+        c_them = torch.randint(0, ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
         batches.append((us, 1.0 - us, *indices, outcome, score, c_us, c_them))
     return batches
 
@@ -119,8 +123,9 @@ def _sync_worker(rank, world_size, port, root_dir, num_batches):
     rank, world_size, local_rank = init_distributed("gloo", device_type="cpu")
     try:
         torch.manual_seed(0)
+        install()
         config = NNUEConfig()
-        config.model_config.L1 = 128
+        config.model_config.L1 = 32
         # RangerLite hands back its lookahead weights at the end of an epoch,
         # which equal the initial ones until its first merge (5 steps)
         config.optimizer_config.optimizer_name = "adamw"
@@ -217,10 +222,10 @@ def test_train_script_two_ranks(tmp_path):
         "torch.distributed.run",
         "--standalone",
         f"--nproc_per_node={WORLD_SIZE}",
-        "train.py",
+        os.path.join(REPO_ROOT, "tests", "ddp_small_model.py"),
         str(data),
         "--accelerator=cpu",
-        "--l1=128",
+        "--l1=32",
         f"--batch-size={batch_size}",
         f"--epoch-size={epoch_size}",
         "--validation-size=512",

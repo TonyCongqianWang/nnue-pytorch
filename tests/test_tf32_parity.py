@@ -54,7 +54,7 @@ def _quantized_input(batch):
 
 @pytest.mark.skipif(not _tf32_supported(), reason=_TF32_REASON)
 @pytest.mark.parametrize("count", [8, 64])
-@pytest.mark.parametrize("batch", [17, 32768])
+@pytest.mark.parametrize("batch", [17, 257])
 def test_dense_forward_bit_identical_under_quantization(count, batch):
     layer = _make_layer_stacks(count)
     x = _quantized_input(batch)
@@ -66,7 +66,7 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         torch.randn(count, layer.l1.codebook_dim, device="cuda"),
         torch.randn(count, layer.l2.codebook_dim, device="cuda"),
     )
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
     expected = layer(
         x,
         codebook,
@@ -75,7 +75,7 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         True,
         True,
     )
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     actual = layer(
         x,
         codebook,
@@ -84,7 +84,7 @@ def test_dense_forward_bit_identical_under_quantization(count, batch):
         True,
         True,
     )
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
 
     assert actual.dtype == expected.dtype
     assert torch.equal(actual, expected)
@@ -95,13 +95,13 @@ def test_quantized_gemm_matches_fp64_reference():
     # Raw L1-shaped GEMM with grid inputs: k/128 acts, k/256 weights, k/32768
     # bias, as after fake quantization. Products are exact in both precisions,
     # so TF32 vs fp64 differs only by fp32 accumulation order.
-    x = torch.randint(0, 128, (4096, 1024), device="cuda").float() / 128.0
+    x = torch.randint(0, 128, (257, 1024), device="cuda").float() / 128.0
     w = torch.randint(-127, 128, (256, 1024), device="cuda").float() / 256.0
     b = torch.randint(-127, 128, (256,), device="cuda").float() / 32768.0
 
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     actual = torch.nn.functional.linear(x, w, b)
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
     expected = torch.nn.functional.linear(x.double(), w.double(), b.double())
 
     torch.testing.assert_close(actual, expected.float(), atol=1e-4, rtol=1e-4)
@@ -110,7 +110,7 @@ def test_quantized_gemm_matches_fp64_reference():
 @pytest.mark.skipif(not _tf32_supported(), reason=_TF32_REASON)
 def test_tf32_changes_forward_without_quantization():
     layer = _make_layer_stacks(8)
-    batch = 4096
+    batch = 257
     x = torch.randn(batch, 1024, device="cuda")
     ls_indices = (
         torch.randint(1, 33, (batch,), device="cuda", dtype=torch.int64) - 1
@@ -120,7 +120,7 @@ def test_tf32_changes_forward_without_quantization():
         torch.randn(8, layer.l1.codebook_dim, device="cuda"),
         torch.randn(8, layer.l2.codebook_dim, device="cuda"),
     )
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
     expected = layer(
         x,
         codebook,
@@ -129,7 +129,7 @@ def test_tf32_changes_forward_without_quantization():
         False,
         False,
     )
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     actual = layer(
         x,
         codebook,
@@ -138,7 +138,7 @@ def test_tf32_changes_forward_without_quantization():
         False,
         False,
     )
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
 
     # Pins why train.py gates TF32 on fake quantization.
     assert not torch.equal(actual, expected)

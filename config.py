@@ -11,6 +11,7 @@ from tyro.conf import (
 
 from data_loader.config import DataloaderIOConfig, DataloaderSkipConfig
 from model.config import NNUEConfig
+from runtime import MatmulPrecision
 
 
 @dataclass(kw_only=True)
@@ -63,6 +64,10 @@ class TrainingConfig:
 
     accelerator: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     """Hardware accelerator. 'auto' picks cuda > mps > cpu in order of availability."""
+
+    matmul_precision: MatmulPrecision = "auto"
+    """Dense matmul precision; auto uses high for quantized CUDA, highest otherwise.
+    Routing and expert generation always use highest."""
 
     compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
     """Which backend to use for torch.compile. inductor works well with larger nets, cudagraphs with smaller nets."""

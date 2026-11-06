@@ -26,6 +26,33 @@ shared biases initialize to zero. Bottleneck norms remain unchanged. FT
 forward weights are rounded without clipping; downstream generated weights
 retain their existing forward clamp.
 
+Training, serialization and crosscheck share device resolution and a dense
+matmul precision policy. `--device=auto` on export/crosscheck follows the
+checkpoint backend when recorded, otherwise CUDA, MPS, then CPU. Numeric
+device aliases select visible CUDA ordinals; explicit unavailable devices
+fail. Training uses `--accelerator`/`--gpus` with the same backend resolver.
+`--matmul-precision=auto` follows checkpoint metadata, or uses `high` for
+quantized CUDA and `highest` otherwise. Routing and expert generation remain
+inside IEEE/highest guards. A forced `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`
+is rejected because it defeats those guards; matched nettest recipes unset it.
+
+Export moves the model before FT projection, learned LUT generation, expert
+coalescence and integer quantization; only byte packing moves integers to CPU.
+Crosscheck uses the same preparation on the selected device. Checkpoint-Q
+comparisons include export-time FT projection, explicitly announced in the
+log. Maximum checkpoint/export error defaults to zero and is enforced on
+every sampled position, rather than accepting the 99.7th percentile.
+CPU random-net CI uses cyclic expert IDs to test every bank's codec without
+a production learned-LUT sweep. CPU/CUDA learned-routing parity remains a
+separate GPU diagnostic; matching precision is not a bit-identity guarantee
+across hardware or software versions.
+
+CPU DDP tests retain native material/king contexts, two-rank synchronization,
+validation and checkpointing, using test-only four-expert, eight-dimensional
+routers and rank-four adapters. GPU kernel cases use representative shapes
+instead of a full Cartesian sweep. No production architecture defaults are
+reduced for testing.
+
 FC0 scale is 256; FC1 and output scales are 128. Both bias-free FC0 differences
 (raw outputs 14−15 and 30−31) contribute equally to the skip. Float inference
 returns output + (skipA+skipB)/2. Integer inference uses

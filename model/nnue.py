@@ -252,6 +252,8 @@ class NNUE(nn.Module):
         self.loss_metrics["test_loss_epoch"].reset()
 
     def on_save_checkpoint(self, checkpoint):
+        if hasattr(self, "runtime_metadata"):
+            checkpoint["runtime"] = self.runtime_metadata
         self.optimizer_wrapper.on_save_checkpoint(self, checkpoint)
         self.lambda_scheduler.on_save_checkpoint(checkpoint)
 

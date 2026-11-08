@@ -68,7 +68,7 @@ def _fake_quantize_weights(value: torch.Tensor, weight_scale: float) -> torch.Te
 @dataclass
 class QuantizationConfig:
     nnue2score: float = 600.0
-    weight_scale_l1: float = 256.0
+    weight_scale_l1: float = 512.0
     weight_scale_l2: float = 128.0
     weight_scale_l_out: float = 128
     weight_scale_out: float = 16.0
@@ -162,7 +162,7 @@ class QuantizationManager:
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
         multiplier_int = int(self.config.nnue2score * self.config.weight_scale_out)
         denominator_int = int(
-            self.config.hidden_quantized_one * self.config.weight_scale_l_out * 2.0
+            self.config.hidden_quantized_one * self.config.weight_scale_l1
         )
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)

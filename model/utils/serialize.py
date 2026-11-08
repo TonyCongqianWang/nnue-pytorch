@@ -264,6 +264,7 @@ class NNUEWriter:
             model.router.num_fc0_experts,
             model.router.num_weight_experts,
         )
+        router_hash ^= int(model.quantization.config.weight_scale_l1) ^ 256
         net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2) ^ router_hash
         self.int32(net_hash)  # halfkp network hash
         encoded_description = description.encode("utf-8")
@@ -398,6 +399,7 @@ class NNUEReader:
             self.model.router.num_fc0_experts,
             self.model.router.num_weight_experts,
         )
+        router_hash ^= int(self.model.quantization.config.weight_scale_l1) ^ 256
         expected_hash = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ router_hash
         if header_hash != expected_hash:
             raise ValueError(f"Expected hash {expected_hash:x}, got {header_hash:x}")

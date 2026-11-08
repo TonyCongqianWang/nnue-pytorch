@@ -88,11 +88,11 @@ Tests are organized by current behavior (`test_moe_architecture.py`,
 version numbers. DDP tests invoke `train.py` directly, without a model factory
 substitution.
 
-FC0 scale is 256; FC1 and output scales are 128. Both bias-free FC0 differences
+FC0 scale is 512; FC1 and output scales are 128. Both bias-free FC0 differences
 (raw outputs 14−15 and 30−31) contribute equally to the skip. Float inference
 returns output + (skipA+skipB)/2. Integer inference uses
-`merged = trunc((4*output + skipA + skipB)/2)`, then
-`trunc(merged*9600/32768)`. Stockfish evaluation subsequently divides by 16.
+`merged = trunc((8*output + skipA + skipB)/2)`, then
+`trunc(merged*9600/65536)`. Stockfish evaluation subsequently divides by 16.
 
 ## Routing context
 

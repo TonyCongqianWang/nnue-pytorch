@@ -191,7 +191,7 @@ def test_full_width_projection_and_bias_free_skip():
 
 
 @pytest.mark.parametrize(
-    "output,sa,sb", [(1, -3, 0), (-2, 1, 0), (3, 2, 3), (-1, -2, -3)]
+    "output,sa,sb", [(1, -3, 0), (-2, 1, 0), (3, 2, 3), (-1, -2, -3), (2, 20, 6)]
 )
 def test_common_scale_rounding(output, sa, sb):
     s = make_stacks()
@@ -200,15 +200,14 @@ def test_common_scale_rounding(output, sa, sb):
         layer.coalesced_bias.zero_()
     s.output.coalesced_bias.fill_(output / 16384)
     w = s.l1.coalesced_weight.reshape(2, 4, 4)
-    w[:, 0, 0] = sa / 256
-    w[:, 2, 0] = sb / 256
+    w[:, 0, 0] = sa / 512
+    w[:, 2, 0] = sb / 512
     s.l1.coalesced_bias.uniform_(-1, 1)
     out = s(
         torch.tensor([[1 / 128, 0, 0, 0]]), None, torch.tensor([0]), torch.tensor([2])
     )
-    expected = s.quantization.fake_quantize_output(
-        torch.tensor([[int((4 * output + sa + sb) / 2) / 32768]])
-    )
+    combined = int((8 * output + sa + sb) / 2)
+    expected = torch.tensor([[int(combined * 9600 / 65536) / 9600]])
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 

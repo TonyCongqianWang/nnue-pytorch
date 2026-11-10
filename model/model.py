@@ -29,7 +29,6 @@ class NNUEModel(nn.Module):
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = config.moe_tail_experts
-        self.tail_mean_balance_cost = config.moe_tail_mean_balance_cost
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
@@ -40,7 +39,8 @@ class NNUEModel(nn.Module):
             num_weight_experts=config.moe_tail_experts,
             fc0_dim=config.moe_fc0_codebook_dim,
             dim=config.moe_tail_codebook_dim,
-            balance_cost=config.moe_weight_balance_cost,
+            fc0_balance_kl_cost=config.moe_fc0_balance_kl_cost,
+            tail_balance_kl_cost=config.moe_tail_balance_kl_cost,
             diversity_cost=config.moe_weight_diversity_cost,
             temperature=config.moe_weight_temperature,
         )
@@ -150,7 +150,6 @@ class NNUEModel(nn.Module):
             c_them,
             fake_quantize=fake_quantize_weights,
             mix_experts=mix_experts,
-            tail_mean_cost=self.tail_mean_balance_cost,
         )
         self.moe_loss = moe_loss
         self.commit_loss = commit_loss

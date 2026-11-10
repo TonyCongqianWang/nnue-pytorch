@@ -166,7 +166,8 @@ class MoERouter(nn.Module):
         dim=CODEBOOK_DIM,
         material_states=NUM_MATERIAL_STATES,
         commitment_cost=0.005,
-        balance_cost=0.001,
+        fc0_balance_kl_cost=0.001,
+        tail_balance_kl_cost=0.001,
         temperature=0.2,
         diversity_cost=0.01,
         reseed_dead_experts=True,
@@ -186,7 +187,11 @@ class MoERouter(nn.Module):
         )
         self.material_states = material_states
         self.num_contexts = material_states**2 * KING_STATES
-        self.commitment_cost, self.balance_cost = commitment_cost, balance_cost
+        self.commitment_cost = commitment_cost
+        self.balance_kl_costs = {
+            "fc0": fc0_balance_kl_cost,
+            "tail": tail_balance_kl_cost,
+        }
         self.temperature, self.diversity_cost = temperature, diversity_cost
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
@@ -293,7 +298,6 @@ class MoERouter(nn.Module):
         soft_ema: torch.Tensor | None = None,
         *,
         top_k: int = 1,
-        mean_balance: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with ieee_matmul_precision():
             z_sq = torch.sum(z**2, dim=-1, keepdim=True)
@@ -324,10 +328,10 @@ class MoERouter(nn.Module):
             probs = F.softmax(scaled_neg_dist, dim=-1)
             prob_mean = probs.mean(dim=0)
 
-            if mean_balance:
-                balance_loss = -(k_exp * prob_mean).clamp_min(1e-8).log().mean()
-            else:
-                balance_loss = k_exp * torch.sum(f * prob_mean) - 1.0
+            # The forward value measures hard wins; soft probabilities supply
+            # the gradient. Mix in 5% uniform traffic to bound the slope at zero.
+            traffic = f + (prob_mean - prob_mean.detach())
+            balance_loss = -(0.95 * k_exp * traffic + 0.05).log().mean()
             if traffic_ema is not None and soft_ema is not None:
                 with torch.no_grad():
                     traffic_ema.lerp_(f, 1.0 - self.ema_decay)
@@ -484,14 +488,12 @@ class MoERouter(nn.Module):
         fake_quantize=False,
         *,
         mix_experts=False,
-        tail_mean_cost=0.0,
     ):
         if self.training:
             ids, parts = [], []
             for name, _, hard, soft, cb in self.banks():
                 context = c_fc0 if name == "fc0" else c_tail
                 z = self.get_context_vector(context, name)
-                mean_balance = name == "tail" and tail_mean_cost > 0
                 top_k = (2 if name == "fc0" else 4) if mix_experts else 1
                 index, _, commit, balance = self.quantize(
                     z,
@@ -501,7 +503,6 @@ class MoERouter(nn.Module):
                     hard,
                     soft,
                     top_k=top_k,
-                    mean_balance=mean_balance,
                 )
                 if mix_experts:
                     with torch.no_grad():
@@ -512,9 +513,7 @@ class MoERouter(nn.Module):
                 parts.extend(
                     [
                         commit * 0.5,
-                        balance
-                        * (tail_mean_cost if mean_balance else self.balance_cost)
-                        * 0.5,
+                        balance * self.balance_kl_costs[name] * 0.5,
                         codebook_diversity_loss(cb) * self.diversity_cost * 0.5,
                     ]
                 )

@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.nn.functional as F
 
 from model.modules.router import (
     MOE_BANKS,
@@ -8,35 +7,20 @@ from model.modules.router import (
 )
 
 
-def test_balance_loss_bounds():
-    """Verify load balancing loss is 0.0 for uniform distribution and K - 1 for collapsed distribution."""
-    num_experts = 32
-
-    # 1. Uniform case:
-    # 32 batch items, each routed to a distinct expert with uniform soft probability
-    distances = torch.zeros(32, num_experts)
-    for i in range(num_experts):
-        distances[i, i] = -10.0  # expert i is closest
-    # Softmax probabilities will be concentrated on i, so dispatch fraction f_i = 1/32
-    # and soft prob P_i = 1/32
-    # Excess balance loss = K * sum_j(f_j * P_j) - 1.0 = 32 * 32 * (1/32) * (1/32) - 1.0 = 0.0
-    probs = F.softmax(-distances, dim=-1)
-    indices = torch.arange(num_experts)
-    dispatch_mask = F.one_hot(indices, num_classes=num_experts).float()
-    f = dispatch_mask.mean(dim=0)
-    P = probs.mean(dim=0)
-    balance_loss = num_experts * torch.sum(f * P) - 1.0
-    assert torch.isclose(balance_loss, torch.tensor(0.0), atol=1e-3)
-
-    # 2. Collapsed case: all items routed to expert 0
-    collapsed_indices = torch.zeros(32, dtype=torch.long)
-    collapsed_mask = F.one_hot(collapsed_indices, num_classes=num_experts).float()
-    f_collapsed = collapsed_mask.mean(dim=0)
-    P_collapsed = collapsed_mask.mean(dim=0)  # 100% prob on 0
-    balance_loss_collapsed = num_experts * torch.sum(f_collapsed * P_collapsed) - 1.0
-    assert torch.isclose(
-        balance_loss_collapsed, torch.tensor(float(num_experts - 1)), atol=1e-3
-    )
+def test_hard_traffic_kl_counts_wins_even_with_nearly_uniform_soft_mass():
+    router = MoERouter(material_states=2, fc0_dim=4, dim=4)
+    codebook = torch.eye(4)
+    balanced = codebook * 0.001
+    collapsed = balanced[:1].repeat(4, 1).requires_grad_()
+    _, _, _, uniform_loss = router.quantize(balanced, codebook, 4)
+    _, _, _, collapsed_loss = router.quantize(collapsed, codebook, 4)
+    torch.testing.assert_close(uniform_loss, torch.zeros(()))
+    expected = -torch.tensor([3.85, 0.05, 0.05, 0.05]).log().mean()
+    torch.testing.assert_close(collapsed_loss, expected)
+    (gradient,) = torch.autograd.grad(collapsed_loss, collapsed)
+    assert torch.isfinite(gradient).all()
+    assert (gradient[:, 0] > 0).all()
+    assert (gradient[:, 1:] < 0).all()
 
 
 @pytest.mark.parametrize("name", MOE_BANKS)
@@ -129,15 +113,20 @@ def test_ddp_reseeding_synchronizes_both_banks(monkeypatch):
         )
 
 
-def test_mixed_routes_preserve_winners_and_tail_mean_balance():
+def test_mixed_routes_preserve_winners_and_hard_traffic_kl():
     r = MoERouter(
-        num_fc0_experts=2, num_weight_experts=4, material_states=2, fc0_dim=4, dim=4
+        num_fc0_experts=2,
+        num_weight_experts=4,
+        material_states=2,
+        fc0_dim=4,
+        dim=4,
+        tail_balance_kl_cost=0.002,
     )
     c = torch.tensor([0, 1, 3])
     fc0, tail, *_ = r(c, c)
     first = r.loss_component_sum.clone()
     r.loss_component_sum.zero_()
-    fc0_k, tail_k, *_ = r(c, c, mix_experts=True, tail_mean_cost=0.002)
+    fc0_k, tail_k, *_ = r(c, c, mix_experts=True)
     assert torch.equal(fc0, fc0_k[:, 0])
     assert torch.equal(tail, tail_k[:, 0])
     assert torch.equal(tail_k.sort(dim=1).values, torch.arange(4).expand(3, -1))
@@ -145,11 +134,9 @@ def test_mixed_routes_preserve_winners_and_tail_mean_balance():
     assert int(r.runner_up_counts_tail.sum()) == 9
 
     torch.testing.assert_close(r.loss_component_sum[:3], first[:3])
-    vectors = r.get_context_vector(c, "tail")
-    distances = (vectors[:, None] - r.codebook[1]).square().sum(-1)
-    mean = (-distances / r.temperature).softmax(-1).mean(0)
-    torch.testing.assert_close(
-        r.loss_component_sum[4], -0.001 * (4 * mean).log().mean()
-    )
+    for index, ids, count, cost in [(1, fc0, 2, 0.001), (4, tail, 4, 0.002)]:
+        mean = torch.bincount(ids, minlength=count).float() / ids.numel()
+        expected = -0.5 * cost * (0.95 * count * mean + 0.05).log().mean()
+        torch.testing.assert_close(r.loss_component_sum[index], expected)
     r.eval()
     assert r(c, c, mix_experts=True)[1].shape == (3,)

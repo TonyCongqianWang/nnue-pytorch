@@ -33,13 +33,13 @@ class ModelConfig(LayerStacksConfig):
     moe_tail_rank: int = ADAPTER_RANK
     """FC1/output hypernetwork adapter bottleneck width."""
 
-    moe_tail_mean_balance_cost: float = 0.0
-    """If positive, replace tail balancing with this coefficient on KL(uniform || mean soft traffic)."""
     moe_mix_interval: int = 0
     """Apply weighted top-2 FC0 and top-4 tail training every N optimizer steps. Zero disables."""
 
-    moe_weight_balance_cost: float = 0.001
-    """Weight-router balancing coefficient."""
+    moe_fc0_balance_kl_cost: float = 0.001
+    """FC0 coefficient for KL from uniform to smoothed hard top-1 traffic."""
+    moe_tail_balance_kl_cost: float = 0.001
+    """Tail coefficient for KL from uniform to smoothed hard top-1 traffic."""
     moe_weight_diversity_cost: float = 0.01
     """Weight-router codebook diversity coefficient."""
     moe_weight_temperature: float = 0.2
@@ -48,9 +48,16 @@ class ModelConfig(LayerStacksConfig):
     def __post_init__(self):
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
             raise ValueError("MoE expert counts must be FC0 2–64 and tail 2–256")
-        if self.moe_tail_mean_balance_cost < 0 or self.moe_mix_interval < 0:
+        if (
+            min(
+                self.moe_fc0_balance_kl_cost,
+                self.moe_tail_balance_kl_cost,
+                self.moe_mix_interval,
+            )
+            < 0
+        ):
             raise ValueError(
-                "MoE mean balance cost and mixing interval must be nonnegative"
+                "MoE balance costs and mixing interval must be nonnegative"
             )
         if self.moe_mix_interval and self.moe_tail_experts < 4:
             raise ValueError("MoE mixing requires at least four tail experts")

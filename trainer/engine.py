@@ -6,6 +6,8 @@ while keeping `model.NNUE` as a plain `torch.nn.Module`.
 
 from __future__ import annotations
 
+import inspect
+import itertools
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -104,7 +106,12 @@ class SimpleTrainer:
         world_size: int,
         local_rank: int,
         checkpoint_writer: Any | None = None,
+        final_validation_multiplier: int = 1,
     ):
+        if final_validation_multiplier < 1:
+            raise ValueError("final_validation_multiplier must be >= 1")
+        self.final_validation_multiplier = final_validation_multiplier
+        self.validation_is_final = False
         self.model = model
         self.optimizer = optimizer
         self.max_epochs = max_epochs
@@ -163,9 +170,12 @@ class SimpleTrainer:
                 "gradient_as_bucket_view": True,
                 "static_graph": True,
                 "find_unused_parameters": False,
-                "forward_sync_buffers": False,
                 "bucket_cap_mb": 50,
             }
+            if "forward_sync_buffers" in inspect.signature(DDP.__init__).parameters:
+                kwargs["forward_sync_buffers"] = False
+            else:
+                kwargs["broadcast_buffers"] = False
             if self.device.type == "cuda":
                 kwargs["device_ids"] = [self.local_rank]
                 kwargs["output_device"] = self.local_rank
@@ -205,25 +215,35 @@ class SimpleTrainer:
                 black_indices,
                 _outcome,
                 _score,
-                layer_stack_indices,
+                context_us,
+                context_them,
             ) = batch
-            quantize = self.global_step >= self.model.config.fake_quant_warmup_steps
+            unwrapped = _unwrap_module(self.model)
             scorenet = self._ddp_model(
                 us,
                 them,
                 white_indices,
                 black_indices,
-                layer_stack_indices,
-                self.model.config.use_fake_act_quantization and quantize,
-                self.model.config.use_fake_weight_quantization and quantize,
+                context_us,
+                context_them,
+                *unwrapped.forward_options(self.global_step),
             )
-            loss = _unwrap_module(self.model).compute_loss_with_scorenet(
-                scorenet, batch, self.global_step
+            total_loss, sf_loss, moe_loss, commit_loss, balance_loss = (
+                unwrapped.compute_loss_with_scorenet(
+                    scorenet, batch, self.global_step, return_details=True
+                )
             )
-            _unwrap_module(self.model).loss_metrics["train_loss_epoch"].update(
-                loss.detach()
-            )
-            outputs = {"loss": loss, "train_loss": loss.detach()}
+            unwrapped.loss_metrics["train_loss_epoch"].update(total_loss.detach())
+            unwrapped.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
+            unwrapped.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
+            outputs = {
+                "loss": total_loss,
+                "train_loss": total_loss.detach(),
+                "sf_loss": sf_loss.detach(),
+                "moe_loss": moe_loss.detach(),
+                "commit_loss": commit_loss.detach(),
+                "balance_loss": balance_loss.detach(),
+            }
         else:
             outputs = self.model.train_step(batch, self.current_epoch, self.global_step)
         return outputs
@@ -308,11 +328,16 @@ class SimpleTrainer:
             self.current_epoch = epoch
             self._train_epoch(train_loader)
 
-            if (
-                val_loader is not None
-                and (self.current_epoch + 1) % self.check_val_every_n_epoch == 0
+            final = epoch + 1 == self.max_epochs and not self.should_stop
+            if val_loader is not None and (
+                (epoch + 1) % self.check_val_every_n_epoch == 0
+                or (final and self.final_validation_multiplier > 1)
             ):
-                self.validate(val_loader)
+                self.validate(
+                    val_loader,
+                    repeats=self.final_validation_multiplier if final else 1,
+                    final=final and self.final_validation_multiplier > 1,
+                )
 
             if self.should_stop:
                 break
@@ -357,27 +382,38 @@ class SimpleTrainer:
             # Store the raw loss tensor (GPU).  Only convert to float
             # when logging is due or when a callback needs the scalar.
             self.callback_metrics["train_loss"] = outputs["train_loss"].detach()
+            if "sf_loss" in outputs:
+                self.callback_metrics["sf_loss"] = outputs["sf_loss"].detach()
+            if "moe_loss" in outputs:
+                self.callback_metrics["moe_loss"] = outputs["moe_loss"].detach()
 
             if (batch_idx + 1) % self.log_every_n_steps == 0 or (
                 batch_idx + 1
             ) == self.num_training_batches:
-                # Transfer both scalars together to avoid a separate GPU sync
-                # for lambda when logging the loss.
-                train_loss, current_lambda = torch.stack(
-                    (
-                        self.callback_metrics["train_loss"],
-                        self.model.current_lambda.mean(),
-                    )
+                keys = [
+                    key
+                    for key in ("train_loss", "sf_loss", "moe_loss")
+                    if key in self.callback_metrics
+                ]
+                current_lambda = _unwrap_module(self.model).current_lambda.mean()
+                scalars = torch.stack(
+                    [
+                        torch.as_tensor(
+                            self.callback_metrics[key], device=current_lambda.device
+                        )
+                        for key in keys
+                    ]
+                    + [current_lambda]
                 ).tolist()
-                self.callback_metrics["train_loss"] = train_loss
+                self.callback_metrics.update(zip(keys, scalars[:-1]))
                 self.callback_metrics["lr"] = sum(
                     group["lr"] for group in self.optimizer.param_groups
                 ) / len(self.optimizer.param_groups)
-                self.callback_metrics["lambda"] = current_lambda
+                self.callback_metrics["lambda"] = scalars[-1]
                 self._log_metrics(
                     {
                         key: self.callback_metrics[key]
-                        for key in ("train_loss", "lr", "lambda")
+                        for key in (*keys, "lr", "lambda")
                     },
                     step=self.global_step,
                 )
@@ -387,8 +423,41 @@ class SimpleTrainer:
         # Compute and log epoch-level training loss before the model resets it.
         train_loss_epoch = self.model.loss_metrics["train_loss_epoch"].compute().item()
         self.callback_metrics["train_loss_epoch"] = train_loss_epoch
+        epoch_metrics = {
+            "train_loss_epoch": train_loss_epoch,
+            "epoch": self.current_epoch,
+        }
+        if "train_sf_loss_epoch" in self.model.loss_metrics:
+            train_sf_loss_epoch = (
+                self.model.loss_metrics["train_sf_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+            epoch_metrics["train_sf_loss_epoch"] = train_sf_loss_epoch
+        if "train_moe_loss_epoch" in self.model.loss_metrics:
+            train_moe_loss_epoch = (
+                self.model.loss_metrics["train_moe_loss_epoch"].compute().item()
+            )
+            self.callback_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
+            epoch_metrics["train_moe_loss_epoch"] = train_moe_loss_epoch
+        from model.modules.router import MOE_LOSS_COMPONENTS
+
+        router = _unwrap_module(self.model).model.router
+        component_means = (
+            (router.loss_component_sum / router.loss_component_batches.clamp_min(1))
+            .detach()
+            .clone()
+        )
+        if self.world_size > 1:
+            # One twelve-value collective at the epoch boundary, never per step.
+            dist.all_reduce(component_means, op=dist.ReduceOp.SUM)
+            component_means /= self.world_size
+        component_means = component_means.cpu().tolist()
+        for name, value in zip(MOE_LOSS_COMPONENTS, component_means):
+            key = f"train_moe_{name}_epoch"
+            epoch_metrics[key] = value
+            self.callback_metrics[key] = value
         self._log_metrics(
-            {"train_loss_epoch": train_loss_epoch, "epoch": self.current_epoch},
+            epoch_metrics,
             step=self.global_step,
         )
 
@@ -404,12 +473,15 @@ class SimpleTrainer:
     # ------------------------------------------------------------------
     # Validation loop
     # ------------------------------------------------------------------
-    def validate(self, val_loader):
+    def validate(self, val_loader, *, repeats=1, final=False):
         if val_loader is None:
             return
 
+        if repeats < 1:
+            raise ValueError("validation repeats must be >= 1")
+        self.validation_is_final = final
         self.num_val_batches = (
-            len(val_loader) if hasattr(val_loader, "__len__") else None
+            len(val_loader) * repeats if hasattr(val_loader, "__len__") else None
         )
 
         self._call_callbacks("on_validation_start", self)
@@ -423,7 +495,12 @@ class SimpleTrainer:
         num_val_batches = 0
 
         with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
+            # Each iteration advances the persistent native stream; never cache
+            # or replay batches to obtain the longer final validation sample.
+            batches = itertools.chain.from_iterable(
+                iter(val_loader) for _ in range(repeats)
+            )
+            for batch_idx, batch in enumerate(batches):
                 batch = self._move_batch_to_device(batch)
 
                 self._call_callbacks(

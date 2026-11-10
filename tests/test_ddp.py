@@ -23,6 +23,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import NNUE, NNUEConfig
+from model.modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE
 from trainer.engine import SimpleTrainer, init_distributed
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -68,7 +69,7 @@ def _data_loader_built() -> bool:
     return any(glob.glob(p, recursive=True) for p in patterns)
 
 
-def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active, stacks):
+def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active):
     """Batches in the layout of the native data loader, with random contents."""
     gen = torch.Generator().manual_seed(seed)
     num_active = min(max_active, 24)
@@ -88,8 +89,11 @@ def _synthetic_batches(seed, num_batches, batch_size, num_inputs, max_active, st
             indices.append(idx)
         outcome = torch.randint(0, 3, (batch_size, 1), generator=gen).float() / 2
         score = torch.randn(batch_size, 1, generator=gen) * 300
-        layer_stack_index = torch.randint(0, stacks, (batch_size,), generator=gen)
-        batches.append((us, 1.0 - us, *indices, outcome, score, layer_stack_index))
+        # The two router banks need asymmetric index ranges: the fc0 bank is
+        # pair-composed, the tail bank king-composed.
+        c_us = torch.randint(0, FC0_ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
+        c_them = torch.randint(0, ROUTER_TABLE_SIZE, (batch_size,), generator=gen)
+        batches.append((us, 1.0 - us, *indices, outcome, score, c_us, c_them))
     return batches
 
 
@@ -119,7 +123,13 @@ def _sync_worker(rank, world_size, port, root_dir, num_batches):
     try:
         torch.manual_seed(0)
         config = NNUEConfig()
-        config.model_config.L1 = 128
+        config.model_config.L1 = 32
+        config.model_config.moe_fc0_experts = 4
+        config.model_config.moe_tail_experts = 4
+        config.model_config.moe_fc0_codebook_dim = 8
+        config.model_config.moe_tail_codebook_dim = 8
+        config.model_config.moe_fc0_rank = 4
+        config.model_config.moe_tail_rank = 4
         # RangerLite hands back its lookahead weights at the end of an epoch,
         # which equal the initial ones until its first merge (5 steps)
         config.optimizer_config.optimizer_name = "adamw"
@@ -157,12 +167,7 @@ def _sync_worker(rank, world_size, port, root_dir, num_batches):
         ft = nnue.model.input
         # Every rank trains on its own data, as with the sharded data loader
         batches = _synthetic_batches(
-            1000 + rank,
-            num_batches,
-            64,
-            ft.NUM_INPUTS,
-            ft.MAX_ACTIVE_FEATURES,
-            nnue.model.num_ls_buckets,
+            1000 + rank, num_batches, 64, ft.NUM_INPUTS, ft.MAX_ACTIVE_FEATURES
         )
         scores = _gather(torch.cat([b[5] for b in batches]))
         assert not torch.equal(scores[0], scores[1]), "ranks got the same data"
@@ -224,7 +229,13 @@ def test_train_script_two_ranks(tmp_path):
         "train.py",
         str(data),
         "--accelerator=cpu",
-        "--l1=128",
+        "--l1=32",
+        "--moe-fc0-experts=4",
+        "--moe-tail-experts=4",
+        "--moe-fc0-codebook-dim=8",
+        "--moe-tail-codebook-dim=8",
+        "--moe-fc0-rank=4",
+        "--moe-tail-rank=4",
         f"--batch-size={batch_size}",
         f"--epoch-size={epoch_size}",
         "--validation-size=512",

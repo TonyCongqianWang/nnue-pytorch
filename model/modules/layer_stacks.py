@@ -1,193 +1,163 @@
-from collections.abc import Generator
-
 import torch
 from torch import nn
 
-from ..quantize import QuantizationManager
-from .config import LayerStacksConfig
-from .stack_table import table_from_str
-from .stacked_linear import FactorizedStackedLinear, StackedLinear
-
-# Number of states of each layer-stack key (see LayerStacksConfig.ls_keys)
-STACK_KEY_STATES = {"piececount": 8, "queen": 4, "pawnhalf": 3, "manyoffi": 2}
-
-
-def stack_keys(ls_keys: str) -> list[str]:
-    """The layer-stack keys (--ls-keys) in index order."""
-    keys = [k for k in ls_keys.split(":") if k]
-    for k in keys:
-        assert k in STACK_KEY_STATES, (
-            f"unknown layer-stack key {k!r} (known: {sorted(STACK_KEY_STATES)})"
-        )
-    assert len(set(keys)) == len(keys), f"repeated layer-stack key in {keys}"
-    return keys
-
-
-def stack_count(keys: list[str]) -> int:
-    count = 1
-    for k in keys:
-        count *= STACK_KEY_STATES[k]
-    return count
+from .moe_linear import ExpertParameters, MoeLinear
+from .router import (
+    ADAPTER_RANK,
+    CODEBOOK_DIM,
+    FC0_ADAPTER_RANK,
+    FC0_CODEBOOK_DIM,
+    NUM_FC0_EXPERTS,
+)
 
 
 class LayerStacks(nn.Module):
+    """One full-width expert per layer; FC1 and output share a tail ID."""
+
     def __init__(
-        self, count: int, config: LayerStacksConfig, quantization: QuantizationManager
+        self,
+        count,
+        config,
+        quantization,
+        rank=ADAPTER_RANK,
+        codebook_dim=CODEBOOK_DIM,
+        fc0_count=NUM_FC0_EXPERTS,
+        fc0_rank=FC0_ADAPTER_RANK,
+        fc0_dim=FC0_CODEBOOK_DIM,
     ):
         super().__init__()
-
-        raw_count = count
-        if config.ls_remap_table:
-            remap = torch.tensor(table_from_str(config.ls_remap_table, raw_count))
-            assert bool((remap[remap] == remap).all()), (
-                "a fallback stack must not be remapped itself"
-            )
-        else:
-            remap = torch.arange(raw_count)
-        live = torch.nonzero(remap == torch.arange(raw_count)).flatten()
-        stored = torch.full((raw_count,), -1, dtype=torch.long)
-        stored[live] = torch.arange(len(live))
-        count = len(live)
-
-        self.raw_count = raw_count
-        self.count = count
-        self.L1 = config.L1
-        self.L2 = config.L2
-        self.L3 = config.L3
-        self.quantization = quantization
-
-        # Factorizer only for the first layer because later
-        # there's a non-linearity and factorization breaks.
-        # This is by design. The weights in the further layers should be
-        # able to diverge a lot.
-        self.l1 = FactorizedStackedLinear(
-            2 * self.L1 // 2, self.L2, raw_count, quantization, "ls_l1"
+        if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
+            raise ValueError("MoE8 requires equal even hidden widths, at least four")
+        self.count, self.quantization = count, quantization
+        self.l1 = MoeLinear(
+            config.L1,
+            config.L2,
+            fc0_count,
+            rank=fc0_rank,
+            codebook_dim=fc0_dim,
+            quantization=quantization,
+            layer_key="ls_l1",
+            dual_bias=True,
+            factorized=True,
         )
-        self.l2 = StackedLinear(self.L2 * 2, self.L3, raw_count, quantization, "ls_l2")
-
-        self.output = StackedLinear(
-            self.L2 * 2 + self.L3 * 2, 1, raw_count, quantization, "ls_output"
+        self.l2 = MoeLinear(
+            2 * config.L2,
+            config.L3,
+            count,
+            rank=rank,
+            codebook_dim=codebook_dim,
+            quantization=quantization,
+            layer_key="ls_l2",
+            dual_bias=True,
         )
-        if count != raw_count:
-            for layer in (self.l1, self.l2, self.output):
-                layer.keep_first_stacks(count)
+        self.output = MoeLinear(
+            2 * (config.L2 + config.L3),
+            1,
+            count,
+            rank=rank,
+            codebook_dim=codebook_dim,
+            quantization=quantization,
+            layer_key="ls_output",
+        )
 
-        with torch.no_grad():
-            self.output.linear.bias.zero_()
-
-        factors = [f for f in config.ls_factors.split(":") if f]
-        if factors:
-            maps = self.factor_maps(raw_count, factors, stack_keys(config.ls_keys))
-            self.set_group_factors([m[live] for m in maps])
-
-        self.register_buffer("stack_remap", stored[remap], persistent=False)
-        self.register_buffer("stack_fallback", remap.clone())
+    def dense_layers(self):
+        return self.l1, self.l2, self.output
 
     def forward(
         self,
-        x: torch.Tensor,
-        ls_indices: torch.Tensor,
-        fake_quantize_acts: bool = True,
-        fake_quantize_weights: bool = True,
+        x,
+        codebook,
+        fc0,
+        tail,
+        fake_quantize_acts=True,
+        fake_quantize_weights=True,
     ):
-        l1c_ = self.l1(x, ls_indices, fake_quantize_weights)
+        cb0, cbt = (None, None) if codebook is None else codebook
 
-        # Extract the short-path skip connection before fake quantization
-        l1x_out = l1c_[:, -2].view(-1, 1) - l1c_[:, -1].view(-1, 1)
-        l1x_ = l1c_
-
-        l1_sqr = torch.pow(l1x_, 2.0)
-        if fake_quantize_acts:
-            l1_sqr = self.quantization.fake_quantize_ls_act(l1_sqr)
-
-        l1_sqr = l1_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        if fake_quantize_acts:
-            l1x_ = self.quantization.fake_quantize_ls_act(l1x_)
-
-        l1x_ = torch.cat([l1_sqr, l1x_], dim=1)
-        l1x_ = self.quantization.clip_ls_act(l1x_)
-
-        l2c_ = self.l2(l1x_, ls_indices, fake_quantize_weights)
-        l2x_ = l2c_
-
-        l2_sqr = torch.pow(l2x_, 2.0)
-        if fake_quantize_acts:
-            l2_sqr = self.quantization.fake_quantize_ls_act(l2_sqr)
-
-        l2_sqr = l2_sqr * (self.quantization.sqr_crelu_correction_factor)
-
-        if fake_quantize_acts:
-            l2x_ = self.quantization.fake_quantize_ls_act(l2x_)
-
-        l2x_ = torch.cat([l2_sqr, l2x_], dim=1)
-        l2x_ = self.quantization.clip_ls_act(l2x_)
-
-        l3_input = torch.cat([l1x_, l2x_], dim=1)
-
-        l3c_ = self.output(l3_input, ls_indices, fake_quantize_weights)
-
-        if fake_quantize_acts:
-            l1x_out = self.quantization.fake_quantize_skip_act(l1x_out)
-
-        l3x_ = l3c_ + l1x_out
-        if fake_quantize_acts:
-            l3x_ = self.quantization.fake_quantize_output(l3x_)
-
-        assert l3x_.shape[1] == 1, (
-            f"Expected output shape (batch_size, 1), got {l3x_.shape}"
-        )
-        return l3x_
-
-    @staticmethod
-    def factor_maps(
-        count: int, names: list[str], keys: list[str]
-    ) -> list[torch.Tensor]:
-        """Group id of every stack under each named factor: a key, or keys joined by '+' (e.g.
-        "piececount+queen"). The stack index is the mixed-radix index of the keys."""
-        assert count == stack_count(keys), (count, keys)
-        rest = torch.arange(count)
-        values = {}
-        for k in reversed(keys):
-            values[k] = rest % STACK_KEY_STATES[k]
-            rest = rest // STACK_KEY_STATES[k]
-        maps = []
-        for name in names:
-            group = torch.zeros(count, dtype=torch.long)
-            for k in name.split("+"):
-                assert k in values, (
-                    f"layer-stack factor {name!r} uses {k!r}, not in --ls-keys {keys}"
+        def hidden(raw, bias):
+            sq, lin = bias.chunk(2, dim=-1)
+            sq = (raw + sq).square()
+            lin = raw + lin
+            if fake_quantize_acts:
+                sq = self.quantization.fake_quantize_ls_act(sq)
+                lin = self.quantization.fake_quantize_ls_act(lin)
+            return self.quantization.clip_ls_act(
+                torch.cat(
+                    [sq * self.quantization.sqr_crelu_correction_factor, lin], dim=-1
                 )
-                group = group * STACK_KEY_STATES[k] + values[k]
-            maps.append(group)
-        return maps
+            )
 
-    def set_group_factors(self, maps: list[torch.Tensor]) -> None:
-        for layer in (self.l1, self.l2, self.output):
-            layer.set_group_factors(maps)
-
-    def group_factor_params(self, biases: bool) -> list:
-        out = []
-        for layer in (self.l1, self.l2, self.output):
-            out += list(layer.group_factor_b if biases else layer.group_factor_w)
-        return out
+        raw, bias = self.l1(x, cb0, fc0, fake_quantize_weights)
+        a, b = raw.chunk(2, dim=-1)
+        sa, sb = a[..., -2:-1] - a[..., -1:], b[..., -2:-1] - b[..., -1:]
+        h1 = hidden(raw, bias)
+        mixing = fc0.ndim == 2
+        if mixing:
+            h1 = 0.75 * h1[:, 0] + 0.25 * h1[:, 1]
+            sa = 0.75 * sa[:, 0] + 0.25 * sa[:, 1]
+            sb = 0.75 * sb[:, 0] + 0.25 * sb[:, 1]
+        raw, bias = self.l2(h1, cbt, tail, fake_quantize_weights)
+        h2 = hidden(raw, bias)
+        if mixing:
+            h1 = h1.unsqueeze(1).expand(-1, h2.size(1), -1)
+        output, bias = self.output(
+            torch.cat([h1, h2], dim=-1), cbt, tail, fake_quantize_weights
+        )
+        output = output + bias
+        if mixing:
+            top, second, third, fourth = output.unbind(1)
+            output = 0.5 * top + 0.25 * second + 0.125 * (third + fourth)
+        value = output + (sa + sb) * 0.5
+        if fake_quantize_acts and not mixing:
+            scale = self.quantization.weight_scales_dict["ls_l1_bias"]
+            hard = (
+                torch.trunc(
+                    (
+                        2 * torch.round(output * scale)
+                        + torch.round(sa * scale)
+                        + torch.round(sb * scale)
+                    )
+                    * 0.5
+                )
+                / scale
+            )
+            value = value + (hard - value).detach()
+            value = self.quantization.fake_quantize_output(value)
+        return value
 
     @torch.no_grad()
-    def zero_virtual_weights(self) -> None:
-        self.l1.zero_virtual_weights()
+    def get_coalesced_layer_stacks(self, codebook=None, orders=None):
+        cb0, cbt = (None, None) if codebook is None else codebook
+        if orders is None:
+            orders = range(self.l1.count), range(self.count)
+        for layers, cbs, order in [
+            ((self.l1,), (cb0,), orders[0]),
+            ((self.l2, self.output), (cbt, cbt), orders[1]),
+        ]:
+            params = [
+                layer.get_all_weights_and_biases(cb) for layer, cb in zip(layers, cbs)
+            ]
+            for index in order:
+                result = []
+                for layer, (weights, biases) in zip(layers, params):
+                    weight = weights[
+                        index * layer.out_features : (index + 1) * layer.out_features
+                    ]
+                    weight = self.quantization.clip_ls_weight(weight, layer.layer_key)
+                    result.append(
+                        ExpertParameters(
+                            weight,
+                            biases[
+                                index * layer.bias_features : (index + 1)
+                                * layer.bias_features
+                            ],
+                        )
+                    )
+                yield tuple(result)
 
     @torch.no_grad()
-    def get_coalesced_layer_stacks(
-        self,
-    ) -> Generator[tuple[nn.Linear, nn.Linear, nn.Linear], None, None]:
-        # During training the buckets are represented by a single, wider, layer.
-        # This representation needs to be transformed into individual layers
-        # for the serializer, because the buckets are interpreted as separate layers.
-        for j in range(self.count):
-            yield self.l1.at_index(j), self.l2.at_index(j), self.output.at_index(j)
-
-    @torch.no_grad()
-    def coalesce_layer_stacks_inplace(self) -> None:
-        self.l1.coalesce_weights()
-        self.l2.coalesce_group_factors()
-        self.output.coalesce_group_factors()
+    def coalesce_layer_stacks_inplace(self, codebook):
+        for layer, cb in zip(
+            self.dense_layers(), (codebook[0], codebook[1], codebook[1])
+        ):
+            layer.coalesce_weights(cb)

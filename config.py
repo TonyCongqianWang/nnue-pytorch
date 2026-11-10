@@ -11,6 +11,7 @@ from tyro.conf import (
 
 from data_loader.config import DataloaderIOConfig, DataloaderSkipConfig
 from model.config import NNUEConfig
+from runtime import MatmulPrecision
 
 
 @dataclass(kw_only=True)
@@ -23,6 +24,9 @@ class TrainingConfig:
 
     validation_size: int = 0
     """Number of positions in validation epoch (<= 0 disables validation)."""
+
+    final_validation_multiplier: int = 1
+    """Validation work multiplier at the completed final epoch (fresh stream batches)."""
 
     check_val_every_n_epoch: int = 1
     """Number of epochs between validation (has to be >= 1)."""
@@ -61,6 +65,10 @@ class TrainingConfig:
     accelerator: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     """Hardware accelerator. 'auto' picks cuda > mps > cpu in order of availability."""
 
+    matmul_precision: MatmulPrecision = "auto"
+    """Dense matmul precision; auto uses high for quantized CUDA, highest otherwise.
+    Routing and expert generation always use highest."""
+
     compile_backend: Literal["inductor", "cudagraphs"] = "inductor"
     """Which backend to use for torch.compile. inductor works well with larger nets, cudagraphs with smaller nets."""
 
@@ -97,6 +105,18 @@ class TrainingConfig:
     input_clipping_interval: int = 0
     """Clipping interval for input feature-transformer weights in iterations/steps. If > 0, clips every N steps instead of at the end of each epoch (default: 0, epoch-based)."""
 
+    moe_reseed_interval: int = 1024
+    """Interval in training steps for reseeding MoE experts with sustained low traffic. Default: 1024 (<= 0 disables)."""
+
+    moe_reseed_sampling_temperature: float = 0.5
+    """Sampling temperature for traffic-weighted cell splitting when reseeding dead experts (default: 0.5, lower is greedier, higher is more uniform)."""
+
+    moe_reseed_ema_decay: float = 0.998
+    """EMA decay rate for tracking recent batch usage of codebook experts (default: 0.998)."""
+
+    moe_reseed_min_relative_utilization: float = 0.064
+    """Reseeding floor as a fraction of uniform expert traffic: floor=0.064/K."""
+
     dataloader_config: OmitArgPrefixes[DataloaderSkipConfig] = field(
         default_factory=DataloaderSkipConfig
     )
@@ -119,6 +139,8 @@ class TrainingConfig:
             raise ValueError(
                 "Arguments `max_epochs`, `epoch_size` and `batch_size` must be positive."
             )
+        if self.final_validation_multiplier < 1:
+            raise ValueError("final_validation_multiplier must be >= 1")
         if self.check_val_every_n_epoch < 1:
             raise ValueError(
                 "check_val_every_n_epoch has to be >= 1, "

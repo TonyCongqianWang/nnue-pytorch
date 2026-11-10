@@ -19,6 +19,9 @@ class TestCountingExporter(unittest.TestCase):
 
         torch.manual_seed(42)
         nnue = M.NNUE(config=config)
+        # Payload size is independent of learned routes. Do not rebuild the
+        # multi-million-context production LUT for each size-only check.
+        nnue.model.router.lut_valid = True
 
         # the default path: writer.buf works as before
         writer = NNUEWriter(nnue.model, description, verbose=False)
@@ -66,6 +69,7 @@ class TestCountingExporter(unittest.TestCase):
 
         torch.manual_seed(42)
         nnue = M.NNUE(config=config)
+        nnue.model.router.lut_valid = True
         writer = NNUEWriter(nnue.model, verbose=False)
         self.assertIsInstance(writer.buf, bytearray)
         self.assertGreater(len(writer.buf), 0)

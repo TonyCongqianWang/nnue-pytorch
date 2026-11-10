@@ -1,9 +1,6 @@
 import ctypes
 from dataclasses import dataclass
 
-# Layer-stack keys of the default network (see --ls-keys)
-DEFAULT_LS_KEYS = "piececount:queen:pawnhalf:manyoffi"
-
 
 @dataclass
 class DataloaderSkipConfig:

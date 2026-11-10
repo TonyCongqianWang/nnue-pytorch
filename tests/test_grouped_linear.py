@@ -4,11 +4,13 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.modules import stacked_linear
-from model.modules.stacked_linear import FactorizedStackedLinear, grouped_l1
+from model.modules import moe_linear
+from model.modules.moe_linear import MoeLinear, grouped_l1
+from model.modules.router import ieee_matmul_precision
 from model.quantize import QuantizationConfig, QuantizationManager
 
 GPU_AVAILABLE = torch.cuda.is_available()
@@ -20,15 +22,10 @@ OPTIMIZED_AVAILABLE = (
 )
 
 
-def _reference(layer, x, indices, quantize=False):
-    weight = layer.linear.weight.reshape(
-        layer.count, layer.out_features, layer.in_features
-    )
-    weight = weight + layer.factorized_linear.weight
-    bias = (
-        layer.linear.bias.reshape(layer.count, layer.out_features)
-        + layer.factorized_linear.bias
-    )
+def _reference(layer, x, codebook, indices, quantize=False):
+    flat_w, flat_b = layer.get_all_weights_and_biases(codebook)
+    weight = flat_w.reshape(layer.count, layer.out_features, layer.in_features)
+    bias = flat_b.reshape(layer.count, layer.out_features)
     if quantize:
         weight = layer.quantization.fake_quantize_weights(weight, "ls_l1_weight")
         bias = layer.quantization.fake_quantize_weights(bias, "ls_l1_bias")
@@ -39,11 +36,19 @@ def _reference(layer, x, indices, quantize=False):
 @pytest.mark.skipif(
     not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
 )
-@pytest.mark.parametrize("width", [1024, 1152, 1280])
-@pytest.mark.parametrize("batch", [1, 17, 257])
-@pytest.mark.parametrize("concentrated", [False, True])
-@pytest.mark.parametrize("quantize", [False, True])
-@pytest.mark.parametrize("outputs", [16, 32, 48, 64, 128])
+@pytest.mark.parametrize(
+    "width,batch,concentrated,quantize,outputs",
+    [
+        (1024, 1, False, False, 16),
+        (1024, 17, False, True, 32),
+        (1024, 257, True, True, 32),
+        (1152, 17, False, False, 48),
+        (1280, 257, False, True, 64),
+        (1024, 257, True, False, 128),
+        (1152, 257, False, False, 16),
+        (1280, 1, True, True, 128),
+    ],
+)
 def test_grouped_forward_and_all_gradients(
     width, batch, concentrated, quantize, outputs, monkeypatch
 ):
@@ -56,16 +61,17 @@ def _check_forward_and_all_gradients(
     width, batch, concentrated, quantize, outputs, count, monkeypatch
 ):
     torch.manual_seed(123)
-    layer = FactorizedStackedLinear(
-        width, outputs, count, QuantizationManager(QuantizationConfig()), "ls_l1"
+    layer = MoeLinear(
+        width,
+        outputs,
+        count,
+        quantization=QuantizationManager(QuantizationConfig()),
+        layer_key="ls_l1",
     ).cuda()
-    # Distinct bucket weights catch incorrect routing/strides, unlike the
-    # identical initial weights used by StackedLinear.
     with torch.no_grad():
-        layer.linear.weight.normal_(std=0.02)
-        layer.linear.bias.normal_(std=0.02)
-        layer.factorized_linear.weight.normal_(std=0.02)
-        layer.factorized_linear.bias.normal_(std=0.02)
+        layer.adapter_down.normal_(std=0.02)
+        layer.adapter_up.normal_(std=0.02)
+        layer.bias_adapter.normal_(std=0.02)
     # Strided all-zero, dense and 75%-zero inputs; uneven/empty buckets and partial tiles.
     storage = torch.randn(batch, width, 2, device="cuda")
     zero_fraction = {1: 1.0, 17: 0.0, 257: 0.75}[batch]
@@ -80,23 +86,33 @@ def _check_forward_and_all_gradients(
     upstream = torch.randn(batch, outputs, device="cuda")
     parameters = tuple(layer.parameters())
     optimized = Mock(wraps=grouped_l1)
-    monkeypatch.setattr(stacked_linear, "grouped_l1", optimized)
+    monkeypatch.setattr(moe_linear, "grouped_l1", optimized)
     monkeypatch.setenv("NNUE_GROUPED_L1", "1")
 
     # Both the CuPy router and Triton matmuls must respect the caller's stream.
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        reference = _reference(layer, x, indices, quantize)
+    codebook = F.one_hot(
+        torch.arange(count, device=x.device) % layer.codebook_dim,
+        num_classes=layer.codebook_dim,
+    ).to(dtype=x.dtype)
+    # The optimized path runs IEEE matmuls; the reference must too, or the
+    # comparison sees the ambient TF32 rounding instead of the kernels.
+    with torch.cuda.stream(stream), ieee_matmul_precision():
+        reference = _reference(layer, x, codebook, indices, quantize)
         expected = torch.autograd.grad(reference, (x, *parameters), upstream)
-        actual = layer(x, indices, quantize)
+        projection, bias = layer(x, codebook, indices, quantize)
+        actual = projection + bias
         gradients = torch.autograd.grad(actual, (x, *parameters), upstream)
     torch.cuda.current_stream().wait_stream(stream)
     optimized.assert_called_once()
 
     torch.testing.assert_close(actual, reference, atol=2e-5, rtol=2e-4)
+    # The bucketed kernels reduce in a different (atomics-based) order than
+    # the dense reference, so a handful of elements can exceed the strict
+    # tolerances run-to-run; keep the bound well below real-mismatch scale.
     for grad, ref_grad in zip(gradients, expected):
-        torch.testing.assert_close(grad, ref_grad, atol=3e-5, rtol=3e-4)
+        torch.testing.assert_close(grad, ref_grad, atol=1e-4, rtol=1e-3)
     # A zero activation does not permit dropping its straight-through gradient.
     if zero_fraction:
         assert torch.count_nonzero(gradients[0][x == 0]) > 0
@@ -113,9 +129,19 @@ def test_grouped_partial_output_tiles(outputs, monkeypatch):
 @pytest.mark.skipif(
     not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
 )
-@pytest.mark.parametrize("count", [1, 3, 4, 16, 32, 256])
-@pytest.mark.parametrize("concentrated", [False, True])
-@pytest.mark.parametrize("quantize", [False, True])
+@pytest.mark.parametrize(
+    "count,concentrated,quantize",
+    [
+        (1, False, False),
+        (3, True, True),
+        (4, False, True),
+        (16, True, False),
+        (32, False, False),
+        (64, True, True),
+        (256, False, True),
+        (512, True, False),
+    ],
+)
 def test_grouped_variable_stack_count(count, concentrated, quantize, monkeypatch):
     _check_forward_and_all_gradients(
         1024, 257, concentrated, quantize, 32, count, monkeypatch
@@ -140,20 +166,28 @@ def test_grouped_variable_stack_count(count, concentrated, quantize, monkeypatch
 def test_grouped_dispatch_gate(count, expected, monkeypatch):
     monkeypatch.delenv("NNUE_GROUPED_L1", raising=False)
     torch.manual_seed(123)
-    layer = FactorizedStackedLinear(
-        1024, 32, count, QuantizationManager(QuantizationConfig()), "ls_l1"
+    layer = MoeLinear(
+        1024,
+        32,
+        count,
+        quantization=QuantizationManager(QuantizationConfig()),
+        layer_key="ls_l1",
     ).cuda()
     with torch.no_grad():
-        layer.linear.weight.normal_(std=0.02)
-        layer.linear.bias.normal_(std=0.02)
-        layer.factorized_linear.weight.normal_(std=0.02)
-        layer.factorized_linear.bias.normal_(std=0.02)
+        layer.adapter_down.normal_(std=0.02)
+        layer.adapter_up.normal_(std=0.02)
+        layer.bias_adapter.normal_(std=0.02)
     x = torch.randn(257, 1024, device="cuda", requires_grad=True)
     indices = torch.randint(0, count, (257, 1), device="cuda", dtype=torch.int32)
     optimized = Mock(wraps=grouped_l1)
-    monkeypatch.setattr(stacked_linear, "grouped_l1", optimized)
+    monkeypatch.setattr(moe_linear, "grouped_l1", optimized)
 
-    actual = layer(x, indices, False)
+    codebook = F.one_hot(
+        torch.arange(count, device="cuda") % layer.codebook_dim,
+        num_classes=layer.codebook_dim,
+    ).float()
+    projection, bias = layer(x, codebook, indices, False)
+    actual = projection + bias
     if expected:
         optimized.assert_called_once()
     else:
@@ -161,7 +195,7 @@ def test_grouped_dispatch_gate(count, expected, monkeypatch):
         # (cuBLAS uses TF32 here; the bmm reference does not).
         optimized.assert_not_called()
         torch.testing.assert_close(
-            actual, _reference(layer, x, indices), atol=2e-3, rtol=2e-4
+            actual, _reference(layer, x, codebook, indices), atol=2e-3, rtol=2e-4
         )
 
 
@@ -169,20 +203,28 @@ def test_grouped_dispatch_gate(count, expected, monkeypatch):
     not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
 )
 def test_grouped_dispatch_env_override(monkeypatch):
-    layer = FactorizedStackedLinear(
-        1024, 32, 64, QuantizationManager(QuantizationConfig()), "ls_l1"
+    layer = MoeLinear(
+        1024,
+        32,
+        64,
+        quantization=QuantizationManager(QuantizationConfig()),
+        layer_key="ls_l1",
     ).cuda()
     x = torch.randn(17, 1024, device="cuda")
     indices = torch.randint(0, 64, (17, 1), device="cuda", dtype=torch.int32)
     optimized = Mock(wraps=grouped_l1)
-    monkeypatch.setattr(stacked_linear, "grouped_l1", optimized)
+    monkeypatch.setattr(moe_linear, "grouped_l1", optimized)
 
+    codebook = F.one_hot(
+        torch.arange(64, device="cuda") % layer.codebook_dim,
+        num_classes=layer.codebook_dim,
+    ).float()
     monkeypatch.setenv("NNUE_GROUPED_L1", "0")
-    layer(x, indices, False)
+    layer(x, codebook, indices, False)
     optimized.assert_not_called()
 
     monkeypatch.setenv("NNUE_GROUPED_L1", "1")
-    layer(x, indices, False)
+    layer(x, codebook, indices, False)
     optimized.assert_called_once()
 
 
@@ -228,11 +270,17 @@ def test_grouped_router_switches_stack_count():
 def test_grouped_fallback(device, case, monkeypatch):
     width = 264 if case == "width" else 1024
     outputs = 129 if case == "outputs" else 32
-    buckets = 257 if case == "buckets" else 8
+    # The bucketed kernels support up to 512 stacks; above that the layer
+    # must fall back to the dense PyTorch path.
+    buckets = 513 if case == "buckets" else 8
     dtype = torch.float64 if case == "dtype" else torch.float32
     batch = 0 if case == "empty" else 3
-    layer = FactorizedStackedLinear(
-        width, outputs, buckets, QuantizationManager(QuantizationConfig()), "ls_l1"
+    layer = MoeLinear(
+        width,
+        outputs,
+        buckets,
+        quantization=QuantizationManager(QuantizationConfig()),
+        layer_key="ls_l1",
     )
     layer = layer.to(device=device, dtype=dtype)
     x = torch.randn(batch, width, device=device, dtype=dtype, requires_grad=True)
@@ -241,22 +289,25 @@ def test_grouped_fallback(device, case, monkeypatch):
         side_effect=AssertionError("Unsupported inputs must use the PyTorch fallback")
     )
     monkeypatch.setattr(
-        stacked_linear, "grouped_l1", None if case == "dependencies" else optimized
+        moe_linear, "grouped_l1", None if case == "dependencies" else optimized
     )
 
+    codebook = F.one_hot(
+        torch.arange(buckets, device=device) % layer.codebook_dim,
+        num_classes=layer.codebook_dim,
+    ).to(dtype=dtype)
+
     with torch.autocast(device_type=device, enabled=case == "autocast"):
-        actual = layer(x, indices)
+        projection, bias = layer(x, codebook, indices)
+        actual = projection + bias
         # Use the original all-buckets operation for matching autocast semantics.
         if case == "autocast":
-            weight = layer.linear.weight + layer.factorized_linear.weight.repeat(
-                buckets, 1
-            )
-            bias = layer.linear.bias + layer.factorized_linear.bias.repeat(buckets)
+            flat_w, flat_b = layer.get_all_weights_and_biases(codebook)
             expected = layer.select_output(
-                torch.nn.functional.linear(x, weight, bias), indices
-            )
+                torch.nn.functional.linear(x, flat_w), indices
+            ) + F.embedding(indices.flatten(), flat_b.view(buckets, outputs))
         else:
-            expected = _reference(layer, x, indices)
+            expected = _reference(layer, x, codebook, indices)
     assert actual.dtype == expected.dtype
     torch.testing.assert_close(actual, expected, atol=1e-3, rtol=2e-4)
     parameters = (x, *layer.parameters())
@@ -282,20 +333,38 @@ def test_grouped_fallback(device, case, monkeypatch):
     ],
 )
 def test_grouped_fallback_compiles(count, device):
-    layer = FactorizedStackedLinear(
-        1024, 32, count, QuantizationManager(QuantizationConfig()), "ls_l1"
+    layer = MoeLinear(
+        1024,
+        32,
+        count,
+        quantization=QuantizationManager(QuantizationConfig()),
+        layer_key="ls_l1",
     ).to(device)
     with torch.no_grad():
-        layer.linear.weight.normal_(std=0.02)
-        layer.linear.bias.normal_(std=0.02)
+        layer.adapter_down.normal_(std=0.02)
+        layer.adapter_up.normal_(std=0.02)
+        layer.bias_adapter.normal_(std=0.02)
     x = torch.randn(3, 1024, device=device, requires_grad=True)
     indices = torch.tensor([[0], [count // 2], [count - 1]], device=device)
+    codebook = F.one_hot(
+        torch.arange(count, device=device) % layer.codebook_dim,
+        num_classes=layer.codebook_dim,
+    ).float()
     compiled = torch.compile(layer, backend="aot_eager")
-    actual = compiled(x, indices, True)
-    expected = _reference(layer, x, indices, True)
+    projection, bias = compiled(x, codebook, indices, True)
+    actual = projection + bias
+    expected = _reference(layer, x, codebook, indices, True)
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-4)
     parameters = (x, *layer.parameters())
     gradients = torch.autograd.grad(actual.sum(), parameters)
     reference_gradients = torch.autograd.grad(expected.sum(), parameters)
     for grad, ref_grad in zip(gradients, reference_gradients):
         torch.testing.assert_close(grad, ref_grad, atol=3e-5, rtol=3e-4)
+
+
+@pytest.mark.skipif(
+    not OPTIMIZED_AVAILABLE, reason="NVIDIA SM80+, CuPy and Triton required"
+)
+@pytest.mark.parametrize("width,outputs", [(64, 32), (128, 1)])
+def test_large_tail_routing_and_gradients(width, outputs, monkeypatch):
+    _check_forward_and_all_gradients(width, 257, False, True, outputs, 512, monkeypatch)

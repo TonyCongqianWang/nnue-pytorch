@@ -566,7 +566,7 @@ def eval_ft(
 def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     permutation = list(perm)
 
-    l1_size = model.layer_stacks.l1.linear.in_features
+    l1_size = model.layer_stacks.l1.in_features
     if l1_size != len(permutation) * 2:
         raise ValueError(
             f"Invalid permutation size. Expected {l1_size}. Got {len(permutation) * 2}."
@@ -579,9 +579,7 @@ def ft_permute_impl(model: NNUEModel, perm: npt.NDArray[np.int_]) -> None:
     for f in model.input.features:
         f.weight.copy_(f.weight[:, permutation])
     model.input.bias.copy_(model.input.bias[permutation])
-    model.layer_stacks.l1.linear.weight.copy_(
-        model.layer_stacks.l1.linear.weight[:, permutation]
-    )
+    model.layer_stacks.l1.permute_inputs(permutation)
 
 
 def ft_permute(model: NNUEModel, ft_perm_path: str) -> None:
@@ -637,12 +635,6 @@ def command_gather(args: FeaturePermutationConfig) -> None:
         config = M.NNUEConfig(
             model_config=args.model_config,
             features=args.subcommand.feature_config.features,
-        )
-        M.use_checkpoint_stack_table(
-            config,
-            torch.load(
-                args.subcommand.checkpoint, map_location="cpu", weights_only=False
-            ),
         )
         nnue = NNUE.load_from_checkpoint(
             args.subcommand.checkpoint,

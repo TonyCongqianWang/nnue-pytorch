@@ -12,7 +12,6 @@ using namespace chess;
 // The safest would be to track all "outgoing" pointers.
 
 NNUE_API SparseBatch* NNUE_CDECL get_sparse_batch_from_fens(const char*        feature_set_c,
-                                                            const char*        ls_keys_c,
                                                             int                num_fens,
                                                             const char* const* fens,
                                                             int*               scores,
@@ -31,10 +30,9 @@ NNUE_API SparseBatch* NNUE_CDECL get_sparse_batch_from_fens(const char*        f
     }
 
     auto feature = get_feature(feature_set_c);
-    auto ls_keys = get_layer_stack_keys(ls_keys_c);
-    if (!feature || !ls_keys)
+    if (!feature)
         return nullptr;
-    return new SparseBatch(*feature, *ls_keys, entries);
+    return new SparseBatch(*feature, entries);
 }
 
 NNUE_API FenBatchStream* NNUE_CDECL create_fen_batch_stream(int                  concurrency,
@@ -59,7 +57,6 @@ NNUE_API NNUE_COLD void NNUE_CDECL destroy_fen_batch_stream(FenBatchStream* stre
 }
 
 NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*        feature_set_c,
-                                                                  const char*        ls_keys_c,
                                                                   int                concurrency,
                                                                   int                num_files,
                                                                   const char* const* filenames,
@@ -73,17 +70,16 @@ NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*   
     auto filenames_vec = std::vector<std::string>(filenames, filenames + num_files);
 
     auto feature = get_feature(feature_set_c);
-    auto ls_keys = get_layer_stack_keys(ls_keys_c);
-    if (!feature || !ls_keys)
+    if (!feature)
         return nullptr;
 
     auto counter = std::make_unique<nnue::UniquePositionCounter>(
       hll_config.initial_hll, hll_config.initial_hll_size, hll_config.initial_total,
       hll_config.initial_preskip);
 
-    auto stream = new FeaturedBatchStream(
-      std::move(feature), std::move(*ls_keys), concurrency, filenames_vec, batch_size, cyclic,
-      skipPredicate, ddp_config.rank, ddp_config.world_size, counter.release(), io_config);
+    auto stream = new FeaturedBatchStream(std::move(feature), concurrency, filenames_vec,
+                                          batch_size, cyclic, skipPredicate, ddp_config.rank,
+                                          ddp_config.world_size, counter.release(), io_config);
     return reinterpret_cast<SparseBatchStream*>(stream);
 }
 

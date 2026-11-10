@@ -311,7 +311,7 @@ class NNUEVisualizer:
 
     def plot_fc_weights(self):
         if not self.args.no_fc_weights:
-            num_buckets = self.model.num_ls_buckets
+            num_buckets = 2 * self.model.num_ls_buckets
             fig, axs = plt.subplots(3, num_buckets, dpi=self.dpi)
 
             extra_info = ""
@@ -322,7 +322,9 @@ class NNUEVisualizer:
 
             if self.args.ref_model:
                 ref_layers = list(
-                    self.ref_model.layer_stacks.get_coalesced_layer_stacks()
+                    self.ref_model.layer_stacks.get_coalesced_layer_stacks(
+                        self.ref_model.router.codebook
+                    )
                 )
 
             def get_l1_weights(bucket_id, l1):
@@ -367,7 +369,9 @@ class NNUEVisualizer:
             line_options = {"color": "gray", "linewidth": 0.5}
 
             for bucket_id, (l1, l2, output) in enumerate(
-                self.model.layer_stacks.get_coalesced_layer_stacks()
+                self.model.layer_stacks.get_coalesced_layer_stacks(
+                    self.model.router.codebook
+                )
             ):
                 l1_weights, N = get_l1_weights(bucket_id, l1)
                 l2_weights = get_l2_weights(bucket_id, l2)
@@ -427,7 +431,9 @@ class NNUEVisualizer:
                 title_template = "L1 weights histogram [{LABEL}]"
                 fig.suptitle(title_template.format(LABEL=self.args.label))
                 for bucket_id, (l1, l2, output) in enumerate(
-                    self.model.layer_stacks.get_coalesced_layer_stacks()
+                    self.model.layer_stacks.get_coalesced_layer_stacks(
+                        self.model.router.codebook
+                    )
                 ):
                     # L1 weights histogram.
                     ax = axs[bucket_id]
@@ -450,7 +456,9 @@ class NNUEVisualizer:
                 title_template = "L2 weights histogram [{LABEL}]"
                 fig.suptitle(title_template.format(LABEL=self.args.label))
                 for bucket_id, (l1, l2, output) in enumerate(
-                    self.model.layer_stacks.get_coalesced_layer_stacks()
+                    self.model.layer_stacks.get_coalesced_layer_stacks(
+                        self.model.router.codebook
+                    )
                 ):
                     # L2 weights histogram.
                     ax = axs[bucket_id]
@@ -473,10 +481,12 @@ class NNUEVisualizer:
         if not self.args.no_biases:
             if self.args.ref_model:
                 ref_layers = list(
-                    self.ref_model.layer_stacks.get_coalesced_layer_stacks()
+                    self.ref_model.layer_stacks.get_coalesced_layer_stacks(
+                        self.ref_model.router.codebook
+                    )
                 )
 
-            num_buckets = self.model.num_ls_buckets
+            num_buckets = 2 * self.model.num_ls_buckets
             fig, axs = plt.subplots(3, num_buckets, dpi=self.dpi)
             extra_info = ""
             if self.args.sort_input_neurons:
@@ -497,7 +507,9 @@ class NNUEVisualizer:
                 cmap = "viridis"
 
             for bucket_id, (l1, l2, output) in enumerate(
-                self.model.layer_stacks.get_coalesced_layer_stacks()
+                self.model.layer_stacks.get_coalesced_layer_stacks(
+                    self.model.router.codebook
+                )
             ):
                 l1_biases = l1.bias.data.numpy()
                 l2_biases = l2.bias.data.numpy()

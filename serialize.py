@@ -16,7 +16,12 @@ except ImportError as e:
     DataloaderSkipConfig = None
 
 import model as M
-from model.utils.serialize import CountingExporter, NNUEWriter
+from model.utils.serialize import CountingExporter, NNUEWriter, prepare_for_export
+from runtime import (
+    MatmulPrecision,
+    configure_runtime,
+    resolve_device,
+)
 
 
 @dataclass(frozen=True)
@@ -37,8 +42,9 @@ class SerializeConfig:
     """Deprecated alias for compression."""
 
     histogram: bool = False
-    """Print a histogram and min/max stats of the quantized values of every
-    exported layer."""
+    """Print per-expert histograms (alias for --histogram-mode all)."""
+    histogram_mode: Literal["none", "aggregate", "all"] = "aggregate"
+    """Quantized stats: aggregate across experts by default; all prints each expert."""
 
     ft_perm: str | None = None
     """Path to a file that defines the permutation to use on the feature transformer."""
@@ -57,8 +63,11 @@ class SerializeConfig:
     """Whether to run FT optimization on the resolved torch device.
     Disable this to force FT optimization to run on the CPU instead."""
 
-    device: int | Literal["cpu", "mps"] = 0
-    """Device to use for ft_optimize acceleration."""
+    device: str = "auto"
+    """Device for the complete export: auto, cpu, mps, cuda:N (or numeric N)."""
+
+    matmul_precision: MatmulPrecision = "auto"
+    """Dense precision policy; auto follows checkpoint metadata when available."""
 
     loader_num_workers: int = 4
     """Number of workers to use for data loading during FT optimization."""
@@ -128,26 +137,28 @@ def main():
     target_is_nnue = serialize_config.out_sha or args.target.endswith(".nnue")
 
     model_description = serialize_config.description
+    metadata = None
     if args.source.endswith(".ckpt"):
         checkpoint = torch.load(
             args.source, map_location=torch.device("cpu"), weights_only=False
         )
-        M.use_checkpoint_stack_table(nnue_config, checkpoint)
+        metadata = checkpoint.get("runtime")
         nnue = M.NNUE(config=nnue_config)
         nnue.load_state_dict(checkpoint["state_dict"])
         nnue.eval()
     elif args.source.endswith(".pt"):
-        nnue = torch.load(args.source, weights_only=False)
+        nnue = torch.load(args.source, map_location="cpu", weights_only=False)
+        nnue.model.validate_architecture()
+        metadata = getattr(nnue, "runtime_metadata", None)
     elif args.source.endswith(".nnue"):
         with open(args.source, "rb") as f:
+            nnue = M.NNUE(
+                config=nnue_config,
+            )
             reader = M.NNUEReader(
                 f,
                 feature_name,
                 config=nnue_config.model_config,
-            )
-            nnue_config.model_config.ls_remap_table = reader.config.ls_remap_table
-            nnue = M.NNUE(
-                config=nnue_config,
             )
             nnue.model = reader.model
             if serialize_config.description is None:
@@ -155,8 +166,12 @@ def main():
     else:
         raise ValueError("Invalid network input format.")
 
-    # Guarantee weights are clipped within valid range before export or optimization
-    nnue.model.clip_weights(include_input=True)
+    device = resolve_device(serialize_config.device, metadata)
+    nnue.runtime_metadata = configure_runtime(
+        device, serialize_config.matmul_precision, metadata=metadata
+    )
+    nnue.to(device)
+    prepare_for_export(nnue.model)
 
     if serialize_config.ft_optimize and serialize_config.ft_perm is not None:
         raise ValueError("Options --ft_perm and --ft_optimize are mutually exclusive.")
@@ -166,7 +181,9 @@ def main():
 
         if not args.source.endswith(".nnue"):
             nnue.model.input.coalesce()
-            nnue.model.layer_stacks.coalesce_layer_stacks_inplace()
+            nnue.model.layer_stacks.coalesce_layer_stacks_inplace(
+                nnue.model.router.codebook
+            )
 
         ftperm.ft_permute(nnue.model, serialize_config.ft_perm)
 
@@ -187,14 +204,16 @@ def main():
 
         if not args.source.endswith(".nnue"):
             nnue.model.input.coalesce()
-            nnue.model.layer_stacks.coalesce_layer_stacks_inplace()
+            nnue.model.layer_stacks.coalesce_layer_stacks_inplace(
+                nnue.model.router.codebook
+            )
 
         ftperm.ft_optimize(
             nnue.model,
             serialize_config.ft_optimize_data,
             serialize_config.ft_optimize_count,
             use_cupy=serialize_config.use_cupy,
-            device=serialize_config.device,
+            device=str(device),
             loader_num_workers=serialize_config.loader_num_workers,
             loader_config=serialize_config.dataloader_config,
         )
@@ -202,6 +221,8 @@ def main():
     if args.target.endswith(".ckpt"):
         raise ValueError("Cannot convert into .ckpt")
     elif args.target.endswith(".pt"):
+        # Storage stays portable; runtime metadata retains the generation backend.
+        nnue.to("cpu")
         torch.save(nnue, args.target)
     elif target_is_nnue:
         if os.path.isdir(args.target):
@@ -211,7 +232,11 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
 
         writer = M.NNUEWriter(
-            nnue.model, model_description, verbose=serialize_config.histogram
+            nnue.model,
+            model_description,
+            histogram_mode="all"
+            if serialize_config.histogram
+            else serialize_config.histogram_mode,
         )
         buf = writer.buf
 

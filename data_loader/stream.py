@@ -3,7 +3,6 @@ import os  # noqa: F401
 
 from ._native import FenBatchPtr, SparseBatchPtr, c_lib
 from .config import (
-    DEFAULT_LS_KEYS,
     CDataloaderDDPConfig,
     CDataloaderFileStats,
     CDataloaderHllConfig,
@@ -93,7 +92,6 @@ def create_sparse_batch_stream(
     ddp_config: DataloaderDDPConfig = None,
     hll_config: DataloaderHllConfig | None = None,
     io_config: DataloaderIOConfig | None = None,
-    ls_keys: str = DEFAULT_LS_KEYS,
 ) -> ctypes.c_void_p:
     if ddp_config is None:
         rank, world_size = _get_ddp_rank_and_world_size()
@@ -105,7 +103,6 @@ def create_sparse_batch_stream(
 
     handle = c_lib.dll.create_sparse_batch_stream(
         feature_set,
-        ls_keys.encode("utf-8"),
         concurrency,
         len(filenames),
         _to_c_str_array(filenames),
@@ -126,7 +123,7 @@ def destroy_sparse_batch_stream(stream: ctypes.c_void_p):
 
 
 def get_sparse_batch_from_fens(
-    feature_set: str, fens, scores, plies, results, ls_keys: str = DEFAULT_LS_KEYS
+    feature_set: str, fens, scores, plies, results
 ) -> SparseBatchPtr:
     assert len(fens) == len(scores) == len(plies) == len(results)
 
@@ -135,7 +132,6 @@ def get_sparse_batch_from_fens(
 
     return c_lib.dll.get_sparse_batch_from_fens(
         feature_set.encode("utf-8"),
-        ls_keys.encode("utf-8"),
         len(fens),
         _to_c_str_array(fens),
         to_c_int_array(scores),

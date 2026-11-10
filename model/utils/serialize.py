@@ -1,18 +1,26 @@
 import operator
 import struct
 from collections.abc import Sequence
-from dataclasses import replace
 from functools import reduce
 from typing import BinaryIO
 
 import numpy as np
 import numpy.typing as npt
 import torch
-from torch import nn
 
 from ..config import ModelConfig
 from ..model import NNUEModel
-from ..modules.stack_table import table_to_str
+from ..modules.moe_linear import ExpertParameters
+
+
+@torch.no_grad()
+def prepare_for_export(model, *, rebuild_router=True):
+    """Prepare on the selected device; only integer byte packing moves to CPU."""
+    model.eval()
+    model.clip_weights(include_input=True)
+    if rebuild_router and not model.layer_stacks.l1.is_coalesced:
+        model.router.lut_valid = False
+    return model
 
 
 def ascii_hist(name, x, bins=7):
@@ -65,10 +73,43 @@ def get_histogram_callback(hist_title: str, verbose: bool):
     return histogram_callback
 
 
+from ..modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE, get_router_hash
+
+
+def pack_lookup_table(values, bits):
+    """LSB-first IDs, byte-aligned per table; unused final bits are zero."""
+    values = torch.as_tensor(values).detach().cpu().numpy().astype(np.uint16)
+    if np.any(values >= (1 << bits)):
+        raise ValueError("Expert ID exceeds packed width")
+    chunks = []
+    for start in range(0, len(values), 65536):
+        block = values[start : start + 65536]
+        binary = ((block[:, None] >> np.arange(bits, dtype=np.uint16)) & 1).astype(
+            np.uint8
+        )
+        chunks.append(np.packbits(binary.ravel(), bitorder="little").tobytes())
+    return b"".join(chunks)
+
+
+def unpack_lookup_table(data, count, bits):
+    expected = (count * bits + 7) // 8
+    if len(data) != expected:
+        raise EOFError(f"Expected {expected} packed LUT bytes, got {len(data)}")
+    used = count * bits % 8
+    if used and data[-1] >> used:
+        raise ValueError("Nonzero packed LUT padding")
+    binary = np.unpackbits(np.frombuffer(data, dtype=np.uint8), bitorder="little")[
+        : count * bits
+    ]
+    values = (
+        binary.reshape(count, bits).astype(np.uint16)
+        * (1 << np.arange(bits, dtype=np.uint16))
+    ).sum(1, dtype=np.uint16)
+    return torch.from_numpy(values.astype(np.int64))
+
+
 # hardcoded for now
 VERSION = 0x6A448AFA
-
-STACK_TABLE_HASH = 0x5A7AB1E5
 DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
 
 
@@ -99,51 +140,92 @@ class NNUEWriter:
 
     def __init__(
         self,
-        model: NNUEModel,
-        description: str | None = None,
-        verbose: bool = False,
-        exporter: BufferExporter | CountingExporter | None = None,
+        model,
+        description=None,
+        verbose=None,
+        exporter=None,
+        histogram_mode="aggregate",
     ):
         if description is None:
             description = DEFAULT_DESCRIPTION
-
-        self.verbose = verbose
-
-        if exporter is None:
-            exporter = BufferExporter()
-        self.exporter = exporter
-
+        if histogram_mode not in ("none", "aggregate", "all"):
+            raise ValueError("histogram_mode must be none, aggregate or all")
+        self.histogram_mode = (
+            ("all" if verbose else "none") if verbose is not None else histogram_mode
+        )
+        self.verbose = self.histogram_mode != "none"
+        self.exporter = BufferExporter() if exporter is None else exporter
+        self._layer_histograms = {}
         fc_hash = self.fc_hash(model)
-        layer_stacks = model.layer_stacks
-
-        # 1. Plaintext header
-        self.write_header(model, fc_hash ^ STACK_TABLE_HASH, description)
-
-        self.int32(STACK_TABLE_HASH)
-        self.int32(layer_stacks.raw_count)
-        self.int32(layer_stacks.count)
-        self.exporter.extend(
-            struct.pack(
-                f"<{layer_stacks.raw_count}H", *layer_stacks.stack_fallback.tolist()
+        self.write_header(model, fc_hash, description)
+        # Counting must not build multi-million-context LUTs or coalesce weights.
+        if isinstance(self.exporter, CountingExporter):
+            self.exporter.size += self._payload_size(model)
+            return
+        orders = model.router.export_permutations()
+        fc0_table, tail_table = model.router.export_lookup_tables(orders)
+        bank_orders = tuple(orders[name].tolist() for name in ("fc0", "tail"))
+        self.int32(model.feature_hash ^ (model.L1 * 2))
+        self.write_feature_transformer(model)
+        for bucket, layers in enumerate(
+            model.layer_stacks.get_coalesced_layer_stacks(
+                model.router.codebook, bank_orders
             )
+        ):
+            first = len(layers) == 1
+            self.int32(self.fc0_hash(model) if first else fc_hash)
+            keys = ("ls_l1",) if first else ("ls_l2", "ls_output")
+            bank = "FC0" if first else "tail"
+            expert = bucket if first else bucket - model.layer_stacks.l1.count
+            for layer, key in zip(layers, keys):
+                self.write_fc_layer(model, layer, key, f"{bank} expert {expert}")
+        self.exporter.extend(pack_lookup_table(fc0_table, 6))
+        self.exporter.extend(pack_lookup_table(tail_table, 8))
+        if self.histogram_mode == "aggregate":
+            for name, values in self._layer_histograms.items():
+                get_histogram_callback("all experts", True)(name, torch.cat(values))
+        if self.verbose:
+            from .routing_profiler import print_routing_profile
+
+            print_routing_profile(model)
+            if self.histogram_mode == "all":
+                for name, order in orders.items():
+                    print(f"Export {name}, new -> training IDs: {order.tolist()}")
+
+    @staticmethod
+    def _payload_size(model):
+        size = 4 + model.L1 * 2
+        size += sum(
+            f.NUM_REAL_FEATURES
+            * model.L1
+            * torch.empty((), dtype=f.EXPORT_WEIGHT_DTYPE).element_size()
+            for f in model.input.features
         )
 
-        # 2. Payload (Feature Transformer + Layer Stacks)
-        self.int32(model.feature_hash ^ (model.L1 * 2))  # Feature transformer hash
-        self.write_feature_transformer(model)
-        for bucket, (l1, l2, output) in enumerate(
-            layer_stacks.get_coalesced_layer_stacks()
-        ):
-            self.int32(fc_hash)  # FC layers hash
-            self.write_fc_layer(
-                model, l1, layer_stacks.l1.layer_key, f"bucket {bucket}"
+        def layer_size(layer):
+            return layer.bias_features * 4 + layer.out_features * (
+                (layer.in_features + 31) // 32 * 32
             )
-            self.write_fc_layer(
-                model, l2, layer_stacks.l2.layer_key, f"bucket {bucket}"
+
+        stacks = model.layer_stacks
+        size += stacks.l1.count * (4 + layer_size(stacks.l1))
+        size += stacks.count * (4 + layer_size(stacks.l2) + layer_size(stacks.output))
+        size += (model.router.fc0_lut.numel() * 6 + 7) // 8
+        size += (model.router.lut.numel() * 8 + 7) // 8
+        return size
+
+    def _layer_histogram_callback(self, desc):
+        if self.histogram_mode == "none":
+            return None
+        if self.histogram_mode == "all":
+            return get_histogram_callback(desc, True)
+
+        def collect(name, values):
+            self._layer_histograms.setdefault(name, []).append(
+                values.detach().flatten().cpu()
             )
-            self.write_fc_layer(
-                model, output, layer_stacks.output.layer_key, f"bucket {bucket}"
-            )
+
+        return collect
 
     @property
     def buf(self) -> bytearray:
@@ -151,31 +233,40 @@ class NNUEWriter:
         return self.exporter.buf
 
     @staticmethod
-    def fc_hash(model: NNUEModel) -> int:
-        # InputSlice hash
-        prev_hash = 0xEC42E90D
-        prev_hash ^= model.L1 * 2
-
-        # Fully connected layers
-        layers = [
-            model.layer_stacks.l1.linear,
-            model.layer_stacks.l2.linear,
-            model.layer_stacks.output.linear,
-        ]
+    def layer_hash(layers, prev_hash):
         for layer in layers:
-            layer_hash = 0xCC03DAE4
-            layer_hash += layer.out_features // model.num_ls_buckets
-            layer_hash ^= prev_hash >> 1
-            layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
-            if layer.out_features // model.num_ls_buckets != 1:
-                # Clipped ReLU hash
+            layer_hash = (
+                (0xCC03DAE4 + layer.out_features)
+                ^ (prev_hash >> 1)
+                ^ ((prev_hash << 31) & 0xFFFFFFFF)
+            )
+            if layer.out_features != 1:
                 layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
             prev_hash = layer_hash
-        return layer_hash
+        return prev_hash
+
+    @staticmethod
+    def fc0_hash(model):
+        return NNUEWriter.layer_hash(
+            (model.layer_stacks.l1,), 0xEC42E90D ^ (model.L1 * 2)
+        )
+
+    @staticmethod
+    def fc_hash(model):
+        return NNUEWriter.layer_hash(
+            (model.layer_stacks.l2, model.layer_stacks.output),
+            NNUEWriter.fc0_hash(model),
+        )
 
     def write_header(self, model: NNUEModel, fc_hash: int, description: str) -> None:
         self.int32(VERSION)  # version
-        self.int32(fc_hash ^ model.feature_hash ^ (model.L1 * 2))  # halfkp network hash
+        router_hash = get_router_hash(
+            model.router.num_fc0_experts,
+            model.router.num_weight_experts,
+        )
+        router_hash ^= int(model.quantization.config.weight_scale_l1) ^ 256
+        net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2) ^ router_hash
+        self.int32(net_hash)  # halfkp network hash
         encoded_description = description.encode("utf-8")
         self.int32(len(encoded_description))  # Network definition
         self.exporter.extend(encoded_description)
@@ -217,7 +308,7 @@ class NNUEWriter:
     def write_fc_layer(
         self,
         model: NNUEModel,
-        layer: nn.Linear,
+        layer: ExpertParameters,
         layer_key: str | None,
         desc: str,
     ) -> None:
@@ -229,7 +320,7 @@ class NNUEWriter:
             raise RuntimeError("layer_key required for quantization.")
 
         bias, weight = model.quantization.quantize_fc_layer(
-            bias, weight, layer_key, get_histogram_callback(desc, self.verbose)
+            bias, weight, layer_key, self._layer_histogram_callback(desc)
         )
 
         # FC inputs are padded to 32 elements by spec.
@@ -257,33 +348,11 @@ class NNUEReader:
     ):
         self.f = f
         self.feature_name = feature_name
-
-        header_hash = self.read_header()
-        self.read_int32(STACK_TABLE_HASH)
-        raw_count = self.read_int32()
-        stored_count = self.read_int32()
-        remap = list(struct.unpack(f"<{raw_count}H", self.f.read(2 * raw_count)))
-        assert all(f < raw_count and remap[f] == f for f in remap), (
-            "invalid layer-stack table"
-        )
-        assert sum(s == f for s, f in enumerate(remap)) == stored_count, (
-            "layer-stack table count mismatch"
-        )
-        config = replace(config, ls_remap_table=table_to_str(remap))
-
         self.model = NNUEModel(feature_name, config)
         self.config = config
         fc_hash = NNUEWriter.fc_hash(self.model)
-        ls = self.model.layer_stacks
-        expected = (
-            fc_hash ^ self.model.feature_hash ^ (config.L1 * 2) ^ STACK_TABLE_HASH
-        )
-        if header_hash != expected:
-            raise ValueError(f"Expected: {expected:x}, got: {header_hash:x}")
-        assert ls.count == stored_count and ls.raw_count == raw_count, (
-            ls.count,
-            stored_count,
-        )
+
+        self.read_header(self.model.feature_hash, fc_hash)
         self.read_int32(
             self.model.feature_hash ^ (self.config.L1 * 2)
         )  # Feature transformer hash
@@ -291,36 +360,51 @@ class NNUEReader:
 
         self.read_feature_transformer(self.model.input)
 
-        layers = [
-            self.model.layer_stacks.l1,
-            self.model.layer_stacks.l2,
-            self.model.layer_stacks.output,
-        ]
-        num_ls_buckets = self.model.num_ls_buckets
-        l_w_slices = [
-            torch.chunk(layer.linear.weight.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
-        l_b_slices = [
-            torch.chunk(layer.linear.bias.data, num_ls_buckets, dim=0)
-            for layer in layers
-        ]
+        stacks = self.model.layer_stacks
+        for layer in stacks.dense_layers():
+            layer.init_coalesced_storage()
+        groups = (
+            ((stacks.l1,), stacks.l1.count, NNUEWriter.fc0_hash(self.model)),
+            ((stacks.l2, stacks.output), stacks.count, fc_hash),
+        )
+        for layers, count, expected_hash in groups:
+            for index in range(count):
+                self.read_int32(expected_hash)
+                for layer in layers:
+                    self.read_fc_layer(
+                        layer.coalesced_weight[
+                            index * layer.out_features : (index + 1)
+                            * layer.out_features
+                        ],
+                        layer.coalesced_bias[
+                            index * layer.bias_features : (index + 1)
+                            * layer.bias_features
+                        ],
+                        layer.layer_key,
+                    )
 
-        for b in range(num_ls_buckets):
-            self.read_int32(fc_hash)  # FC layers hash
-            for layer_idx in range(len(layers)):
-                self.read_fc_layer(
-                    l_w_slices[layer_idx][b],
-                    l_b_slices[layer_idx][b],
-                    layers[layer_idx].layer_key,
-                )
+        fc0_bytes = (FC0_ROUTER_TABLE_SIZE * 6 + 7) // 8
+        tail_bytes = (ROUTER_TABLE_SIZE * 8 + 7) // 8
+        self.model.router.load_lookup_tables(
+            unpack_lookup_table(self.f.read(fc0_bytes), FC0_ROUTER_TABLE_SIZE, 6),
+            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, 8),
+        )
+        if self.f.read(1):
+            raise ValueError("Unexpected trailing network data")
 
-    def read_header(self) -> int:
+    def read_header(self, feature_hash: int, fc_hash: int) -> None:
         self.read_int32(VERSION)  # version
         header_hash = self.read_int32()
+        router_hash = get_router_hash(
+            self.model.router.num_fc0_experts,
+            self.model.router.num_weight_experts,
+        )
+        router_hash ^= int(self.model.quantization.config.weight_scale_l1) ^ 256
+        expected_hash = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ router_hash
+        if header_hash != expected_hash:
+            raise ValueError(f"Expected hash {expected_hash:x}, got {header_hash:x}")
         desc_len = self.read_int32()
         self.description = self.f.read(desc_len).decode("utf-8")
-        return header_hash
 
     def tensor(self, dtype: npt.DTypeLike, shape: Sequence[int]) -> torch.Tensor:
         count = reduce(operator.mul, shape, 1)

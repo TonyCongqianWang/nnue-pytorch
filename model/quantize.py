@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .model import NNUEModel
 
 FAKE_QUANTIZE_EPS = 1e-5
+INT8_MAX = float(torch.iinfo(torch.int8).max)
 
 
 class WeightClippingConfig(TypedDict):
@@ -52,7 +53,7 @@ def _fake_quantize_acts(value, act_scale):
     return value
 
 
-def _fake_quantize_weights(value, weight_scale):
+def _fake_quantize_weights(value: torch.Tensor, weight_scale: float) -> torch.Tensor:
     # Fake quantization with STE
     # In contrast to activations,
     # weights use rounding as they are
@@ -67,8 +68,8 @@ def _fake_quantize_weights(value, weight_scale):
 @dataclass
 class QuantizationConfig:
     nnue2score: float = 600.0
-    weight_scale_l1: float = 128.0
-    weight_scale_l2: float = 64.0
+    weight_scale_l1: float = 256.0
+    weight_scale_l2: float = 128.0
     weight_scale_l_out: float = 128
     weight_scale_out: float = 16.0
     ft_quantized_one: float = 256.0
@@ -82,7 +83,10 @@ class QuantizationConfig:
 
 
 class QuantizationManager:
-    def __init__(self, config: QuantizationConfig):
+    def __init__(
+        self, config: QuantizationConfig, hidden_sizes: tuple[int, int] = (16, 16)
+    ):
+        self.hidden_sizes = hidden_sizes
         self.config = config
         self.nnue2score = config.nnue2score
         self.weight_scale_hidden = [
@@ -95,7 +99,7 @@ class QuantizationManager:
         self.ft_quantized_one = config.ft_quantized_one
 
         # FC layers are stored as int8 weights
-        i8_max = float(torch.iinfo(torch.int8).max)
+        i8_max = INT8_MAX
         self.max_hidden_weight = [i8_max / scale for scale in self.weight_scale_hidden]
 
         self.l0_correction_factor = (
@@ -125,6 +129,18 @@ class QuantizationManager:
         info = torch.iinfo(dtype)
         return -info.max / self.ft_quantized_one, info.max / self.ft_quantized_one
 
+    def get_ls_weight_bounds(self, layer_key: str) -> tuple[float, float]:
+        scale_key = (
+            layer_key if layer_key.endswith("_weight") else f"{layer_key}_weight"
+        )
+        scale = self.weight_scales_dict[scale_key]
+        max_w = INT8_MAX / scale
+        return -max_w, max_w
+
+    def clip_ls_weight(self, weight: torch.Tensor, layer_key: str) -> torch.Tensor:
+        min_w, max_w = self.get_ls_weight_bounds(layer_key)
+        return weight.clamp(min_w, max_w)
+
     def clip_ft_act(self, preact):
         return torch.clamp(preact, 0.0, self.max_ft_activation)
 
@@ -146,7 +162,7 @@ class QuantizationManager:
     def fake_quantize_output(self, preact: torch.Tensor) -> torch.Tensor:
         multiplier_int = int(self.config.nnue2score * self.config.weight_scale_out)
         denominator_int = int(
-            self.config.hidden_quantized_one * self.config.weight_scale_l_out * 2.0
+            self.config.hidden_quantized_one * self.config.weight_scale_l1
         )
 
         fwd_out_int = torch.round(preact * denominator_int).to(torch.int64)
@@ -159,34 +175,14 @@ class QuantizationManager:
 
         return quantized_out.detach() + (preact - preact.detach())
 
-    def fake_quantize_weights(self, tensor: torch.Tensor, key: str):
+    def fake_quantize_weights(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
         weight_scale = self.weight_scales_dict[key]
         return _fake_quantize_weights(tensor, weight_scale)
 
     def generate_weight_clipping_config(
         self, model: "NNUEModel"
     ) -> list[WeightClippingConfig]:
-        return [
-            {
-                "params": [model.layer_stacks.l1.linear.weight],
-                "min_weight": -self.max_hidden_weight[0],
-                "max_weight": self.max_hidden_weight[0],
-                "virtual_params": model.layer_stacks.l1.factorized_linear.weight,
-                "stacked_layer": model.layer_stacks.l1,
-            },
-            {
-                "params": [model.layer_stacks.l2.linear.weight],
-                "min_weight": -self.max_hidden_weight[1],
-                "max_weight": self.max_hidden_weight[1],
-                "stacked_layer": model.layer_stacks.l2,
-            },
-            {
-                "params": [model.layer_stacks.output.linear.weight],
-                "min_weight": -self.max_hidden_weight[2],
-                "max_weight": self.max_hidden_weight[2],
-                "stacked_layer": model.layer_stacks.output,
-            },
-        ]
+        return []
 
     def quantize_feature_transformer_weights(
         self,

@@ -27,11 +27,11 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
     virtual_ft_weight_decay: float = 0.0
     """Weight decay to apply to the virtual feature transformer parameters."""
 
-    dense_weight_decay: float = 0.0
+    dense_weight_decay: float = 1.0e-6
     """Weight decay to apply to the dense layer parameters."""
 
-    factorized_weight_decay: float = 0.0
-    """Weight decay to apply to the factorized dense layer parameters."""
+    factorized_weight_decay: float = 4.0e-5
+    """Weight decay for the shared FC0 weight matrix."""
 
     lr: float = 8.75e-4
     """Initial learning rate."""
@@ -57,14 +57,16 @@ class OptimizerConfig(RangerLiteConfig, ScheduleFreeConfig, AdamWConfig):
             f"[OptimizerConfig] Using {optimizer_name} optimizer with lr: {self.lr}"
         )
         if (
-            self.dense_weight_decay > 0.0
+            self.factorized_weight_decay > 0.0
+            or self.dense_weight_decay > 0.0
             or self.ft_weight_decay > 0.0
             or self.virtual_ft_weight_decay > 0.0
         ):
             info_str += (
                 f" and ft_weight_decay: {self.ft_weight_decay}, "
                 f"virtual_ft_weight_decay: {self.virtual_ft_weight_decay}, "
-                f"dense_weight_decay: {self.dense_weight_decay}"
+                f"dense_weight_decay: {self.dense_weight_decay}, "
+                f"factorized_weight_decay: {self.factorized_weight_decay}"
             )
         if int(os.environ.get("RANK", "0")) == 0:
             print(info_str + ".")

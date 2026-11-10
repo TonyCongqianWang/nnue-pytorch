@@ -1,10 +1,18 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Annotated
 
 import tyro
 from tyro.conf import OmitArgPrefixes
 
 from .modules import FeatureConfig, LayerStacksConfig
+from .modules.router import (
+    ADAPTER_RANK,
+    CODEBOOK_DIM,
+    FC0_ADAPTER_RANK,
+    FC0_CODEBOOK_DIM,
+    NUM_FC0_EXPERTS,
+    NUM_WEIGHT_EXPERTS,
+)
 from .optimizers import OptimizerConfig
 from .quantize import QuantizationConfig
 
@@ -12,27 +20,67 @@ from .quantize import QuantizationConfig
 # 3 layer fully connected network
 @dataclass(kw_only=True)
 class ModelConfig(LayerStacksConfig):
+    moe_fc0_experts: int = NUM_FC0_EXPERTS
+    """Number of FC0 experts (2–64)."""
+    moe_tail_experts: int = NUM_WEIGHT_EXPERTS
+    """Number of FC1/output experts (2–256)."""
+    moe_fc0_codebook_dim: int = FC0_CODEBOOK_DIM
+    """FC0 context embedding and codebook dimension."""
+    moe_tail_codebook_dim: int = CODEBOOK_DIM
+    """Tail context embedding and codebook dimension."""
+    moe_fc0_rank: int = FC0_ADAPTER_RANK
+    """FC0 hypernetwork adapter bottleneck width."""
+    moe_tail_rank: int = ADAPTER_RANK
+    """FC1/output hypernetwork adapter bottleneck width."""
+
+    moe_tail_mean_balance_cost: float = 0.0
+    """If positive, replace tail balancing with this coefficient on KL(uniform || mean soft traffic)."""
+    moe_mix_interval: int = 0
+    """Apply weighted top-2 FC0 and top-4 tail training every N optimizer steps. Zero disables."""
+
+    moe_weight_balance_cost: float = 0.001
+    """Weight-router balancing coefficient."""
+    moe_weight_diversity_cost: float = 0.01
+    """Weight-router codebook diversity coefficient."""
+    moe_weight_temperature: float = 0.2
+    """Weight-router balancing softmax temperature."""
+
+    def __post_init__(self):
+        if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
+            raise ValueError("MoE expert counts must be FC0 2–64 and tail 2–256")
+        if self.moe_tail_mean_balance_cost < 0 or self.moe_mix_interval < 0:
+            raise ValueError(
+                "MoE mean balance cost and mixing interval must be nonnegative"
+            )
+        if self.moe_mix_interval and self.moe_tail_experts < 4:
+            raise ValueError("MoE mixing requires at least four tail experts")
+        if min(self.moe_fc0_codebook_dim, self.moe_tail_codebook_dim) < 2:
+            raise ValueError("MoE codebook dimensions must be at least two")
+        if min(self.moe_fc0_rank, self.moe_tail_rank) < 1:
+            raise ValueError("MoE adapter ranks must be positive")
+
     @staticmethod
     def add_model_args(parser):
-        parser.add_argument(
-            "--l1",
-            dest="L1",
-            type=int,
-            default=ModelConfig.L1,
-        )
-        parser.add_argument(
-            "--l2",
-            dest="L2",
-            type=int,
-            default=ModelConfig.L2,
-        )
+        # The legacy argparse tools share the same dimension/count flags as
+        # the tyro-based training, serialization and crosscheck entry points.
+        for f in fields(ModelConfig):
+            if type(f.default) is int:
+                parser.add_argument(
+                    "--" + f.name.lower().replace("_", "-"),
+                    dest=f.name,
+                    type=int,
+                    default=f.default,
+                )
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
-        config = ModelConfig()
-        config.L1 = args.L1
-        config.L2 = args.L2
-        return config
+        return ModelConfig(
+            **{
+                f.name: getattr(args, f.name)
+                for f in fields(ModelConfig)
+                if type(f.default) is int
+            }
+        )
 
     # Not omitting prefix on purpose.
     quantize_config: QuantizationConfig = field(default_factory=QuantizationConfig)

@@ -26,12 +26,12 @@ def get_context_indices(board):
             else 3
         )
         pawns = board.pawns & own
-        wide = (
-            p >= 2
-            and bool(pawns & 0x0707070707070707)
-            and bool(pawns & 0xE0E0E0E0E0E0E0E0)
+        wings = bool(pawns & 0x0707070707070707) + 2 * bool(pawns & 0xE0E0E0E0E0E0E0E0)
+        return (
+            encode_material_state(t, p, h, first_layer=True),
+            encode_material_state(t, p, h),
+            wings,
         )
-        return encode_material_state(t, p, h, wide)
 
     us = board.turn
     own = board.king(us)
@@ -41,15 +41,19 @@ def get_context_indices(board):
     f1, f2 = chess.square_file(own), chess.square_file(other)
     opposite = (f1 <= 2 and f2 >= 5) or (f2 <= 2 and f1 >= 5)
     king = 4 * (rank >= 2) + 2 * (rank > theirs) + opposite
-    a, b = material(us), material(not us)
-    return make_router_index(a, b), make_router_index(a, b, king)
+    (a0, a, aw), (b0, b, bw) = material(us), material(not us)
+    if aw == 3 or bw == 3:
+        wings = 0 if aw == bw else 1 if aw == 3 else 2
+    else:
+        wings = 3 if aw and bw and aw != bw else 4
+    return make_router_index(a0, b0), make_router_index(a, b, king, wings)
 
 
 def test_material_layout_bijection():
-    assert NUM_MATERIAL_STATES == 676
+    assert NUM_MATERIAL_STATES == 396
     for i in range(NUM_MATERIAL_STATES):
         assert encode_material_state(*decode_material_state(i)) == i
-    for args in [(0, 0, 0, 0), (1, 1, 3, 1), (1, 0, 2, 0)]:
+    for args in [(0, 0, 0), (1, 2, 3), (1, 0, 2)]:
         with pytest.raises(ValueError):
             encode_material_state(*args)
 
@@ -90,25 +94,27 @@ def test_king_state_native_parity(king, enemy, expected):
 
 
 @pytest.mark.parametrize(
-    "pawns,wide",
+    "ours,theirs,expected",
     [
-        ([], False),
-        (["d3", "e3"], False),
-        (["a3", "e3"], False),
-        (["c3", "f3"], True),
-        (["a3", "h3"], True),
-        (["d3"], False),
+        (["a3", "h3"], ["a6", "h6"], 0),
+        (["a3", "h3"], ["h6"], 1),
+        (["a3"], ["a6", "h6"], 2),
+        (["a3"], ["h6"], 3),
+        (["a3"], ["a6"], 4),
+        (["d3"], ["h6"], 4),
+        ([], ["h6"], 4),
     ],
 )
-def test_outer_pawn_wings(pawns, wide):
+def test_joint_pawn_wings(ours, theirs, expected):
     b = chess.Board("7k/8/8/8/8/8/8/4K3 w - - 0 1")
-    for sq in pawns:
-        b.set_piece_at(
-            chess.SQUARE_NAMES.index(sq), chess.Piece(chess.PAWN, chess.WHITE)
-        )
+    for squares, color in ((ours, chess.WHITE), (theirs, chess.BLACK)):
+        for square in squares:
+            b.set_piece_at(
+                chess.SQUARE_NAMES.index(square), chess.Piece(chess.PAWN, color)
+            )
     cs = get_context_indices(b)
-    assert bool(decode_material_state(cs[0] // 676)[3]) == wide
-    assert native_contexts([b.fen()]) == [cs]
+    assert cs[1] // 8 % 5 == expected
+    assert native_contexts([b.fen(), b.mirror().fen()]) == [cs, cs]
 
 
 def test_native_random_legal_positions_and_inversion():

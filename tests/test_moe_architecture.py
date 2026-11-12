@@ -72,7 +72,11 @@ def test_material_cascade(pieces, category):
         tensors = batch.contents.get_tensors("cpu")
         context = tensors[-2]
         mat, _, _ = decompose_router_index(context, first_layer=True)
-        assert decode_material_state(mat.item()) == (len(pieces), 0, category, 0)
+        assert decode_material_state(mat.item(), first_layer=True) == (
+            len(pieces),
+            0,
+            category,
+        )
         assert context.item() == get_context_indices(board)[0]
     finally:
         stream.destroy_sparse_batch(batch)

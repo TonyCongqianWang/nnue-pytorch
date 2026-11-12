@@ -20,7 +20,7 @@ class ValidationModel(nn.Module):
         self.model = nn.Module()
         self.model.router = r
         r.fc0_lut.copy_(torch.arange(4) % 2)
-        r.lut.copy_(torch.arange(32) % 3)
+        r.lut.copy_(torch.arange(r.lut.numel()) % 3)
         r.lut_valid = True
 
     def val_step(self, batch, epoch, step):
@@ -99,6 +99,6 @@ def test_nonzero_rank_joins_final_count_collectives(monkeypatch):
 
     monkeypatch.setattr("trainer.callbacks.dist.all_reduce", reduce)
     callback.on_validation_epoch_end(trainer)
-    assert len(calls) == 3
+    assert len(calls) == 5
     assert int(r.validation_counts_fc0[0]) == 40_000_002
     assert not r.collect_lut_diagnostics and not r.collect_joint_diagnostics

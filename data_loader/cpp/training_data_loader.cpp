@@ -565,19 +565,47 @@ SparseBatch::~SparseBatch() {
     }
 }
 
-static const auto MAT_ID_TABLE = [] {
-    std::array<std::array<std::array<std::array<uint16_t, 2>, 4>, 9>, 16> table{};
-    uint16_t                                               id = 0;
+constexpr int relative_pawns(int pieces, int pawns) {
+    const int officers = pieces - pawns;
+    return pawns == 0 ? 0 : pawns <= officers ? 1 : pawns <= officers + 2 ? 2 : 3;
+}
+
+constexpr auto MATERIAL_IDS = [] {
+    struct Tables {
+        std::array<std::array<std::array<int, 4>, 9>, 16> tail{};
+        std::array<std::array<std::array<int, 4>, 4>, 16> fc0{};
+        int tailCount = 0, fc0Count = 0;
+    } tables;
     for (int t = 0; t < 16; ++t)
+    {
         for (int p = 0; p <= std::min(8, t); ++p)
             for (int h = 0; h < 4; ++h)
                 if (t - p >= (h < 2 ? 1 : h == 2 ? 2 : 0))
-                    for (int wide = 0; wide <= int(p >= 2); ++wide)
-                        table[t][p][h][wide] = id++;
-    return table;
+                {
+                    tables.tail[t][p][h] = tables.tailCount++;
+                    tables.fc0[t][relative_pawns(t, p)][h] = -1;
+                }
+        for (auto& row : tables.fc0[t])
+            for (int& id : row)
+                if (id == -1)
+                    id = tables.fc0Count++;
+    }
+    return tables;
 }();
 
-static int material_context(const Position& pos, Color perspective) {
+static_assert(MATERIAL_IDS.fc0Count == 203 && MATERIAL_IDS.tailCount == 396);
+
+int joint_wings(int us, int them) {
+    if (us == 3 || them == 3)
+        return us == them ? 0 : us == 3 ? 1 : 2;
+    return us != 0 && them != 0 && us != them ? 3 : 4;
+}
+
+struct MaterialContext {
+    int fc0, tail, wings;
+};
+
+static MaterialContext material_context(const Position& pos, Color perspective) {
     const int t = std::clamp(int(pos.piecesBB(perspective).count()) - 1, 0, 15);
     const int p =
       std::clamp(int(pos.piecesBB(Piece(PieceType::Pawn, perspective)).count()), 0, std::min(8, t));
@@ -588,8 +616,9 @@ static int material_context(const Position& pos, Color perspective) {
        : t - p >= 2 && (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL) ? 2
                                                                                                : 3;
     const auto pawns = pos.piecesBB(Piece(PieceType::Pawn, perspective)).bits();
-    const int wide = p >= 2 && (pawns & 0x0707070707070707ULL) && (pawns & 0xE0E0E0E0E0E0E0E0ULL);
-    return MAT_ID_TABLE[t][p][h][wide];
+    const int wings = bool(pawns & 0x0707070707070707ULL)
+                    + 2 * bool(pawns & 0xE0E0E0E0E0E0E0E0ULL);
+    return {MATERIAL_IDS.fc0[t][relative_pawns(t, p)][h], MATERIAL_IDS.tail[t][p][h], wings};
 }
 
 void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingDataEntry& e) {
@@ -597,13 +626,16 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     outcome[i]      = (e.result + 1.0f) / 2.0f;
     score[i]        = e.score;
     const auto stm  = e.pos.sideToMove();
-    context_us[i] = material_context(e.pos, stm) * 676 + material_context(e.pos, !stm);
+    const auto us = material_context(e.pos, stm);
+    const auto opp = material_context(e.pos, !stm);
+    context_us[i] = us.fc0 * MATERIAL_IDS.fc0Count + opp.fc0;
     const int own = int(e.pos.kingSquare(stm)) ^ (56 * int(stm == Color::Black));
     const int enemy = int(e.pos.kingSquare(!stm)) ^ (56 * int(stm == Color::White));
     const int f1 = own % 8, f2 = enemy % 8;
     const bool opposite = (f1 <= 2 && f2 >= 5) || (f2 <= 2 && f1 >= 5);
     const int king = 4 * (own / 8 >= 2) + 2 * (own / 8 > enemy / 8) + opposite;
-    context_them[i] = context_us[i] * 8 + king;
+    const int tail = (us.tail * MATERIAL_IDS.tailCount + opp.tail) * 5 + joint_wings(us.wings, opp.wings);
+    context_them[i] = tail * 8 + king;
     fill_features(fs, i, e);
 }
 

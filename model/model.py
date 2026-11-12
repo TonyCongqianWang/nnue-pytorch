@@ -29,6 +29,7 @@ class NNUEModel(nn.Module):
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = config.moe_tail_experts
+        self.fc0_bottleneck_diversity_cost = config.moe_fc0_bottleneck_diversity_cost
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
         self.feature_name = self.input.FEATURE_NAME
@@ -53,6 +54,7 @@ class NNUEModel(nn.Module):
             fc0_count=config.moe_fc0_experts,
             fc0_rank=config.moe_fc0_rank,
             fc0_dim=config.moe_fc0_codebook_dim,
+            fc0_orthogonal_up_init=config.moe_fc0_orthogonal_up_init,
         )
         self.commit_loss: torch.Tensor | None = None
 
@@ -151,6 +153,11 @@ class NNUEModel(nn.Module):
             fake_quantize=fake_quantize_weights,
             mix_experts=mix_experts,
         )
+        codebook = self.router.codebook
+        if self.training and self.fc0_bottleneck_diversity_cost:
+            moe_loss = moe_loss + self.fc0_bottleneck_diversity_cost * (
+                self.layer_stacks.l1.bottleneck_diversity_loss(codebook[0])
+            )
         self.moe_loss = moe_loss
         self.commit_loss = commit_loss
         self.balance_loss = balance_loss
@@ -165,7 +172,7 @@ class NNUEModel(nn.Module):
         )
         x = self.layer_stacks(
             l0_,
-            self.router.codebook,
+            codebook,
             e1_w,
             e2_w,
             fake_quantize_acts,

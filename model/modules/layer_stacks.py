@@ -24,6 +24,7 @@ class LayerStacks(nn.Module):
         fc0_count=NUM_FC0_EXPERTS,
         fc0_rank=FC0_ADAPTER_RANK,
         fc0_dim=FC0_CODEBOOK_DIM,
+        fc0_orthogonal_up_init=False,
     ):
         super().__init__()
         if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
@@ -39,6 +40,7 @@ class LayerStacks(nn.Module):
             layer_key="ls_l1",
             dual_bias=True,
             factorized=True,
+            orthogonal_up_init=fc0_orthogonal_up_init,
         )
         self.l2 = MoeLinear(
             2 * config.L2,

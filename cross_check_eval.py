@@ -386,7 +386,7 @@ def init_random_weights(model: M.NNUEModel, *, build_router_lut=True) -> None:
                 ("fc0", model.router.fc0_lut, model.router.num_fc0_experts),
                 ("tail", model.router.lut, model.router.num_weight_experts),
             ):
-                table.copy_(torch.arange(len(table), device=table.device) % count)
+                table.random_(0, count)
             model.router.lut_valid = True
 
         all_param_ids = {id(p) for p in model.parameters()}

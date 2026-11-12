@@ -48,6 +48,7 @@ class MoeLinear(nn.Module):
         layer_key: str | None = None,
         dual_bias: bool = False,
         factorized: bool = False,
+        orthogonal_up_init: bool = False,
     ):
         super().__init__()
 
@@ -81,6 +82,15 @@ class MoeLinear(nn.Module):
         )
 
         self._reset_parameters()
+        if orthogonal_up_init:
+            if rank > self.adapter_up.shape[0]:
+                raise ValueError(
+                    "FC0 adapter rank exceeds the number of weight coefficients"
+                )
+            # Preserve the uniform initialization's expected Frobenius norm
+            # without changing the random initialization of subsequent layers.
+            with torch.random.fork_rng(devices=[]):
+                nn.init.orthogonal_(self.adapter_up, gain=math.sqrt(out_features / 3))
 
     def _reset_parameters(self) -> None:
         bound_cb = 1.0 / math.sqrt(self.codebook_dim) if self.codebook_dim > 0 else 0.0
@@ -100,6 +110,14 @@ class MoeLinear(nn.Module):
                 f"adapter_down expects {self.codebook_dim}, got {codebook.shape[-1]}"
             )
         return rms_norm(F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0)
+
+    def bottleneck_diversity_loss(self, codebook):
+        with ieee_matmul_precision():
+            h = self._bottleneck(codebook)
+            h = h - h.mean(dim=0)
+            gram = h @ h.T
+            # Inverse participation ratio of the centered variance spectrum.
+            return (gram.square().sum() + 1e-12) / (gram.trace().square() + 1e-12)
 
     def _expand_weights(self, h):
         weight = F.linear(h, self.adapter_up).reshape(

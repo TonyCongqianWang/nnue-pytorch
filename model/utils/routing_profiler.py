@@ -5,7 +5,7 @@ import sys
 import numpy as np
 import torch
 
-from ..modules.router import KING_STATES, MOE_BANKS
+from ..modules.router import KING_STATES, MOE_BANKS, TAIL_GEOMETRY_STATES
 
 
 def _table(headers, rows, file):
@@ -33,45 +33,43 @@ def print_routing_profile(model, file=None):
     file = sys.stdout if file is None else file
     router = model.router
     tables = router.get_lookup_table()
-    material = router.material_decode_table.cpu().numpy()
-    print(
-        "\nMoE8.6 routing profiles: LUT-weighted context means; IDs are training IDs. Export sorts by validation traffic.",
-        file=file,
-    )
+    print("\nMoE10 routing profiles. Export sorts by validation traffic.", file=file)
     for name, table in zip(MOE_BANKS, tables):
+        material = getattr(router, f"{name}_material_decode").cpu().numpy()
+        states = router.material_states[name]
         ids = table.cpu().numpy()
         n = len(router.codebooks[name])
         count = np.bincount(ids, minlength=n)
-        index = np.arange(len(ids), dtype=np.int64)
-        pair = index if name == "fc0" else index // KING_STATES
-        own = material[pair // router.material_states]
-        opp = material[pair % router.material_states]
+        sums = np.zeros((4, n))
+        geometry = np.zeros((TAIL_GEOMETRY_STATES, n))
+        for start in range(0, len(ids), 65536):
+            chunk = ids[start : start + 65536]
+            index = np.arange(start, start + len(chunk))
+            pair = index if name == "fc0" else index // TAIL_GEOMETRY_STATES
+            own, opp = material[pair // states], material[pair % states]
+            for i, values in enumerate((own[:, 0], opp[:, 0], own[:, 1], opp[:, 1])):
+                sums[i] += np.bincount(chunk, weights=values, minlength=n)
+            if name == "tail":
+                group = index % TAIL_GEOMETRY_STATES
+                geometry += np.bincount(
+                    group * n + chunk, minlength=geometry.size
+                ).reshape(geometry.shape)
+        means = sums / np.maximum(count, 1)
         val = getattr(router, f"validation_counts_{name}").cpu().numpy()
         total_val = val.sum()
-        features = [own[:, 0], opp[:, 0], own[:, 1], opp[:, 1], own[:, 3], opp[:, 3]]
-        means = [
-            np.bincount(ids, weights=f, minlength=n) / np.maximum(count, 1)
-            for f in features
-        ]
-        kings = []
-        if name == "tail":
-            kings = [
-                np.bincount(ids, weights=((index % 8) >> bit) & 1, minlength=n)
-                / np.maximum(count, 1)
-                for bit in [2, 1, 0]
-            ]
         rows = []
-        for e in np.argsort(-val, kind="stable"):
-            king = [f"{100 * x[e]:.1f}" for x in kings] if kings else ["-", "-", "-"]
+        for expert in np.argsort(-val, kind="stable"):
+            wing = geometry.reshape(-1, KING_STATES, n).sum(1)[:, expert]
             rows.append(
                 [
-                    e,
-                    f"{100 * count[e] / len(ids):.2f}",
-                    f"{100 * val[e] / total_val:.2f}" if total_val else "-",
-                    f"{means[0][e]:.1f}/{means[1][e]:.1f}",
-                    f"{means[2][e]:.1f}/{means[3][e]:.1f}",
-                    f"{100 * means[4][e]:.0f}/{100 * means[5][e]:.0f}",
-                    *king,
+                    expert,
+                    f"{100 * count[expert] / len(ids):.2f}",
+                    f"{100 * val[expert] / total_val:.2f}" if total_val else "-",
+                    f"{means[0, expert]:.1f}/{means[1, expert]:.1f}",
+                    f"{means[2, expert]:.1f}/{means[3, expert]:.1f}",
+                    "/".join(f"{100 * v / max(count[expert], 1):.0f}" for v in wing)
+                    if name == "tail"
+                    else "-",
                 ]
             )
         print(f"\n{name.upper()}: {n} experts, {len(ids):,} contexts", file=file)
@@ -81,11 +79,8 @@ def print_routing_profile(model, file=None):
                 "LUT %",
                 "Val %",
                 "T us/opp",
-                "P us/opp",
-                "Wide % u/o",
-                "Adv %",
-                "Ahead %",
-                "Opposite %",
+                "RelP us/opp" if name == "fc0" else "P us/opp",
+                "Wing state % (0/1/2/3/4)",
             ],
             rows,
             file,

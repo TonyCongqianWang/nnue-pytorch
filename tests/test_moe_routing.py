@@ -114,7 +114,7 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
         assert text.count("all experts " + layer + "_bias:") == 1
     assert "expert 0 ls_" not in text
     assert "FC0: 64 experts" in text and "TAIL: 256 experts" in text
-    assert "Wide % u/o" in text and "+---" in text
+    assert "Wing state %" in text and "+---" in text
     NNUEWriter(m, histogram_mode="none")
     assert capsys.readouterr().out == ""
 
@@ -131,3 +131,23 @@ def test_basis_initialization_preserves_variance():
             abs(weights.square().mean().sqrt().item() / (1 / (3 * 128)) ** 0.5 - 1)
             < 0.1
         )
+
+
+def test_fc0_orthogonal_basis_scale_and_bottleneck_penalty():
+    from model.modules.moe_linear import MoeLinear
+
+    kwargs = {"rank": 8, "codebook_dim": 16}
+    torch.manual_seed(17)
+    regular = MoeLinear(32, 4, 8, **kwargs)
+    after_regular = torch.rand(4)
+    torch.manual_seed(17)
+    orthogonal = MoeLinear(32, 4, 8, orthogonal_up_init=True, **kwargs)
+    torch.testing.assert_close(orthogonal.adapter_down, regular.adapter_down)
+    torch.testing.assert_close(torch.rand(4), after_regular)
+    basis = orthogonal.adapter_up
+    torch.testing.assert_close(basis.T @ basis, (4 / 3) * torch.eye(8))
+    cb = torch.randn(8, 16)
+    loss = orthogonal.bottleneck_diversity_loss(cb)
+    assert 1 / 7 <= loss <= 1
+    (gradient,) = torch.autograd.grad(loss, orthogonal.adapter_down)
+    assert gradient.isfinite().all() and gradient.abs().sum() > 0

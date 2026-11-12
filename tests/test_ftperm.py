@@ -13,6 +13,7 @@ from cross_check_eval import init_random_weights
 from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
+from model.modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE
 from model.utils.serialize import NNUEReader, NNUEWriter
 
 
@@ -41,8 +42,8 @@ def _generate_synthetic_batch(batch_size: int = 16, device: str = "cpu"):
         ],
         dim=1,
     )
-    c_them = torch.randint(0, 3655808, (batch_size,), device=device)
-    c_us = c_them // 8
+    c_them = torch.randint(0, ROUTER_TABLE_SIZE, (batch_size,), device=device)
+    c_us = torch.randint(0, FC0_ROUTER_TABLE_SIZE, (batch_size,), device=device)
     return us, them, white_indices, black_indices, c_us, c_them
 
 

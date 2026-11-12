@@ -28,17 +28,20 @@ def ieee_matmul_precision():
         torch.set_float32_matmul_precision(prev_precision)
 
 
-NUM_MATERIAL_STATES = 676
+NUM_MATERIAL_STATES = 396
+NUM_FC0_MATERIAL_STATES = 203
 KING_STATES = 8
-FC0_ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2
-ROUTER_TABLE_SIZE = FC0_ROUTER_TABLE_SIZE * KING_STATES
+WING_STATES = 5
+TAIL_GEOMETRY_STATES = KING_STATES * WING_STATES
+FC0_ROUTER_TABLE_SIZE = NUM_FC0_MATERIAL_STATES**2
+ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2 * TAIL_GEOMETRY_STATES
 NUM_FC0_EXPERTS = 64
 NUM_WEIGHT_EXPERTS = 256
 FC0_CODEBOOK_DIM = 256
 CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
-ROUTER_HASH = 0x4D6F3900
+ROUTER_HASH = 0x4D313000
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -86,54 +89,74 @@ def get_router_hash(
     return ROUTER_HASH ^ ((num_fc0_experts << 16) | num_weight_experts)
 
 
+def relative_pawns(total, pawns):
+    officers = total - pawns
+    return (
+        0
+        if pawns == 0
+        else 1
+        if pawns <= officers
+        else 2
+        if pawns <= officers + 2
+        else 3
+    )
+
+
 _MATERIAL_STATES = [
-    (t, p, h, wide)
+    (t, p, h)
     for t in range(16)
     for p in range(min(8, t) + 1)
     for h in range(4)
     if t - p >= (1 if h < 2 else 2 if h == 2 else 0)
-    for wide in range(2 if p >= 2 else 1)
 ]
+_FC0_MATERIAL_STATES = sorted(
+    {(t, relative_pawns(t, p), h) for t, p, h in _MATERIAL_STATES}
+)
 assert len(_MATERIAL_STATES) == NUM_MATERIAL_STATES
+assert len(_FC0_MATERIAL_STATES) == NUM_FC0_MATERIAL_STATES
 _MATERIAL_IDS = {state: i for i, state in enumerate(_MATERIAL_STATES)}
-_MATERIAL_DECODE_TABLE = torch.tensor(_MATERIAL_STATES, dtype=torch.long)
+_FC0_MATERIAL_IDS = {state: i for i, state in enumerate(_FC0_MATERIAL_STATES)}
 
 
-def encode_material_state(t, p, h, wide=False):
-    try:
-        return _MATERIAL_IDS[t, p, h, int(wide)]
-    except KeyError:
-        raise ValueError(f"Illegal material/layout state: {t, p, h, wide}") from None
+def encode_material_state(t, p, h, *, first_layer=False):
+    if (t, p, h) not in _MATERIAL_IDS:
+        raise ValueError(f"Illegal material state: {t, p, h}")
+    if first_layer:
+        return _FC0_MATERIAL_IDS[t, relative_pawns(t, p), h]
+    return _MATERIAL_IDS[t, p, h]
 
 
-def decode_material_state(index):
-    return _MATERIAL_STATES[index]
+def decode_material_state(index, *, first_layer=False):
+    return (_FC0_MATERIAL_STATES if first_layer else _MATERIAL_STATES)[index]
 
 
-def make_router_index(ours, theirs, king=None):
-    pair = ours * NUM_MATERIAL_STATES + theirs
-    return pair if king is None else pair * KING_STATES + king
-
-
-def decompose_router_index(
-    index, *, first_layer=False, material_states=NUM_MATERIAL_STATES
-):
-    pair = (
-        index if first_layer else torch.div(index, KING_STATES, rounding_mode="floor")
-    )
+def make_router_index(ours, theirs, king=None, wings=0):
+    if king is None:
+        return ours * NUM_FC0_MATERIAL_STATES + theirs
     return (
-        torch.div(pair, material_states, rounding_mode="floor"),
+        (ours * NUM_MATERIAL_STATES + theirs) * WING_STATES + wings
+    ) * KING_STATES + king
+
+
+def decompose_router_index(index, *, first_layer=False, material_states=None):
+    if material_states is None:
+        material_states = (
+            NUM_FC0_MATERIAL_STATES if first_layer else NUM_MATERIAL_STATES
+        )
+    pair = index if first_layer else index // TAIL_GEOMETRY_STATES
+    return (
+        pair // material_states,
         pair % material_states,
-        torch.zeros_like(index) if first_layer else index % KING_STATES,
+        torch.zeros_like(index) if first_layer else index % TAIL_GEOMETRY_STATES,
     )
 
 
 class MaterialEncoder(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, pawn_states):
         super().__init__()
         self.sides = nn.ModuleList(
             [
-                nn.ModuleList([nn.Embedding(n, dim) for n in (16, 9, 4, 2)])
+                nn.ModuleList([nn.Embedding(n, dim) for n in (16, pawn_states, 4)])
                 for _ in range(2)
             ]
         )
@@ -146,10 +169,7 @@ class MaterialEncoder(nn.Module):
             features = table[ids].unbind(-1)
             tables = self.sides[side]
             return (
-                tables[0](features[0])
-                + tables[1](features[1])
-                + tables[2](features[2])
-                + tables[3](features[3])
+                tables[0](features[0]) + tables[1](features[1]) + tables[2](features[2])
             )
 
         return encode(0, ours) + encode(1, theirs)
@@ -164,7 +184,7 @@ class MoERouter(nn.Module):
         num_weight_experts=NUM_WEIGHT_EXPERTS,
         fc0_dim=FC0_CODEBOOK_DIM,
         dim=CODEBOOK_DIM,
-        material_states=NUM_MATERIAL_STATES,
+        material_states=None,
         commitment_cost=0.005,
         fc0_balance_kl_cost=0.001,
         tail_balance_kl_cost=0.001,
@@ -178,15 +198,21 @@ class MoERouter(nn.Module):
         if not (
             1 < num_fc0_experts <= 64
             and 1 < num_weight_experts <= 256
-            and 1 <= material_states <= NUM_MATERIAL_STATES
+            and (
+                material_states is None
+                or 1 <= material_states <= NUM_FC0_MATERIAL_STATES
+            )
         ):
-            raise ValueError("MoE9 supports 64 FC0 and 256 tail experts")
+            raise ValueError("MoE10 supports 64 FC0 and 256 tail experts")
         self.num_fc0_experts, self.num_weight_experts = (
             num_fc0_experts,
             num_weight_experts,
         )
-        self.material_states = material_states
-        self.num_contexts = material_states**2 * KING_STATES
+        self.material_states = {
+            "fc0": material_states or NUM_FC0_MATERIAL_STATES,
+            "tail": material_states or NUM_MATERIAL_STATES,
+        }
+        self.num_contexts = self.material_states["tail"] ** 2 * TAIL_GEOMETRY_STATES
         self.commitment_cost = commitment_cost
         self.balance_kl_costs = {
             "fc0": fc0_balance_kl_cost,
@@ -196,10 +222,12 @@ class MoERouter(nn.Module):
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
         self.encoders = nn.ModuleDict(
-            {"fc0": MaterialEncoder(fc0_dim), "tail": MaterialEncoder(dim)}
+            {"fc0": MaterialEncoder(fc0_dim, 4), "tail": MaterialEncoder(dim, 9)}
         )
         self.king = nn.Embedding(KING_STATES, dim)
-        nn.init.uniform_(self.king.weight, -1 / math.sqrt(dim), 1 / math.sqrt(dim))
+        self.wings = nn.Embedding(WING_STATES, dim)
+        for emb in (self.king, self.wings):
+            nn.init.uniform_(emb.weight, -1 / math.sqrt(dim), 1 / math.sqrt(dim))
         self.codebooks = nn.ParameterDict(
             {
                 "fc0": nn.Parameter(torch.empty(num_fc0_experts, fc0_dim)),
@@ -210,7 +238,10 @@ class MoERouter(nn.Module):
             bound = 1 / math.sqrt(parameter.shape[1])
             nn.init.uniform_(parameter, -bound, bound)
         self.register_buffer(
-            "material_decode_table", _MATERIAL_DECODE_TABLE, persistent=False
+            "fc0_material_decode", torch.tensor(_FC0_MATERIAL_STATES), persistent=False
+        )
+        self.register_buffer(
+            "tail_material_decode", torch.tensor(_MATERIAL_STATES), persistent=False
         )
         for name, cb in self.codebooks.items():
             count = len(cb)
@@ -222,6 +253,11 @@ class MoERouter(nn.Module):
             )
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
+            )
+            self.register_buffer(
+                f"validation_heavy_{name}",
+                torch.zeros(2, count, 4, dtype=torch.int64),
+                persistent=False,
             )
         for name, cb in self.codebooks.items():
             self.register_buffer(
@@ -237,7 +273,7 @@ class MoERouter(nn.Module):
         self.collect_joint_diagnostics = False
         self.register_buffer(
             "fc0_lut",
-            torch.zeros(material_states**2, dtype=torch.long),
+            torch.zeros(self.material_states["fc0"] ** 2, dtype=torch.long),
             persistent=False,
         )
         self.register_buffer(
@@ -281,11 +317,13 @@ class MoERouter(nn.Module):
 
     def get_context_vector(self, index, bank="tail"):
         ours, theirs, king = decompose_router_index(
-            index, first_layer=bank == "fc0", material_states=self.material_states
+            index, first_layer=bank == "fc0", material_states=self.material_states[bank]
         )
-        raw = self.encoders[bank](ours, theirs, self.material_decode_table)
+        raw = self.encoders[bank](
+            ours, theirs, getattr(self, f"{bank}_material_decode")
+        )
         if bank == "tail":
-            raw = raw + self.king(king)
+            raw = raw + self.king(king % KING_STATES) + self.wings(king // KING_STATES)
         return center_and_rms_norm(raw, self.codebook_target_norm)
 
     def quantize(
@@ -413,7 +451,7 @@ class MoERouter(nn.Module):
 
     @torch.no_grad()
     def update_lookup_table(self, chunk_size=8192):
-        # Never materialize the 3.65M x 2048 context tensor.
+        # Generate the large tail table in bounded chunks.
         self.lut_margin_valid = False
         with ieee_matmul_precision():
             for row, name in enumerate(MOE_BANKS):
@@ -534,5 +572,14 @@ class MoERouter(nn.Module):
         if self.collect_joint_diagnostics:
             pair = ids[0] * self.num_weight_experts + ids[1]
             self.validation_joint_counts.scatter_add_(0, pair, torch.ones_like(pair))
+            # Both banks see the same heavy categories, which the exact tail context encodes.
+            ours, theirs, _ = decompose_router_index(
+                c_tail, material_states=self.material_states["tail"]
+            )
+            for name, index in zip(MOE_BANKS, ids):
+                counts = getattr(self, f"validation_heavy_{name}")
+                for side, material in enumerate((ours, theirs)):
+                    key = index * 4 + self.tail_material_decode[material, 2]
+                    counts[side].view(-1).scatter_add_(0, key, torch.ones_like(key))
         zero = torch.zeros((), device=c_fc0.device)
         return *ids, zero, zero, zero

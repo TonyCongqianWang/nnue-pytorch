@@ -838,6 +838,7 @@ class MoEDeadExpertReseeder(Callback):
         router = _unwrap_module(trainer.model).model.router
         for name, _, _, _, _ in router.banks():
             getattr(router, f"validation_counts_{name}").zero_()
+            getattr(router, f"validation_heavy_{name}").zero_()
         final = getattr(trainer, "validation_is_final", False)
         router.validation_joint_counts.zero_()
         router.collect_joint_diagnostics = final and not trainer.sanity_checking
@@ -860,6 +861,7 @@ class MoEDeadExpertReseeder(Callback):
             # One small collective per table, only at the final boundary.
             for name in ("fc0", "tail"):
                 dist.all_reduce(getattr(router, f"validation_counts_{name}"))
+                dist.all_reduce(getattr(router, f"validation_heavy_{name}"))
             dist.all_reduce(router.validation_joint_counts)
         router.collect_lut_diagnostics = router.collect_joint_diagnostics = False
         if getattr(trainer, "rank", 0) != 0:
@@ -924,6 +926,7 @@ class MoEDeadExpertReseeder(Callback):
                     )
                     runner_ups.zero_()
         if final:
+            self._log_fc0_rank(trainer)
             self._save_final_routing(trainer, router)
         terms = [
             f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
@@ -974,6 +977,40 @@ class MoEDeadExpertReseeder(Callback):
             if key in state and state[key] is not None:
                 state[key].index_fill_(0, idx_tensor, 0.0)
 
+    def on_train_start(self, trainer):
+        if trainer.rank == 0:
+            self._log_fc0_rank(trainer)
+
+    @staticmethod
+    @torch.no_grad()
+    def _log_fc0_rank(trainer):
+        from model.modules.router import ieee_matmul_precision
+
+        from .engine import _unwrap_module
+
+        model = _unwrap_module(trainer.model).model
+        stacks = getattr(model, "layer_stacks", None)
+        if stacks is None:
+            return
+
+        def effective_rank(gram):
+            energy = torch.linalg.eigvalsh(gram.cpu().double()).clamp_min(0)
+            mass = energy / energy.sum().clamp_min(1e-30)
+            return float(torch.exp(-(mass * mass.clamp_min(1e-30).log()).sum()))
+
+        layer = stacks.l1
+        with ieee_matmul_precision():
+            h = layer._bottleneck(model.router.normalized_codebook("fc0"))
+            h = h - h.mean(dim=0)
+            latent = h @ h.T
+            weights = h @ (layer.adapter_up.T @ layer.adapter_up) @ h.T
+        print(
+            f"[FC0 effective rank] step={trainer.global_step} "
+            f"bottleneck={effective_rank(latent):.2f} "
+            f"weight residual={effective_rank(weights):.2f}",
+            flush=True,
+        )
+
     @staticmethod
     def _save_final_routing(trainer, router):
         """Persist exact final counts without flooding logs with expert rows."""
@@ -984,10 +1021,26 @@ class MoEDeadExpertReseeder(Callback):
         os.makedirs(directory, exist_ok=True)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["bank", "fc0_id", "tail_id", "count", "fraction"])
+            categories = ("queen", "rook", "bishop_pair", "else")
+            heavy_columns = [
+                f"{side}_{category}"
+                for side in ("stm", "opp")
+                for category in categories
+            ]
+            writer.writerow(
+                ["bank", "fc0_id", "tail_id", "count", "fraction", *heavy_columns]
+            )
             for name in ("fc0", "tail"):
                 counts = getattr(router, f"validation_counts_{name}").cpu()
+                heavy = getattr(router, f"validation_heavy_{name}").cpu()
                 total = max(int(counts.sum()), 1)
+                if name == "fc0":
+                    for side, totals in zip(("STM", "OPP"), heavy.sum(dim=1).tolist()):
+                        shares = ", ".join(
+                            f"{c}={100 * n / total:.1f}%"
+                            for c, n in zip(categories, totals)
+                        )
+                        print(f"[Final heavy categories {side}] {shares}", flush=True)
                 for i, count in enumerate(counts.tolist()):
                     writer.writerow(
                         [
@@ -996,6 +1049,7 @@ class MoEDeadExpertReseeder(Callback):
                             i if name == "tail" else "",
                             count,
                             count / total,
+                            *heavy[:, i].flatten().tolist(),
                         ]
                     )
             joint = router.validation_joint_counts.cpu()

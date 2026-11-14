@@ -25,6 +25,7 @@ class LayerStacks(nn.Module):
         fc0_rank=FC0_ADAPTER_RANK,
         fc0_dim=FC0_CODEBOOK_DIM,
         fc0_orthogonal_up_init=False,
+        center_fc0_weights=False,
     ):
         super().__init__()
         if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
@@ -41,6 +42,7 @@ class LayerStacks(nn.Module):
             dual_bias=True,
             factorized=True,
             orthogonal_up_init=fc0_orthogonal_up_init,
+            center_experts=center_fc0_weights,
         )
         self.l2 = MoeLinear(
             2 * config.L2,
@@ -64,6 +66,17 @@ class LayerStacks(nn.Module):
 
     def dense_layers(self):
         return self.l1, self.l2, self.output
+
+    def bottleneck_diversity_loss(self, codebook, costs):
+        loss = 0.0
+        for layers, vectors, cost in zip(
+            ((self.l1,), (self.l2, self.output)), codebook, costs
+        ):
+            if cost:
+                loss = loss + (cost / len(layers)) * sum(
+                    layer.bottleneck_diversity_loss(vectors) for layer in layers
+                )
+        return loss
 
     def forward(
         self,

@@ -49,6 +49,7 @@ class MoeLinear(nn.Module):
         dual_bias: bool = False,
         factorized: bool = False,
         orthogonal_up_init: bool = False,
+        center_experts: bool = False,
     ):
         super().__init__()
 
@@ -61,6 +62,7 @@ class MoeLinear(nn.Module):
         self.quantization = quantization
         self.layer_key = layer_key
         self.is_coalesced = False
+        self.center_experts = center_experts
 
         self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
         self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
@@ -120,10 +122,18 @@ class MoeLinear(nn.Module):
             return (gram.square().sum() + 1e-12) / (gram.trace().square() + 1e-12)
 
     def _expand_weights(self, h):
-        weight = F.linear(h, self.adapter_up).reshape(
+        weight = self._generate_weights(h)
+        return weight if self.shared_weight is None else weight + self.shared_weight
+
+    def _generate_weights(self, h):
+        if getattr(self, "center_experts", False):
+            if h.ndim != 2 or len(h) != self.count:
+                raise ValueError("Centering requires the complete expert codebook")
+            # Expansion is linear, so center before materializing full weights.
+            h = h - h.mean(dim=0, keepdim=True)
+        return F.linear(h, self.adapter_up).reshape(
             *h.shape[:-1], self.out_features, self.in_features
         )
-        return weight if self.shared_weight is None else weight + self.shared_weight
 
     def get_expert_weight_and_bias(self, c):
         with ieee_matmul_precision():
@@ -131,7 +141,7 @@ class MoeLinear(nn.Module):
             return self._expand_weights(h), F.linear(h, self.bias_adapter)
 
     def get_delta_weights(self, codebook):
-        return F.linear(self._bottleneck(codebook), self.adapter_up).view(
+        return self._generate_weights(self._bottleneck(codebook)).view(
             -1, self.out_features, self.in_features
         )
 

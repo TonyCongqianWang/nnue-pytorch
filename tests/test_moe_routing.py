@@ -115,6 +115,11 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
     assert "expert 0 ls_" not in text
     assert "FC0: 64 experts" in text and "TAIL: 256 experts" in text
     assert "Wing state %" in text and "+---" in text
+    fc0_table, tail_table = text.split("TAIL: 256 experts")
+    assert "Wing state %" not in fc0_table
+    assert "Wing state %" in tail_table
+    assert "Heavy % STM / OPP (Q/R/BP/Else)" in fc0_table
+    assert "Heavy % STM / OPP (Q/R/BP/Else)" in tail_table
     NNUEWriter(m, histogram_mode="none")
     assert capsys.readouterr().out == ""
 
@@ -151,3 +156,20 @@ def test_fc0_orthogonal_basis_scale_and_bottleneck_penalty():
     assert 1 / 7 <= loss <= 1
     (gradient,) = torch.autograd.grad(loss, orthogonal.adapter_down)
     assert gradient.isfinite().all() and gradient.abs().sum() > 0
+
+
+def test_centered_fc0_weights_survive_coalescing():
+    from model.modules.moe_linear import MoeLinear
+
+    layer = MoeLinear(8, 4, 5, rank=4, codebook_dim=8, factorized=True)
+    codebook = torch.randn(5, 8)
+    original, biases = layer.get_all_weights_and_biases(codebook)
+    original = original.view(5, 4, 8)
+    layer.center_experts = True
+    centered, centered_biases = layer.get_all_weights_and_biases(codebook)
+    expected = original - original.mean(0) + layer.shared_weight
+    torch.testing.assert_close(centered.view_as(expected), expected)
+    torch.testing.assert_close(centered_biases, biases)
+    layer.coalesce_weights(codebook)
+    exported, _ = layer.get_all_weights_and_biases()
+    torch.testing.assert_close(exported, centered)

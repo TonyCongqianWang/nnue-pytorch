@@ -38,6 +38,11 @@ class ModelConfig(LayerStacksConfig):
 
     moe_fc0_bottleneck_diversity_cost: float = 0.0
     """Penalty on concentration of centered FC0 bottleneck variance."""
+    moe_tail_bottleneck_diversity_cost: float = 0.0
+    """Penalty on concentration of centered tail bottleneck variance."""
+    moe_center_fc0_weights: bool = False
+    """Center generated FC0 weights across experts before adding the shared matrix."""
+
     moe_fc0_orthogonal_up_init: bool = False
     """Initialize FC0 adapter-up columns orthogonally at the standard weight scale."""
 
@@ -59,11 +64,12 @@ class ModelConfig(LayerStacksConfig):
                 self.moe_tail_balance_kl_cost,
                 self.moe_mix_interval,
                 self.moe_fc0_bottleneck_diversity_cost,
+                self.moe_tail_bottleneck_diversity_cost,
             )
             < 0
         ):
             raise ValueError(
-                "MoE balance costs and mixing interval must be nonnegative"
+                "MoE regularization costs and mixing interval must be nonnegative"
             )
         if self.moe_mix_interval and self.moe_tail_experts < 4:
             raise ValueError("MoE mixing requires at least four tail experts")

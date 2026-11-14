@@ -572,19 +572,18 @@ constexpr int relative_pawns(int pieces, int pawns) {
 
 constexpr auto MATERIAL_IDS = [] {
     struct Tables {
-        std::array<std::array<std::array<int, 4>, 9>, 16> tail{};
-        std::array<std::array<std::array<int, 4>, 4>, 16> fc0{};
+        std::array<std::array<std::array<int, 2>, 9>, 16> tail{};
+        std::array<std::array<std::array<int, 2>, 4>, 16> fc0{};
         int tailCount = 0, fc0Count = 0;
     } tables;
     for (int t = 0; t < 16; ++t)
     {
         for (int p = 0; p <= std::min(8, t); ++p)
-            for (int h = 0; h < 4; ++h)
-                if (t - p >= (h < 2 ? 1 : h == 2 ? 2 : 0))
-                {
-                    tables.tail[t][p][h] = tables.tailCount++;
-                    tables.fc0[t][relative_pawns(t, p)][h] = -1;
-                }
+            for (int h = 0; h <= int(t > p); ++h)
+            {
+                tables.tail[t][p][h]                   = tables.tailCount++;
+                tables.fc0[t][relative_pawns(t, p)][h] = -1;
+            }
         for (auto& row : tables.fc0[t])
             for (int& id : row)
                 if (id == -1)
@@ -593,7 +592,7 @@ constexpr auto MATERIAL_IDS = [] {
     return tables;
 }();
 
-static_assert(MATERIAL_IDS.fc0Count == 203 && MATERIAL_IDS.tailCount == 396);
+static_assert(MATERIAL_IDS.fc0Count == 107 && MATERIAL_IDS.tailCount == 207);
 
 int joint_wings(int us, int them) {
     if (us == 3 || them == 3)
@@ -610,14 +609,12 @@ static MaterialContext material_context(const Position& pos, Color perspective) 
     const int p =
       std::clamp(int(pos.piecesBB(Piece(PieceType::Pawn, perspective)).count()), 0, std::min(8, t));
     const auto bishops = pos.piecesBB(Piece(PieceType::Bishop, perspective)).bits();
-    const int  h =
-      t - p >= 1 && pos.piecesBB(Piece(PieceType::Queen, perspective)).any()                  ? 0
-       : t - p >= 1 && pos.piecesBB(Piece(PieceType::Rook, perspective)).any()                 ? 1
-       : t - p >= 2 && (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL) ? 2
-                                                                                               : 3;
+    const bool pair    = (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL);
+    const int  rooks   = pos.piecesBB(Piece(PieceType::Rook, perspective)).count();
+    const int  queens  = pos.piecesBB(Piece(PieceType::Queen, perspective)).count();
+    const int  h       = t - p - rooks - queens + pair > rooks + 2 * queens;
     const auto pawns = pos.piecesBB(Piece(PieceType::Pawn, perspective)).bits();
-    const int wings = bool(pawns & 0x0707070707070707ULL)
-                    + 2 * bool(pawns & 0xE0E0E0E0E0E0E0E0ULL);
+    const int wings = bool(pawns & 0x0F0F0F0F0F0F0F0FULL) + 2 * bool(pawns & 0xF0F0F0F0F0F0F0F0ULL);
     return {MATERIAL_IDS.fc0[t][relative_pawns(t, p)][h], MATERIAL_IDS.tail[t][p][h], wings};
 }
 
@@ -632,7 +629,7 @@ void SparseBatch::fill_entry(const IFeatureExtractor& fs, int i, const TrainingD
     const int own = int(e.pos.kingSquare(stm)) ^ (56 * int(stm == Color::Black));
     const int enemy = int(e.pos.kingSquare(!stm)) ^ (56 * int(stm == Color::White));
     const int f1 = own % 8, f2 = enemy % 8;
-    const bool opposite = (f1 <= 2 && f2 >= 5) || (f2 <= 2 && f1 >= 5);
+    const bool opposite = (f1 < 4) != (f2 < 4);
     const int king = 4 * (own / 8 >= 2) + 2 * (own / 8 > enemy / 8) + opposite;
     const int tail = (us.tail * MATERIAL_IDS.tailCount + opp.tail) * 5 + joint_wings(us.wings, opp.wings);
     context_them[i] = tail * 8 + king;

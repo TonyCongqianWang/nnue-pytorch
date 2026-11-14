@@ -28,8 +28,8 @@ def ieee_matmul_precision():
         torch.set_float32_matmul_precision(prev_precision)
 
 
-NUM_MATERIAL_STATES = 396
-NUM_FC0_MATERIAL_STATES = 203
+NUM_MATERIAL_STATES = 207
+NUM_FC0_MATERIAL_STATES = 107
 KING_STATES = 8
 WING_STATES = 5
 TAIL_GEOMETRY_STATES = KING_STATES * WING_STATES
@@ -41,7 +41,7 @@ FC0_CODEBOOK_DIM = 256
 CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
-ROUTER_HASH = 0x4D313000
+ROUTER_HASH = 0x4D313100
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -106,8 +106,7 @@ _MATERIAL_STATES = [
     (t, p, h)
     for t in range(16)
     for p in range(min(8, t) + 1)
-    for h in range(4)
-    if t - p >= (1 if h < 2 else 2 if h == 2 else 0)
+    for h in range(1 + int(t > p))
 ]
 _FC0_MATERIAL_STATES = sorted(
     {(t, relative_pawns(t, p), h) for t, p, h in _MATERIAL_STATES}
@@ -156,7 +155,7 @@ class MaterialEncoder(nn.Module):
         super().__init__()
         self.sides = nn.ModuleList(
             [
-                nn.ModuleList([nn.Embedding(n, dim) for n in (16, pawn_states, 4)])
+                nn.ModuleList([nn.Embedding(n, dim) for n in (16, pawn_states, 2)])
                 for _ in range(2)
             ]
         )
@@ -256,7 +255,7 @@ class MoERouter(nn.Module):
             )
             self.register_buffer(
                 f"validation_heavy_{name}",
-                torch.zeros(2, count, 4, dtype=torch.int64),
+                torch.zeros(2, count, 2, dtype=torch.int64),
                 persistent=False,
             )
         for name, cb in self.codebooks.items():
@@ -299,14 +298,15 @@ class MoERouter(nn.Module):
     def codebook(self):
         return tuple(self.normalized_codebook(name) for name in MOE_BANKS)
 
-    def banks(self):
-        for name in MOE_BANKS:
+    def banks(self, codebook=None):
+        vectors = self.codebook if codebook is None else codebook
+        for name, normalized in zip(MOE_BANKS, vectors):
             yield (
                 name,
                 self.codebooks[name],
                 getattr(self, f"ema_traffic_{name}"),
                 getattr(self, f"ema_soft_{name}"),
-                self.normalized_codebook(name),
+                normalized,
             )
 
     def train(self, mode=True):
@@ -526,10 +526,11 @@ class MoERouter(nn.Module):
         fake_quantize=False,
         *,
         mix_experts=False,
+        codebook=None,
     ):
         if self.training:
             ids, parts = [], []
-            for name, _, hard, soft, cb in self.banks():
+            for name, _, hard, soft, cb in self.banks(codebook):
                 context = c_fc0 if name == "fc0" else c_tail
                 z = self.get_context_vector(context, name)
                 top_k = (2 if name == "fc0" else 4) if mix_experts else 1
@@ -552,7 +553,9 @@ class MoERouter(nn.Module):
                     [
                         commit * 0.5,
                         balance * self.balance_kl_costs[name] * 0.5,
-                        codebook_diversity_loss(cb) * self.diversity_cost * 0.5,
+                        codebook_diversity_loss(cb) * self.diversity_cost * 0.5
+                        if self.diversity_cost
+                        else commit.new_zeros(()),
                     ]
                 )
             parts = torch.stack(parts)
@@ -579,7 +582,7 @@ class MoERouter(nn.Module):
             for name, index in zip(MOE_BANKS, ids):
                 counts = getattr(self, f"validation_heavy_{name}")
                 for side, material in enumerate((ours, theirs)):
-                    key = index * 4 + self.tail_material_decode[material, 2]
+                    key = index * 2 + self.tail_material_decode[material, 2]
                     counts[side].view(-1).scatter_add_(0, key, torch.ones_like(key))
         zero = torch.zeros((), device=c_fc0.device)
         return *ids, zero, zero, zero

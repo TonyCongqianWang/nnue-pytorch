@@ -118,8 +118,8 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
     fc0_table, tail_table = text.split("TAIL: 256 experts")
     assert "Wing state %" not in fc0_table
     assert "Wing state %" in tail_table
-    assert "Heavy % STM / OPP (Q/R/BP/Else)" in fc0_table
-    assert "Heavy % STM / OPP (Q/R/BP/Else)" in tail_table
+    assert "Minor edge % STM / OPP (No/Yes)" in fc0_table
+    assert "Minor edge % STM / OPP (No/Yes)" in tail_table
     NNUEWriter(m, histogram_mode="none")
     assert capsys.readouterr().out == ""
 
@@ -173,3 +173,24 @@ def test_centered_fc0_weights_survive_coalescing():
     layer.coalesce_weights(codebook)
     exported, _ = layer.get_all_weights_and_biases()
     torch.testing.assert_close(exported, centered)
+
+
+def test_zero_expert_mean_and_reuse_bottleneck():
+    from model.modules.moe_linear import MoeLinear
+
+    layer = MoeLinear(16, 8, 8, rank=8, codebook_dim=16)
+    cb = torch.randn(8, 16)
+    h = layer._bottleneck(cb)
+    before = layer.get_delta_weights(cb)
+    layer.zero_expert_mean_at_init(cb)
+    after = layer.get_delta_weights(cb)
+    torch.testing.assert_close(
+        after.mean(0), torch.zeros_like(after[0]), atol=1e-7, rtol=0
+    )
+    torch.testing.assert_close(after.norm(), (before - before.mean(0)).norm())
+    direct = layer.get_all_weights_and_biases(cb)
+    cached = layer.get_all_weights_and_biases(bottleneck=h)
+    torch.testing.assert_close(cached, direct)
+    torch.testing.assert_close(
+        layer.bottleneck_diversity(h), layer.bottleneck_diversity_loss(cb)
+    )

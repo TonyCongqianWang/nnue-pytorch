@@ -16,17 +16,15 @@ def get_context_indices(board):
         t = min(15, chess.popcount(own) - 1)
         p = min(8, t, chess.popcount(board.pawns & own))
         b = board.bishops & own
-        h = (
-            0
-            if t - p >= 1 and board.queens & own
-            else 1
-            if t - p >= 1 and board.rooks & own
-            else 2
-            if t - p >= 2 and b & chess.BB_LIGHT_SQUARES and b & chess.BB_DARK_SQUARES
-            else 3
+        opponents = chess.popcount(board.rooks & own) + 2 * chess.popcount(
+            board.queens & own
+        )
+        pair = bool(b & chess.BB_LIGHT_SQUARES and b & chess.BB_DARK_SQUARES)
+        h = int(
+            chess.popcount((board.knights | board.bishops) & own) + pair > opponents
         )
         pawns = board.pawns & own
-        wings = bool(pawns & 0x0707070707070707) + 2 * bool(pawns & 0xE0E0E0E0E0E0E0E0)
+        wings = bool(pawns & 0x0F0F0F0F0F0F0F0F) + 2 * bool(pawns & 0xF0F0F0F0F0F0F0F0)
         return (
             encode_material_state(t, p, h, first_layer=True),
             encode_material_state(t, p, h),
@@ -39,7 +37,7 @@ def get_context_indices(board):
     rank = chess.square_rank(own) if us else 7 - chess.square_rank(own)
     theirs = chess.square_rank(other) if not us else 7 - chess.square_rank(other)
     f1, f2 = chess.square_file(own), chess.square_file(other)
-    opposite = (f1 <= 2 and f2 >= 5) or (f2 <= 2 and f1 >= 5)
+    opposite = (f1 < 4) != (f2 < 4)
     king = 4 * (rank >= 2) + 2 * (rank > theirs) + opposite
     (a0, a, aw), (b0, b, bw) = material(us), material(not us)
     if aw == 3 or bw == 3:
@@ -50,10 +48,10 @@ def get_context_indices(board):
 
 
 def test_material_layout_bijection():
-    assert NUM_MATERIAL_STATES == 396
+    assert NUM_MATERIAL_STATES == 207
     for i in range(NUM_MATERIAL_STATES):
         assert encode_material_state(*decode_material_state(i)) == i
-    for args in [(0, 0, 0), (1, 2, 3), (1, 0, 2)]:
+    for args in [(0, 0, 1), (1, 2, 0), (1, 0, 2)]:
         with pytest.raises(ValueError):
             encode_material_state(*args)
 
@@ -75,7 +73,7 @@ def native_contexts(fens):
         ("h1", "g8", 0),
         ("h2", "g8", 2),
         ("c2", "g8", 3),
-        ("d2", "h8", 2),
+        ("d2", "h8", 3),
         ("h3", "g8", 6),
         ("h3", "g6", 4),
         ("h3", "g5", 4),
@@ -101,7 +99,7 @@ def test_king_state_native_parity(king, enemy, expected):
         (["a3"], ["a6", "h6"], 2),
         (["a3"], ["h6"], 3),
         (["a3"], ["a6"], 4),
-        (["d3"], ["h6"], 4),
+        (["d3"], ["h6"], 3),
         ([], ["h6"], 4),
     ],
 )

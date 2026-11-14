@@ -24,8 +24,6 @@ class LayerStacks(nn.Module):
         fc0_count=NUM_FC0_EXPERTS,
         fc0_rank=FC0_ADAPTER_RANK,
         fc0_dim=FC0_CODEBOOK_DIM,
-        fc0_orthogonal_up_init=False,
-        center_fc0_weights=False,
     ):
         super().__init__()
         if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
@@ -40,9 +38,6 @@ class LayerStacks(nn.Module):
             quantization=quantization,
             layer_key="ls_l1",
             dual_bias=True,
-            factorized=True,
-            orthogonal_up_init=fc0_orthogonal_up_init,
-            center_experts=center_fc0_weights,
         )
         self.l2 = MoeLinear(
             2 * config.L2,
@@ -67,16 +62,17 @@ class LayerStacks(nn.Module):
     def dense_layers(self):
         return self.l1, self.l2, self.output
 
-    def bottleneck_diversity_loss(self, codebook, costs):
-        loss = 0.0
+    def training_bottlenecks(self, codebook, costs):
+        bottlenecks, loss = [], 0.0
         for layers, vectors, cost in zip(
             ((self.l1,), (self.l2, self.output)), codebook, costs
         ):
-            if cost:
-                loss = loss + (cost / len(layers)) * sum(
-                    layer.bottleneck_diversity_loss(vectors) for layer in layers
-                )
-        return loss
+            for layer in layers:
+                h = layer._bottleneck(vectors) if cost else None
+                bottlenecks.append(h)
+                if cost:
+                    loss = loss + (cost / len(layers)) * layer.bottleneck_diversity(h)
+        return tuple(bottlenecks), loss
 
     def forward(
         self,
@@ -86,6 +82,8 @@ class LayerStacks(nn.Module):
         tail,
         fake_quantize_acts=True,
         fake_quantize_weights=True,
+        *,
+        bottlenecks=(None, None, None),
     ):
         cb0, cbt = (None, None) if codebook is None else codebook
 
@@ -102,7 +100,9 @@ class LayerStacks(nn.Module):
                 )
             )
 
-        raw, bias = self.l1(x, cb0, fc0, fake_quantize_weights)
+        raw, bias = self.l1(
+            x, cb0, fc0, fake_quantize_weights, bottleneck=bottlenecks[0]
+        )
         a, b = raw.chunk(2, dim=-1)
         sa, sb = a[..., -2:-1] - a[..., -1:], b[..., -2:-1] - b[..., -1:]
         h1 = hidden(raw, bias)
@@ -111,7 +111,9 @@ class LayerStacks(nn.Module):
             h1 = 0.75 * h1[:, 0] + 0.25 * h1[:, 1]
             sa = 0.75 * sa[:, 0] + 0.25 * sa[:, 1]
             sb = 0.75 * sb[:, 0] + 0.25 * sb[:, 1]
-        raw, bias = self.l2(h1, cbt, tail, fake_quantize_weights)
+        raw, bias = self.l2(
+            h1, cbt, tail, fake_quantize_weights, bottleneck=bottlenecks[1]
+        )
         h2 = hidden(raw, bias)
         if mixing:
             h1 = h1.unsqueeze(1).expand(-1, h2.size(1), -1)

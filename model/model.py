@@ -57,9 +57,11 @@ class NNUEModel(nn.Module):
             fc0_count=config.moe_fc0_experts,
             fc0_rank=config.moe_fc0_rank,
             fc0_dim=config.moe_fc0_codebook_dim,
-            fc0_orthogonal_up_init=config.moe_fc0_orthogonal_up_init,
-            center_fc0_weights=config.moe_center_fc0_weights,
         )
+        if config.moe_fc0_zero_mean_init:
+            self.layer_stacks.l1.zero_expert_mean_at_init(
+                self.router.normalized_codebook("fc0")
+            )
         self.commit_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
@@ -145,6 +147,7 @@ class NNUEModel(nn.Module):
         fake_quantize_weights: bool = True,
         mix_experts: bool = False,
     ):
+        codebook = self.router.codebook
         (
             e1_w,
             e2_w,
@@ -156,12 +159,14 @@ class NNUEModel(nn.Module):
             c_them,
             fake_quantize=fake_quantize_weights,
             mix_experts=mix_experts,
+            codebook=codebook,
         )
-        codebook = self.router.codebook
-        if self.training:
-            moe_loss = moe_loss + self.layer_stacks.bottleneck_diversity_loss(
+        bottlenecks = (None, None, None)
+        if self.training and any(self.bottleneck_diversity_costs):
+            bottlenecks, diversity = self.layer_stacks.training_bottlenecks(
                 codebook, self.bottleneck_diversity_costs
             )
+            moe_loss = moe_loss + diversity
         self.moe_loss = moe_loss
         self.commit_loss = commit_loss
         self.balance_loss = balance_loss
@@ -181,6 +186,7 @@ class NNUEModel(nn.Module):
             e2_w,
             fake_quantize_acts,
             fake_quantize_weights,
+            bottlenecks=bottlenecks,
         )
 
         return x

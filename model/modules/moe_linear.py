@@ -111,15 +111,36 @@ class MoeLinear(nn.Module):
                 f"codebook dimension mismatch in MoeLinear: "
                 f"adapter_down expects {self.codebook_dim}, got {codebook.shape[-1]}"
             )
-        return rms_norm(F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0)
+        with ieee_matmul_precision():
+            return rms_norm(
+                F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0
+            )
 
     def bottleneck_diversity_loss(self, codebook):
+        return self.bottleneck_diversity(self._bottleneck(codebook))
+
+    @staticmethod
+    def bottleneck_diversity(h):
         with ieee_matmul_precision():
-            h = self._bottleneck(codebook)
             h = h - h.mean(dim=0)
             gram = h @ h.T
             # Inverse participation ratio of the centered variance spectrum.
             return (gram.square().sum() + 1e-12) / (gram.trace().square() + 1e-12)
+
+    @torch.no_grad()
+    def zero_expert_mean_at_init(self, codebook):
+        with ieee_matmul_precision():
+            h = self._bottleneck(codebook)
+            mean = h.mean(0)
+            energy = mean.square().sum()
+            if energy <= 1e-12:
+                return
+            centered = h - mean
+            before = F.linear(centered, self.adapter_up).norm()
+            self.adapter_up.sub_((self.adapter_up @ mean / energy)[:, None] * mean)
+            after = F.linear(centered, self.adapter_up).norm()
+            if after > 0:
+                self.adapter_up.mul_(before / after)
 
     def _expand_weights(self, h):
         weight = self._generate_weights(h)
@@ -148,15 +169,15 @@ class MoeLinear(nn.Module):
     def get_delta_biases(self, codebook):
         return F.linear(self._bottleneck(codebook), self.bias_adapter)
 
-    def get_all_weights_and_biases(self, codebook=None):
+    def get_all_weights_and_biases(self, codebook=None, *, bottleneck=None):
         if self.is_coalesced:
             return self.coalesced_weight, self.coalesced_bias
-        if codebook is None:
+        if codebook is None and bottleneck is None:
             raise ValueError(
                 "codebook must be provided when MoeLinear is not coalesced"
             )
         with ieee_matmul_precision():
-            h = self._bottleneck(codebook)
+            h = self._bottleneck(codebook) if bottleneck is None else bottleneck
             return (
                 self._expand_weights(h)
                 .reshape(self.count * self.out_features, self.in_features)
@@ -170,11 +191,15 @@ class MoeLinear(nn.Module):
         codebook: torch.Tensor | None,
         expert_indices: torch.Tensor,
         fake_quantize_weights: bool = False,
+        *,
+        bottleneck=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the bias-free projection and selected activation biases separately."""
         if expert_indices.ndim == 2 and expert_indices.size(1) == 1:
             expert_indices = expert_indices.squeeze(1)
-        flat_w, flat_b = self.get_all_weights_and_biases(codebook)
+        flat_w, flat_b = self.get_all_weights_and_biases(
+            codebook, bottleneck=bottleneck
+        )
 
         if fake_quantize_weights:
             if self.quantization is None or self.layer_key is None:

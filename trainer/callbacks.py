@@ -1021,7 +1021,7 @@ class MoEDeadExpertReseeder(Callback):
         os.makedirs(directory, exist_ok=True)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            categories = ("queen", "rook", "bishop_pair", "else")
+            categories = ("no_minor_edge", "minor_edge")
             heavy_columns = [
                 f"{side}_{category}"
                 for side in ("stm", "opp")

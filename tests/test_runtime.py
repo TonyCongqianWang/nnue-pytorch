@@ -65,7 +65,6 @@ def test_prepared_checkpoint_matches_sorted_permuted_export():
     model = NNUEModel(DEFAULT_FEATURES, config).eval()
     init_random_weights(model, build_router_lut=False)
     with torch.no_grad():
-        model.layer_stacks.l1.shared_weight.uniform_(-0.9, 0.9)
         for bank in ("fc0", "tail"):
             counts = getattr(model.router, f"validation_counts_{bank}")
             counts.copy_(torch.randperm(len(counts)))

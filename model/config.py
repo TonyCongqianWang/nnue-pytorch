@@ -40,17 +40,14 @@ class ModelConfig(LayerStacksConfig):
     """Penalty on concentration of centered FC0 bottleneck variance."""
     moe_tail_bottleneck_diversity_cost: float = 0.0
     """Penalty on concentration of centered tail bottleneck variance."""
-    moe_center_fc0_weights: bool = False
-    """Center generated FC0 weights across experts before adding the shared matrix."""
-
-    moe_fc0_orthogonal_up_init: bool = False
-    """Initialize FC0 adapter-up columns orthogonally at the standard weight scale."""
+    moe_fc0_zero_mean_init: bool = False
+    """Start generated FC0 weights at zero expert mean."""
 
     moe_fc0_balance_kl_cost: float = 0.0005
     """FC0 coefficient for KL from uniform to smoothed hard top-1 traffic."""
     moe_tail_balance_kl_cost: float = 0.001
     """Tail coefficient for KL from uniform to smoothed hard top-1 traffic."""
-    moe_weight_diversity_cost: float = 0.01
+    moe_weight_diversity_cost: float = 0.0
     """Weight-router codebook diversity coefficient."""
     moe_weight_temperature: float = 0.2
     """Weight-router balancing softmax temperature."""

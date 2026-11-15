@@ -94,6 +94,8 @@ def create_sparse_batch_stream(
     hll_config: DataloaderHllConfig | None = None,
     io_config: DataloaderIOConfig | None = None,
     ls_keys: str = DEFAULT_LS_KEYS,
+    search_tree_filenames: tuple[str, ...] = (),
+    search_tree_fraction: float = 0.0,
 ) -> ctypes.c_void_p:
     if ddp_config is None:
         rank, world_size = _get_ddp_rank_and_world_size()
@@ -103,7 +105,35 @@ def create_sparse_batch_stream(
     if io_config is None:
         io_config = DataloaderIOConfig()
 
-    handle = c_lib.dll.create_sparse_batch_stream(
+    if not 0.0 <= search_tree_fraction <= 1.0:
+        raise ValueError("search_tree_fraction must be in [0, 1]")
+    if not search_tree_filenames and search_tree_fraction != 0.0:
+        raise ValueError("search_tree_fraction requires search-tree datasets")
+
+    create = c_lib.dll.create_sparse_batch_stream
+    tree_args = ()
+    if search_tree_filenames:
+        if not cyclic:
+            raise ValueError("Search-tree mixing requires a cyclic stream")
+        if not filenames or any(
+            not path.endswith(".binpack")
+            for path in (*filenames, *search_tree_filenames)
+        ):
+            raise ValueError(
+                "Search-tree mixing requires game and search-tree binpacks"
+            )
+        if not hasattr(c_lib.dll, "create_mixed_sparse_batch_stream"):
+            raise RuntimeError(
+                "Rebuild the native data loader to enable search-tree mixing"
+            )
+        create = c_lib.dll.create_mixed_sparse_batch_stream
+        tree_args = (
+            len(search_tree_filenames),
+            _to_c_str_array(search_tree_filenames),
+            search_tree_fraction,
+        )
+
+    handle = create(
         feature_set,
         ls_keys.encode("utf-8"),
         concurrency,
@@ -115,10 +145,23 @@ def create_sparse_batch_stream(
         CDataloaderDDPConfig(ddp_config),
         CDataloaderHllConfig(hll_config),
         CDataloaderIOConfig(io_config),
+        *tree_args,
     )
     if not handle:
         raise RuntimeError("data loader stream creation failed — stale .so?")
     return handle
+
+
+def set_search_tree_fraction(handle: ctypes.c_void_p, fraction: float) -> None:
+    """Update the mix for batches that have yet to be assembled."""
+    if not hasattr(c_lib.dll, "set_search_tree_fraction"):
+        raise RuntimeError(
+            "Rebuild the native data loader to enable search-tree mixing"
+        )
+    if not c_lib.dll.set_search_tree_fraction(handle, fraction):
+        raise ValueError(
+            "A mixed stream and a search-tree fraction in [0, 1] are required"
+        )
 
 
 def destroy_sparse_batch_stream(stream: ctypes.c_void_p):

@@ -18,6 +18,18 @@ class TrainingConfig:
     datasets: Positional[tuple[str, ...]] = ()
     """Training datasets (.binpack). Interleaved at chunk level if multiple specified. Same data is used for training and validation if no validation data is specified."""
 
+    search_tree_datasets: UseAppendAction[tuple[str, ...]] = ()
+    """Search-tree binpacks (standalone positions marked by ply 9999)."""
+
+    search_tree_fraction: float = 0.0
+    """Expected search-tree fraction in training batches, or the start of a ramp."""
+
+    search_tree_final_fraction: float | None = None
+    """Target fraction for a half-cosine ramp during this training stage."""
+
+    search_tree_ramp_steps: int = 0
+    """Optimizer steps from the start of this stage until the final fraction is reached."""
+
     validation_datasets: UseAppendAction[tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
 

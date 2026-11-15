@@ -3,6 +3,7 @@ import random
 import signal
 import sys
 import warnings
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ from model.modules.stack_table import (
 from trainer.callbacks import (
     CheckpointManager,
     ExplicitSWA,
+    SearchTreeMix,
     SimpleLineLogger,
     TerminateOnNaN,
     TimeLimit,
@@ -55,6 +57,9 @@ def make_data_loaders(
     prefetch_device=None,
     rank=0,
     world_size=1,
+    *,
+    search_tree_filenames=(),
+    search_tree_fraction=0.0,
 ):
     # Epoch and validation sizes are global; shard across DDP ranks.
     features_name = feature_name
@@ -69,6 +74,8 @@ def make_data_loaders(
         ddp_config=DataloaderDDPConfig(rank=rank, world_size=world_size),
         io_config=io_config,
         ls_keys=ls_keys,
+        search_tree_filenames=search_tree_filenames,
+        search_tree_fraction=search_tree_fraction,
     )
     # num_workers has to be 0 for sparse, and 1 for dense
     # it currently cannot work in parallel mode but it shouldn't need to
@@ -86,7 +93,7 @@ def make_data_loaders(
     )
     if val_size <= 0:
         val = None
-    elif val_filenames is None:
+    elif val_filenames is None and not search_tree_filenames:
         val = DataLoader(
             data_loader.FixedNumBatchesDataset(
                 train_infinite,
@@ -100,6 +107,14 @@ def make_data_loaders(
             num_workers=0,
         )
     else:
+        if val_filenames is None:
+            # Keep validation on a stable game-only mix across fine-tuning runs.
+            val_filenames = train_filenames
+            num_workers = min(num_workers, 4)
+            window = io_config.shuffle_buffer_entries or (1 << 20)
+            io_config = replace(
+                io_config, shuffle_buffer_entries=max(batch_size, window // 8)
+            )
         val_infinite = data_loader.SparseBatchDataset(
             features_name,
             val_filenames,
@@ -203,7 +218,27 @@ def main():
     args = tyro.cli(TrainingConfig)
     actual_threads, actual_workers = args.threads, args.num_workers
 
-    for dataset in args.datasets:
+    if not 0.0 <= args.search_tree_fraction <= 1.0:
+        raise ValueError("--search-tree-fraction must be in [0, 1]")
+    final_fraction = args.search_tree_final_fraction
+    if final_fraction is not None and not 0.0 <= final_fraction <= 1.0:
+        raise ValueError("--search-tree-final-fraction must be in [0, 1]")
+    if args.search_tree_ramp_steps < 0 or (
+        (final_fraction is not None) != (args.search_tree_ramp_steps > 0)
+    ):
+        raise ValueError(
+            "A search-tree ramp requires a final fraction and positive steps"
+        )
+    if not args.search_tree_datasets and (
+        args.search_tree_fraction != 0.0 or final_fraction is not None
+    ):
+        raise ValueError("Search-tree mixing requires --search-tree-datasets")
+    if args.search_tree_datasets and not args.datasets:
+        raise ValueError("Search-tree mixing requires game datasets")
+    if set(args.datasets).intersection(args.search_tree_datasets):
+        raise ValueError("Game and search-tree dataset lists must be disjoint")
+
+    for dataset in (*args.datasets, *args.search_tree_datasets):
         if not os.path.exists(dataset):
             raise RuntimeError(f"{dataset} does not exist")
 
@@ -401,6 +436,8 @@ def main():
         prefetch_device=device if accelerator == "cuda" else None,
         rank=rank,
         world_size=world_size,
+        search_tree_filenames=args.search_tree_datasets,
+        search_tree_fraction=args.search_tree_fraction,
     )
 
     optimizer_and_schedulers = nnue.configure_optimizers()
@@ -428,6 +465,15 @@ def main():
         TimeLimit(args.max_time),
         nan_callback,
     ]
+    if args.search_tree_datasets:
+        trainer_callbacks.append(
+            SearchTreeMix(
+                train.dataset.dataset,
+                args.search_tree_fraction,
+                final_fraction,
+                args.search_tree_ramp_steps,
+            )
+        )
     if 0 <= args.swa_start_epoch < args.max_epochs:
         swa_callback = ExplicitSWA(args.swa_start_epoch, tb_logger.log_dir)
         trainer_callbacks.append(swa_callback)

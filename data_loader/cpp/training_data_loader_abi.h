@@ -55,6 +55,24 @@ NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*   
                                                                   DataloaderHllConfig  hll_config,
                                                                   DataloaderIOConfig   io_config);
 
+NNUE_API SparseBatchStream* NNUE_CDECL
+create_mixed_sparse_batch_stream(const char*          feature_set_c,
+                                 const char*          ls_keys_c,
+                                 int                  concurrency,
+                                 int                  num_files,
+                                 const char* const*   filenames,
+                                 int                  batch_size,
+                                 bool                 cyclic,
+                                 DataloaderSkipConfig config,
+                                 DataloaderDDPConfig  ddp_config,
+                                 DataloaderHllConfig  hll_config,
+                                 DataloaderIOConfig   io_config,
+                                 int                  num_tree_files,
+                                 const char* const*   tree_filenames,
+                                 double               tree_fraction);
+
+NNUE_API bool NNUE_CDECL set_search_tree_fraction(SparseBatchStream* stream, double fraction);
+
 NNUE_API void NNUE_CDECL         destroy_sparse_batch_stream(SparseBatchStream* stream);
 NNUE_API SparseBatch* NNUE_CDECL fetch_next_sparse_batch(SparseBatchStream* stream);
 

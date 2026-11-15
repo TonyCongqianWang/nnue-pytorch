@@ -45,7 +45,7 @@ struct LayerStackKeys {
 std::optional<LayerStackKeys> get_layer_stack_keys(std::string_view names);
 
 std::function<bool(const struct binpack::TrainingDataEntry&)>
-make_skip_predicate(DataloaderSkipConfig config);
+make_skip_predicate(DataloaderSkipConfig config, bool game_only = false);
 
 // Keep large feature buffers resident between batches. Returning ~300 MiB to
 // the system allocator on every batch can stall the Python prefetch thread.
@@ -110,6 +110,8 @@ struct SparseBatch final {
 };
 
 struct AnyStream {
+    explicit AnyStream(nnue::UniquePositionCounter* counter) :
+        m_unique_counter(counter) {}
     virtual ~AnyStream() = default;
 
     nnue::UniquePositionCounter*       unique_counter() { return m_unique_counter.get(); }
@@ -136,6 +138,7 @@ struct Stream: AnyStream {
            int                                                           world_size = 1,
            DataloaderIOConfig                                            io_config  = {},
            int                                                           num_consumer_threads = 4) :
+        AnyStream(counter),
         m_stream(training_data::open_sfen_input_file_parallel(concurrency,
                                                               filenames,
                                                               cyclic,
@@ -144,10 +147,7 @@ struct Stream: AnyStream {
                                                               rank,
                                                               world_size,
                                                               io_config,
-                                                              num_consumer_threads)) {
-        if (counter)
-            m_unique_counter.reset(counter);
-    }
+                                                              num_consumer_threads)) {}
 
     virtual StorageT* next() = 0;
 
@@ -176,14 +176,20 @@ struct FeaturedBatchStream final: Stream<SparseBatch> {
                         bool                                                          cyclic,
                         std::function<bool(const struct binpack::TrainingDataEntry&)> skipPredicate,
                         int                                                           rank = 0,
-                        int                          world_size                            = 1,
-                        nnue::UniquePositionCounter* counter   = nullptr,
-                        DataloaderIOConfig           io_config = {});
+                        int                             world_size                         = 1,
+                        nnue::UniquePositionCounter*    counter        = nullptr,
+                        DataloaderIOConfig              io_config      = {},
+                        const std::vector<std::string>& tree_filenames = {},
+                        double                          tree_fraction  = 0.0);
     ~FeaturedBatchStream() final;
 
     SparseBatch* next() override;
+    bool         set_search_tree_fraction(double fraction);
+    std::size_t  get_io_stats(DataloaderFileStats* out, std::size_t max_files);
 
    private:
+    std::unique_ptr<training_data::BasicSfenInputStream> m_tree_stream;
+    std::atomic<double>                                  m_tree_fraction;
     std::shared_ptr<IFeatureExtractor> m_feature_set;
     LayerStackKeys                     m_ls_keys;
     int                                m_batch_size;
@@ -204,6 +210,7 @@ struct FeaturedBatchStream final: Stream<SparseBatch> {
 
     static int calculate_num_reader_threads(int concurrency);
     static int calculate_num_worker_threads(int concurrency);
+    static int calculate_num_tree_reader_threads(int concurrency);
 };
 
 struct Fen final {

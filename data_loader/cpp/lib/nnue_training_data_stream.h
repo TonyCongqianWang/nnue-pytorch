@@ -50,6 +50,7 @@ namespace training_data {
         }
 
         virtual bool eof() const = 0;
+        virtual void signal_stop() {}
 
         // Per-file I/O statistics for read balancing. Returns the number of
         // files; fills at most max_files entries if out is non-null.
@@ -252,6 +253,8 @@ namespace training_data {
         {
             return m_stream->get_io_stats(out, max_files);
         }
+
+        void signal_stop() override { m_stream->signal_stop(); }
 
         ~BinpackSfenInputParallelStream() override {}
 

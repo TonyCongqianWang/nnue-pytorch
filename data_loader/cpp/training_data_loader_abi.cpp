@@ -3,6 +3,8 @@
 
 #include "lib/unique_counter.h"
 
+#include <iostream>
+
 using namespace binpack;
 using namespace chess;
 
@@ -69,7 +71,36 @@ NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*   
                                                                   DataloaderDDPConfig  ddp_config,
                                                                   DataloaderHllConfig  hll_config,
                                                                   DataloaderIOConfig   io_config) {
-    auto skipPredicate = make_skip_predicate(config);
+    return create_mixed_sparse_batch_stream(feature_set_c, ls_keys_c, concurrency, num_files,
+                                            filenames, batch_size, cyclic, config, ddp_config,
+                                            hll_config, io_config, 0, nullptr, 0.0);
+}
+
+NNUE_API SparseBatchStream* NNUE_CDECL
+create_mixed_sparse_batch_stream(const char*          feature_set_c,
+                                 const char*          ls_keys_c,
+                                 int                  concurrency,
+                                 int                  num_files,
+                                 const char* const*   filenames,
+                                 int                  batch_size,
+                                 bool                 cyclic,
+                                 DataloaderSkipConfig config,
+                                 DataloaderDDPConfig  ddp_config,
+                                 DataloaderHllConfig  hll_config,
+                                 DataloaderIOConfig   io_config,
+                                 int                  num_tree_files,
+                                 const char* const*   tree_filenames,
+                                 double               tree_fraction) try
+{
+    if (num_files <= 0 || num_tree_files < 0 || !(tree_fraction >= 0.0 && tree_fraction <= 1.0)
+        || (num_tree_files == 0 && tree_fraction != 0.0) || (num_tree_files > 0 && !cyclic))
+        return nullptr;
+
+    std::vector<std::string> tree_files;
+    if (num_tree_files > 0)
+        tree_files.assign(tree_filenames, tree_filenames + num_tree_files);
+
+    auto skipPredicate = make_skip_predicate(config, !tree_files.empty());
     auto filenames_vec = std::vector<std::string>(filenames, filenames + num_files);
 
     auto feature = get_feature(feature_set_c);
@@ -81,10 +112,20 @@ NNUE_API SparseBatchStream* NNUE_CDECL create_sparse_batch_stream(const char*   
       hll_config.initial_hll, hll_config.initial_hll_size, hll_config.initial_total,
       hll_config.initial_preskip);
 
-    auto stream = new FeaturedBatchStream(
-      std::move(feature), std::move(*ls_keys), concurrency, filenames_vec, batch_size, cyclic,
-      skipPredicate, ddp_config.rank, ddp_config.world_size, counter.release(), io_config);
+    auto stream = new FeaturedBatchStream(std::move(feature), std::move(*ls_keys), concurrency,
+                                          filenames_vec, batch_size, cyclic, skipPredicate,
+                                          ddp_config.rank, ddp_config.world_size, counter.release(),
+                                          io_config, tree_files, tree_fraction);
     return reinterpret_cast<SparseBatchStream*>(stream);
+} catch (const std::exception& error)
+{
+    std::cerr << "Could not open sparse batch stream: " << error.what() << '\n';
+    return nullptr;
+}
+
+NNUE_API bool NNUE_CDECL set_search_tree_fraction(SparseBatchStream* stream, double fraction) {
+    return stream
+        && reinterpret_cast<FeaturedBatchStream*>(stream)->set_search_tree_fraction(fraction);
 }
 
 NNUE_API NNUE_COLD void NNUE_CDECL destroy_sparse_batch_stream(SparseBatchStream* stream) {

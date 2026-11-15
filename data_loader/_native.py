@@ -226,6 +226,20 @@ class CDataLoaderAPI:
             CDataloaderIOConfig,
         ]
 
+        if hasattr(self.dll, "create_mixed_sparse_batch_stream"):
+            self.dll.create_mixed_sparse_batch_stream.restype = ctypes.c_void_p
+            self.dll.create_mixed_sparse_batch_stream.argtypes = [
+                *self.dll.create_sparse_batch_stream.argtypes,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_char_p),
+                ctypes.c_double,
+            ]
+            self.dll.set_search_tree_fraction.restype = ctypes.c_bool
+            self.dll.set_search_tree_fraction.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_double,
+            ]
+
         # EXPORT void CDECL destroy_sparse_batch_stream(Stream<SparseBatch>* stream)
         self.dll.destroy_sparse_batch_stream.argtypes = [ctypes.c_void_p]
 

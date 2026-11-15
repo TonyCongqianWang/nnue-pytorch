@@ -1,5 +1,5 @@
 // Generates small binpack files containing random games for data loader
-// tests. Usage: make_test_binpack <output.binpack> <num_positions> [seed]
+// tests. Usage: make_test_binpack <output.binpack> <num_positions> [seed] [ply]
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,7 +13,7 @@ using namespace binpack;
 int main(int argc, char** argv) {
     if (argc < 3)
     {
-        std::fprintf(stderr, "usage: %s <output.binpack> <num_positions> [seed]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <output.binpack> <num_positions> [seed] [ply]\n", argv[0]);
         return 1;
     }
 
@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     const long        target = std::atol(argv[2]);
     const unsigned    seed   = argc > 3 ? static_cast<unsigned>(std::atoi(argv[3])) : 12345u;
     std::mt19937      rng(seed);
+    const int         fixed_ply = argc > 4 ? std::atoi(argv[4]) : -1;
 
     CompressedTrainingDataEntryWriter writer(output);
 
@@ -42,7 +43,7 @@ int main(int argc, char** argv) {
             e.pos    = pos;
             e.move   = moves[rng() % moves.size()];
             e.score  = static_cast<std::int16_t>(static_cast<int>(rng() % 2001) - 1000);
-            e.ply    = static_cast<std::uint16_t>(ply);
+            e.ply    = static_cast<std::uint16_t>(fixed_ply >= 0 ? fixed_ply : ply);
             e.result = result;
             writer.addTrainingDataEntry(e);
             ++written;

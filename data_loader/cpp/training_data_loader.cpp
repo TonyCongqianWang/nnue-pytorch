@@ -15,6 +15,7 @@ using namespace chess;
 
 // Ply that marks search-tree samples: standalone positions without a game.
 static constexpr int TREE_SAMPLE_PLY = 9999;
+static constexpr int VALUE_NONE      = 32002;
 
 // ---------------------------------------------------------
 // Internal extractors and threat arrays
@@ -694,6 +695,10 @@ int FeaturedBatchStream::calculate_num_worker_threads(int concurrency) {
     return std::max(1, static_cast<int>(std::floor(concurrency * worker_thread_ratio)));
 }
 
+int FeaturedBatchStream::calculate_num_tree_reader_threads(int concurrency) {
+    return std::max(1, calculate_num_reader_threads(concurrency) / 8);
+}
+
 FeaturedBatchStream::FeaturedBatchStream(
   std::shared_ptr<IFeatureExtractor>            feature_set,
   LayerStackKeys                                ls_keys,
@@ -705,22 +710,43 @@ FeaturedBatchStream::FeaturedBatchStream(
   int                                           rank,
   int                                           world_size,
   nnue::UniquePositionCounter*                  counter,
-  DataloaderIOConfig                            io_config) :
-    BaseType(calculate_num_reader_threads(concurrency),
-             filenames,
-             cyclic,
-             skipPredicate,
-             counter,
-             rank,
-             world_size,
-             io_config,
-             calculate_num_worker_threads(concurrency)),
+  DataloaderIOConfig                            io_config,
+  const std::vector<std::string>&               tree_filenames,
+  double                                        tree_fraction) :
+    BaseType(
+      std::max(1,
+               calculate_num_reader_threads(concurrency)
+                 - (tree_filenames.empty() ? 0 : calculate_num_tree_reader_threads(concurrency))),
+      filenames,
+      cyclic,
+      skipPredicate,
+      counter,
+      rank,
+      world_size,
+      io_config,
+      calculate_num_worker_threads(concurrency)),
+    m_tree_fraction(tree_fraction),
     m_feature_set(std::move(feature_set)),
     m_ls_keys(std::move(ls_keys)),
     m_batch_size(batch_size),
     m_concurrency(concurrency),
     m_num_workers(calculate_num_worker_threads(concurrency)),
     m_batch_queue_capacity(calculate_num_worker_threads(concurrency) + 4) {
+
+    if (!tree_filenames.empty())
+    {
+        // Keep a smaller shuffle window for the lower-volume source.
+        auto      tree_io_config = io_config;
+        const int game_window =
+          io_config.shuffle_buffer_entries > 0 ? io_config.shuffle_buffer_entries : (1 << 20);
+        tree_io_config.shuffle_buffer_entries = std::max({1024, batch_size, game_window / 8});
+        m_tree_stream                         = training_data::open_sfen_input_file_parallel(
+          calculate_num_tree_reader_threads(concurrency), tree_filenames, cyclic,
+          [](const TrainingDataEntry& e) {
+              return e.ply != TREE_SAMPLE_PLY || e.score == VALUE_NONE;
+          },
+          unique_counter(), rank, world_size, tree_io_config, m_num_workers.load());
+    }
 
     // At most one fetched batch, the finished deque, and one batch per builder
     // normally exist at a time. Recycle that working set without growing a
@@ -732,17 +758,36 @@ FeaturedBatchStream::FeaturedBatchStream(
     m_stop_flag.store(false);
 
     auto worker = [this]() {
+        std::mt19937_64 mix_rng;
+        if (m_tree_stream)
+            mix_rng.seed(std::random_device{}());
+
         std::vector<TrainingDataEntry> entries;
         entries.reserve(m_batch_size);
 
         while (!m_stop_flag.load())
         {
             entries.clear();
+            if (m_tree_stream)
             {
-                BaseType::m_stream->fill_threadsafe(entries, m_batch_size);
+                const double fraction = m_tree_fraction.load(std::memory_order_relaxed);
+                const int    tree_count =
+                  std::binomial_distribution<int>(m_batch_size, fraction)(mix_rng);
+                m_stream->fill_threadsafe(entries, m_batch_size - tree_count);
+                m_tree_stream->fill_threadsafe(entries, tree_count);
+                if (entries.size() != static_cast<std::size_t>(m_batch_size))
+                    break;
+                if (tree_count > 0 && tree_count < m_batch_size)
+                    std::shuffle(entries.begin(), entries.end(), mix_rng);
+            }
+            else
+            {
+                m_stream->fill_threadsafe(entries, m_batch_size);
                 if (entries.empty())
                     break;
             }
+            if (m_stop_flag.load())
+                break;
 
             auto batch = new SparseBatch(*m_feature_set, m_ls_keys, entries, m_buffer_pool);
 
@@ -757,7 +802,10 @@ FeaturedBatchStream::FeaturedBatchStream(
                 m_batches_any.notify_one();
             }
         }
-        m_num_workers.fetch_sub(1);
+        {
+            std::lock_guard lock(m_batch_mutex);
+            m_num_workers.fetch_sub(1);
+        }
         m_batches_any.notify_one();
     };
 
@@ -768,8 +816,30 @@ FeaturedBatchStream::FeaturedBatchStream(
     }
 }
 
+bool FeaturedBatchStream::set_search_tree_fraction(double fraction) {
+    if (!m_tree_stream || !(fraction >= 0.0 && fraction <= 1.0))
+        return false;
+    m_tree_fraction.store(fraction, std::memory_order_relaxed);
+    return true;
+}
+
+std::size_t FeaturedBatchStream::get_io_stats(DataloaderFileStats* out, std::size_t max_files) {
+    const auto game_files = BaseType::get_io_stats(out, max_files);
+    if (!m_tree_stream)
+        return game_files;
+    if (out && max_files > game_files)
+        return game_files + m_tree_stream->get_io_stats(out + game_files, max_files - game_files);
+    return game_files + m_tree_stream->get_io_stats(nullptr, 0);
+}
+
 FeaturedBatchStream::~FeaturedBatchStream() {
-    m_stop_flag.store(true);
+    {
+        std::lock_guard lock(m_batch_mutex);
+        m_stop_flag.store(true);
+    }
+    m_stream->signal_stop();
+    if (m_tree_stream)
+        m_tree_stream->signal_stop();
     m_batches_not_full.notify_all();
     for (auto& worker : m_workers)
     {
@@ -927,10 +997,13 @@ FenBatch* FenBatchStream::next() {
     return nullptr;
 }
 
-std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkipConfig config) {
+std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkipConfig config,
+                                                                  bool                 game_only) {
     if (!config.filtered && !config.wld_filtered && config.random_fen_skipping <= 0
         && config.early_fen_skipping < 0 && config.soft_early_fen_skipping <= 0)
     {
+        if (game_only)
+            return [](const TrainingDataEntry& e) { return e.ply == TREE_SAMPLE_PLY; };
         return nullptr;
     }
 
@@ -1040,16 +1113,14 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(DataloaderSkip
         }
     }
 
-    const uint64_t tree_sample_skip_threshold = static_cast<uint64_t>(
-      (1.0 - std::clamp(config.tree_sample_accept, 0.0, 1.0)) * static_cast<double>(~0ULL));
+    const double tree_sample_skip_threshold =
+      (1.0 - std::clamp(config.tree_sample_accept, 0.0, 1.0)) * static_cast<double>(~0ULL);
 
-    return [config, random_skip_threshold, tree_sample_skip_threshold, target_pc_weights_lut,
-            target_pc_weights_total,
+    return [config, game_only, random_skip_threshold, tree_sample_skip_threshold,
+            target_pc_weights_lut, target_pc_weights_total,
             early_ply_accept_prob = std::move(early_ply_accept_prob)](const TrainingDataEntry& e) {
-        static constexpr int    VALUE_NONE = 32002;
-
         if (e.ply == TREE_SAMPLE_PLY)
-            return e.score == VALUE_NONE
+            return game_only || e.score == VALUE_NONE || config.tree_sample_accept <= 0.0
                 || rng::get_thread_local_rng()() < tree_sample_skip_threshold;
 
         static thread_local int last_ply   = -1;

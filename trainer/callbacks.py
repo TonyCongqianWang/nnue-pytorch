@@ -76,6 +76,56 @@ class Callback:
         pass
 
 
+class SearchTreeMix(Callback):
+    def __init__(self, dataset, initial_fraction, final_fraction=None, ramp_steps=0):
+        self.dataset = dataset
+        self.initial_fraction = initial_fraction
+        self.final_fraction = final_fraction
+        self.ramp_steps = ramp_steps
+        self.start_step = None
+        self.target = initial_fraction
+
+    def on_load_checkpoint(self, trainer, checkpoint):
+        self.start_step = checkpoint.get("search_tree_mix_start_step")
+
+    def on_save_checkpoint(self, trainer, checkpoint):
+        if self.start_step is not None:
+            checkpoint["search_tree_mix_start_step"] = self.start_step
+
+    def on_train_start(self, trainer):
+        if self.start_step is None:
+            self.start_step = trainer.global_step
+        self._update(trainer.global_step)
+
+    def _update(self, step):
+        if self.final_fraction is None:
+            return
+        progress = min(1.0, max(0.0, (step - self.start_step) / self.ramp_steps))
+        weight = 0.5 * (1.0 - math.cos(math.pi * progress))
+        target = (1.0 - weight) * self.initial_fraction + weight * self.final_fraction
+        if target != self.target:
+            self.dataset.set_search_tree_fraction(target)
+            self.target = target
+
+    def on_train_batch_end(self, trainer, batch, batch_idx, outputs):
+        if trainer.rank == 0 and (
+            (batch_idx + 1) % trainer.log_every_n_steps == 0
+            or batch_idx + 1 == trainer.num_training_batches
+        ):
+            outcome = batch[4]
+            trainer._log_metrics(
+                {
+                    "search_tree_fraction_target": self.target,
+                    "search_tree_fraction_batch_rank0": (outcome > 1)
+                    .float()
+                    .mean()
+                    .item(),
+                },
+                step=trainer.global_step,
+            )
+        self._update(trainer.global_step)
+
+
 class WeightClipper(Callback):
     """Clip feature-transformer weights during training."""
 

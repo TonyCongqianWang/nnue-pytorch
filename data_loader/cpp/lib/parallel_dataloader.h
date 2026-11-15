@@ -863,11 +863,16 @@ namespace binpack
             return n;
         }
 
-        ~CompressedTrainingDataEntryParallelReader()
-        {
+        void signal_stop() {
             m_stopFlag.store(true);
             m_sharedChunkQueue.signal_stop();
             m_pool->signal_stop();
+            std::lock_guard lock(m_balance.mutex);
+            m_balance.anyAvailable.notify_all();
+        }
+
+        ~CompressedTrainingDataEntryParallelReader() {
+            signal_stop();
             for (auto& reader : m_readerThreads)
             {
                 if (reader.joinable())

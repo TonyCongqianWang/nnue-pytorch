@@ -135,6 +135,9 @@ class TrainingDataProvider:
         use_pinned_memory=False,
         device="cpu",
         ls_keys: str = DEFAULT_LS_KEYS,
+        *,
+        search_tree_filenames: tuple[str, ...] = (),
+        search_tree_fraction: float = 0.0,
     ):
         self.feature_set = feature_set.encode("utf-8")
         self.create_stream = create_stream
@@ -169,6 +172,8 @@ class TrainingDataProvider:
                 hll_config,
                 io_config,
                 ls_keys=ls_keys,
+                search_tree_filenames=search_tree_filenames,
+                search_tree_fraction=search_tree_fraction,
             )
         else:
             self.stream = self.create_stream(
@@ -210,7 +215,8 @@ class TrainingDataProvider:
         return stream.get_io_stats(self.stream)
 
     def __del__(self):
-        self.destroy_stream(self.stream)
+        if hasattr(self, "stream"):
+            self.destroy_stream(self.stream)
 
 
 class SparseBatchProvider(TrainingDataProvider):
@@ -228,6 +234,9 @@ class SparseBatchProvider(TrainingDataProvider):
         use_pinned_memory=False,
         device="cpu",
         ls_keys: str = DEFAULT_LS_KEYS,
+        *,
+        search_tree_filenames: tuple[str, ...] = (),
+        search_tree_fraction: float = 0.0,
     ):
         super().__init__(
             feature_set,
@@ -246,7 +255,12 @@ class SparseBatchProvider(TrainingDataProvider):
             use_pinned_memory,
             device,
             ls_keys,
+            search_tree_filenames=search_tree_filenames,
+            search_tree_fraction=search_tree_fraction,
         )
+
+    def set_search_tree_fraction(self, fraction: float) -> None:
+        stream.set_search_tree_fraction(self.stream, fraction)
 
 
 class SparseBatchDataset(torch.utils.data.IterableDataset):
@@ -263,6 +277,9 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         io_config: DataloaderIOConfig | None = None,
         use_pinned_memory=False,
         ls_keys: str = DEFAULT_LS_KEYS,
+        *,
+        search_tree_filenames: tuple[str, ...] = (),
+        search_tree_fraction: float = 0.0,
     ):
         super().__init__()
         self.feature_set = feature_set
@@ -283,6 +300,8 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
         self.io_config = io_config
         self.use_pinned_memory = use_pinned_memory
         self.device = "cpu"
+        self.search_tree_filenames = search_tree_filenames
+        self.search_tree_fraction = search_tree_fraction
         self._cached_iter = None
         self._iter_lock = threading.Lock()
 
@@ -300,7 +319,20 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
             use_pinned_memory=self.use_pinned_memory,
             device=self.device,
             ls_keys=self.ls_keys,
+            search_tree_filenames=self.search_tree_filenames,
+            search_tree_fraction=self.search_tree_fraction,
         )
+
+    def set_search_tree_fraction(self, fraction: float) -> None:
+        """Set the current mix and the initial mix for any future provider."""
+        if not self.search_tree_filenames or not 0.0 <= fraction <= 1.0:
+            raise ValueError(
+                "Search-tree datasets and a fraction in [0, 1] are required"
+            )
+        with self._iter_lock:
+            if self._cached_iter is not None:
+                self._cached_iter.set_search_tree_fraction(fraction)
+            self.search_tree_fraction = fraction
 
     def __iter__(self):
         # A cyclic dataset can serve any number of (concurrent) consumers from

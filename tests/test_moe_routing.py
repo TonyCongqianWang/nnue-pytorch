@@ -192,5 +192,5 @@ def test_zero_expert_mean_and_reuse_bottleneck():
     cached = layer.get_all_weights_and_biases(bottleneck=h)
     torch.testing.assert_close(cached, direct)
     torch.testing.assert_close(
-        layer.bottleneck_diversity(h), layer.bottleneck_diversity_loss(cb)
+        layer.centered_diversity(h), layer.bottleneck_diversity_loss(cb)
     )

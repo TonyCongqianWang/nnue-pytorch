@@ -29,6 +29,7 @@ class NNUEModel(nn.Module):
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = config.moe_tail_experts
+        self.diversity_space = config.moe_diversity_space
         self.bottleneck_diversity_costs = (
             config.moe_fc0_bottleneck_diversity_cost,
             config.moe_tail_bottleneck_diversity_cost,
@@ -163,10 +164,12 @@ class NNUEModel(nn.Module):
             mix_experts=mix_experts,
             codebook=codebook,
         )
-        bottlenecks = (None, None, None)
+        parameters = (None, None, None)
         if self.training and any(self.bottleneck_diversity_costs):
-            bottlenecks, diversity = self.layer_stacks.training_bottlenecks(
-                codebook, self.bottleneck_diversity_costs
+            parameters, diversity = self.layer_stacks.training_parameters(
+                codebook,
+                self.bottleneck_diversity_costs,
+                getattr(self, "diversity_space", "bottleneck"),
             )
             moe_loss = moe_loss + diversity
         self.moe_loss = moe_loss
@@ -188,7 +191,7 @@ class NNUEModel(nn.Module):
             e2_w,
             fake_quantize_acts,
             fake_quantize_weights,
-            bottlenecks=bottlenecks,
+            parameters=parameters,
         )
 
         return x

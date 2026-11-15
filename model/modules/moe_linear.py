@@ -50,6 +50,7 @@ class MoeLinear(nn.Module):
         factorized: bool = False,
         orthogonal_up_init: bool = False,
         center_experts: bool = False,
+        direct: bool = False,
     ):
         super().__init__()
 
@@ -64,9 +65,20 @@ class MoeLinear(nn.Module):
         self.is_coalesced = False
         self.center_experts = center_experts
 
-        self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
-        self.adapter_up = nn.Parameter(torch.empty(out_features * in_features, rank))
-        self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
+        if direct:
+            if factorized or orthogonal_up_init or center_experts:
+                raise ValueError("Direct experts do not use generator options")
+            self.direct_weight = nn.Parameter(
+                torch.empty(count * out_features, in_features)
+            )
+            self.direct_bias = nn.Parameter(torch.zeros(count * self.bias_features))
+            self.adapter_down = self.adapter_up = self.bias_adapter = None
+        else:
+            self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
+            self.adapter_up = nn.Parameter(
+                torch.empty(out_features * in_features, rank)
+            )
+            self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
         self.register_parameter(
             "shared_weight",
             nn.Parameter(torch.zeros(out_features, in_features))
@@ -94,7 +106,25 @@ class MoeLinear(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 nn.init.orthogonal_(self.adapter_up, gain=math.sqrt(out_features / 3))
 
+    @property
+    def is_direct(self):
+        return self.adapter_down is None
+
+    def weight_parameters(self):
+        return (
+            (self.direct_weight,)
+            if self.is_direct
+            else (self.adapter_down, self.adapter_up)
+        )
+
+    def bias_parameter(self):
+        return self.direct_bias if self.is_direct else self.bias_adapter
+
     def _reset_parameters(self) -> None:
+        if self.is_direct:
+            bound = 1.0 / math.sqrt(self.in_features)
+            nn.init.uniform_(self.direct_weight, -bound, bound)
+            return
         bound_cb = 1.0 / math.sqrt(self.codebook_dim) if self.codebook_dim > 0 else 0.0
         nn.init.uniform_(self.adapter_down, -bound_cb, bound_cb)
 
@@ -117,13 +147,13 @@ class MoeLinear(nn.Module):
             )
 
     def bottleneck_diversity_loss(self, codebook):
-        return self.bottleneck_diversity(self._bottleneck(codebook))
+        return self.centered_diversity(self._bottleneck(codebook))
 
     @staticmethod
-    def bottleneck_diversity(h):
+    def centered_diversity(h):
         with ieee_matmul_precision():
             h = h - h.mean(dim=0)
-            gram = h @ h.T
+            gram = h @ h.T if h.shape[0] <= h.shape[1] else h.T @ h
             # Inverse participation ratio of the centered variance spectrum.
             return (gram.square().sum() + 1e-12) / (gram.trace().square() + 1e-12)
 
@@ -172,6 +202,8 @@ class MoeLinear(nn.Module):
     def get_all_weights_and_biases(self, codebook=None, *, bottleneck=None):
         if self.is_coalesced:
             return self.coalesced_weight, self.coalesced_bias
+        if self.is_direct:
+            return self.direct_weight, self.direct_bias
         if codebook is None and bottleneck is None:
             raise ValueError(
                 "codebook must be provided when MoeLinear is not coalesced"
@@ -192,13 +224,15 @@ class MoeLinear(nn.Module):
         expert_indices: torch.Tensor,
         fake_quantize_weights: bool = False,
         *,
-        bottleneck=None,
+        parameters=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the bias-free projection and selected activation biases separately."""
         if expert_indices.ndim == 2 and expert_indices.size(1) == 1:
             expert_indices = expert_indices.squeeze(1)
-        flat_w, flat_b = self.get_all_weights_and_biases(
-            codebook, bottleneck=bottleneck
+        flat_w, flat_b = (
+            self.get_all_weights_and_biases(codebook)
+            if parameters is None
+            else parameters
         )
 
         if fake_quantize_weights:
@@ -299,20 +333,25 @@ class MoeLinear(nn.Module):
     def init_coalesced_storage(self) -> None:
         self.coalesced_weight.zero_()
         self.coalesced_bias.zero_()
-        self.adapter_down.zero_()
-        self.adapter_up.zero_()
-        self.bias_adapter.zero_()
+        for p in self.weight_parameters():
+            p.zero_()
+        self.bias_parameter().zero_()
         if self.shared_weight is not None:
             self.shared_weight.zero_()
         self.is_coalesced = True
 
     @torch.no_grad()
     def permute_inputs(self, permutation: Sequence[int]) -> None:
-        reshaped = self.adapter_up.view(self.out_features, self.in_features, self.rank)
-        permuted = reshaped[:, permutation, :].contiguous()
-        self.adapter_up.copy_(
-            permuted.view(self.out_features * self.in_features, self.rank)
-        )
+        if self.is_direct:
+            self.direct_weight.copy_(self.direct_weight[:, permutation])
+        else:
+            reshaped = self.adapter_up.view(
+                self.out_features, self.in_features, self.rank
+            )
+            permuted = reshaped[:, permutation, :].contiguous()
+            self.adapter_up.copy_(
+                permuted.view(self.out_features * self.in_features, self.rank)
+            )
         if self.shared_weight is not None:
             self.shared_weight.copy_(self.shared_weight[:, permutation])
         if self.is_coalesced:

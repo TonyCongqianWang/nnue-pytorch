@@ -1000,13 +1000,19 @@ class MoEDeadExpertReseeder(Callback):
 
         layer = stacks.l1
         with ieee_matmul_precision():
-            h = layer._bottleneck(model.router.normalized_codebook("fc0"))
-            h = h - h.mean(dim=0)
-            latent = h @ h.T
-            weights = h @ (layer.adapter_up.T @ layer.adapter_up) @ h.T
+            if layer.is_direct:
+                w = layer.direct_weight.reshape(layer.count, -1)
+                w = w - w.mean(dim=0)
+                weights = w @ w.T
+                bottleneck = ""
+            else:
+                h = layer._bottleneck(model.router.normalized_codebook("fc0"))
+                h = h - h.mean(dim=0)
+                bottleneck = f"bottleneck={effective_rank(h @ h.T):.2f} "
+                weights = h @ (layer.adapter_up.T @ layer.adapter_up) @ h.T
         print(
             f"[FC0 effective rank] step={trainer.global_step} "
-            f"bottleneck={effective_rank(latent):.2f} "
+            f"{bottleneck}"
             f"weight residual={effective_rank(weights):.2f}",
             flush=True,
         )

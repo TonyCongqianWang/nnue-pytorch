@@ -53,14 +53,14 @@ def write_export_diagnostics(model, path):
     router = model.router
     layers = model.layer_stacks
     if layers.l1.is_coalesced:
-        raise ValueError(
-            "Export diagnostics require a checkpoint with expert generators"
-        )
+        raise ValueError("Export diagnostics require an uncoalesced checkpoint")
 
     report = {"projections": {}, "routers": {}, "generators": {}}
     names = ("FC0", "FC1", "readout")
     print("[Export diagnostics] Adapter projections centered along the bottleneck axis")
     for name, layer in zip(names, layers.dense_layers()):
+        if layer.is_direct:
+            continue
         for suffix, matrix in (
             ("down", layer.adapter_down),
             ("up transpose", layer.adapter_up.T),
@@ -103,7 +103,7 @@ def write_export_diagnostics(model, path):
                 below_ten_percent_uniform=int((n * values < 0.1).sum()),
             )
 
-    print("[Export diagnostics] Centered codebooks, bottlenecks and generated weights")
+    print("[Export diagnostics] Centered codebooks, bottlenecks and expert weights")
     codebooks = dict(zip(MOE_BANKS, router.codebook))
     for bank, vectors in codebooks.items():
         report["routers"][bank]["codebook"] = _spectrum(vectors)
@@ -112,8 +112,8 @@ def write_export_diagnostics(model, path):
     )
     for name, bank, layer in zip(names, ("fc0", "tail", "tail"), layers.dense_layers()):
         vectors = codebooks[bank]
-        h = layer._bottleneck(vectors)
-        weight, bias = layer.get_all_weights_and_biases(bottleneck=h)
+        h = None if layer.is_direct else layer._bottleneck(vectors)
+        weight, bias = layer.get_all_weights_and_biases(vectors, bottleneck=h)
         clipped = model.quantization.clip_ls_weight(weight, layer.layer_key)
         _, quantized = model.quantization.quantize_fc_layer(
             bias, clipped, layer.layer_key
@@ -122,9 +122,12 @@ def write_export_diagnostics(model, path):
             weight.reshape(layer.count, -1).cpu(),
             quantized.reshape(layer.count, -1).cpu(),
         )
-        entries = {"bottleneck": _spectrum(h), "weights": {}}
+        entries = {"weights": {}}
         report["generators"][name] = entries
-        rows = [(f"{name} bottleneck", entries["bottleneck"])]
+        rows = []
+        if h is not None:
+            entries["bottleneck"] = _spectrum(h)
+            rows.append((f"{name} bottleneck", entries["bottleneck"]))
         traffic = report["routers"][bank]
         for label, k in (
             ("all", layer.count),

@@ -166,19 +166,19 @@ class NNUE(nn.Module):
                 "lr": LRs[1],
                 "weight_decay": 0.0,
             },
-            # Expert-generating hypernetworks.
+            # Downstream expert weights and biases.
             {
                 "params": [
                     p
                     for layer in self.model.layer_stacks.dense_layers()
-                    for p in (layer.adapter_down, layer.adapter_up)
+                    for p in layer.weight_parameters()
                 ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
             {
                 "params": [
-                    layer.bias_adapter
+                    layer.bias_parameter()
                     for layer in self.model.layer_stacks.dense_layers()
                 ],
                 "lr": LRs[5],

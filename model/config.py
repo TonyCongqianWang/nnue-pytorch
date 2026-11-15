@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, fields
-from typing import Annotated
+from typing import Annotated, Literal
 
 import tyro
 from tyro.conf import OmitArgPrefixes
@@ -36,10 +36,14 @@ class ModelConfig(LayerStacksConfig):
     moe_mix_interval: int = 0
     """Apply weighted top-2 FC0 and top-4 tail training every N optimizer steps. Zero disables."""
 
+    moe_fc0_direct: bool = False
+    """Train one FC0 weight and bias table indexed by the learned router."""
+    moe_diversity_space: Literal["bottleneck", "weights"] = "bottleneck"
+    """Tensor to regularize in both banks, before clipping and fake quantization."""
     moe_fc0_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered FC0 bottleneck variance."""
+    """Penalty on concentration of centered FC0 variance in the selected diversity space."""
     moe_tail_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered tail bottleneck variance."""
+    """Penalty on concentration of centered tail variance in the selected diversity space."""
     moe_fc0_zero_mean_init: bool = False
     """Start generated FC0 weights at zero expert mean."""
 
@@ -81,6 +85,12 @@ class ModelConfig(LayerStacksConfig):
             raise ValueError(
                 "MoE regularization costs and mixing interval must be nonnegative"
             )
+        if self.moe_fc0_direct and (
+            self.moe_fc0_zero_mean_init or self.moe_fc0_bottleneck_diversity_cost
+        ):
+            raise ValueError(
+                "Direct FC0 does not use generator initialization or diversity"
+            )
         if self.moe_mix_interval and self.moe_tail_experts < 4:
             raise ValueError("MoE mixing requires at least four tail experts")
         if min(self.moe_fc0_codebook_dim, self.moe_tail_codebook_dim) < 2:
@@ -100,15 +110,17 @@ class ModelConfig(LayerStacksConfig):
                     type=int,
                     default=f.default,
                 )
+        parser.add_argument("--moe-fc0-direct", action="store_true")
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
         return ModelConfig(
+            moe_fc0_direct=getattr(args, "moe_fc0_direct", False),
             **{
                 f.name: getattr(args, f.name)
                 for f in fields(ModelConfig)
                 if type(f.default) is int
-            }
+            },
         )
 
     # Not omitting prefix on purpose.

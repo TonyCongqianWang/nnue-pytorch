@@ -712,7 +712,8 @@ FeaturedBatchStream::FeaturedBatchStream(
   nnue::UniquePositionCounter*                  counter,
   DataloaderIOConfig                            io_config,
   const std::vector<std::string>&               tree_filenames,
-  double                                        tree_fraction) :
+  double                                        tree_fraction,
+  double                                        tree_accept) :
     BaseType(
       std::max(1,
                calculate_num_reader_threads(concurrency)
@@ -742,8 +743,14 @@ FeaturedBatchStream::FeaturedBatchStream(
         tree_io_config.shuffle_buffer_entries = std::max({1024, batch_size, game_window / 8});
         m_tree_stream                         = training_data::open_sfen_input_file_parallel(
           calculate_num_tree_reader_threads(concurrency), tree_filenames, cyclic,
-          [](const TrainingDataEntry& e) {
-              return e.ply != TREE_SAMPLE_PLY || e.score == VALUE_NONE;
+          [tree_accept](const TrainingDataEntry& e) {
+              if (e.ply != TREE_SAMPLE_PLY || e.score == VALUE_NONE)
+                  return true;
+              if (tree_accept == 1.0)
+                  return false;
+              // Fresh random thinning when a training process reopens the files.
+              static thread_local std::mt19937_64 generator(std::random_device{}());
+              return !std::bernoulli_distribution(tree_accept)(generator);
           },
           unique_counter(), rank, world_size, tree_io_config, m_num_workers.load());
     }

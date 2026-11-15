@@ -30,6 +30,9 @@ class TrainingConfig:
     search_tree_ramp_steps: int = 0
     """Optimizer steps from the start of this stage until the final fraction is reached."""
 
+    search_tree_schedule: str | None = None
+    """Comma-separated progress:fraction knots spanning progress 0 to 1, interpolated linearly."""
+
     validation_datasets: UseAppendAction[tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
 

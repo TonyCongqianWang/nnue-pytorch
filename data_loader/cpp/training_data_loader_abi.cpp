@@ -93,7 +93,9 @@ create_mixed_sparse_batch_stream(const char*          feature_set_c,
                                  double               tree_fraction) try
 {
     if (num_files <= 0 || num_tree_files < 0 || !(tree_fraction >= 0.0 && tree_fraction <= 1.0)
-        || (num_tree_files == 0 && tree_fraction != 0.0) || (num_tree_files > 0 && !cyclic))
+        || (num_tree_files == 0 && tree_fraction != 0.0)
+        || (num_tree_files > 0
+            && (!cyclic || !(config.tree_sample_accept > 0.0 && config.tree_sample_accept <= 1.0))))
         return nullptr;
 
     std::vector<std::string> tree_files;
@@ -112,10 +114,10 @@ create_mixed_sparse_batch_stream(const char*          feature_set_c,
       hll_config.initial_hll, hll_config.initial_hll_size, hll_config.initial_total,
       hll_config.initial_preskip);
 
-    auto stream = new FeaturedBatchStream(std::move(feature), std::move(*ls_keys), concurrency,
-                                          filenames_vec, batch_size, cyclic, skipPredicate,
-                                          ddp_config.rank, ddp_config.world_size, counter.release(),
-                                          io_config, tree_files, tree_fraction);
+    auto stream = new FeaturedBatchStream(
+      std::move(feature), std::move(*ls_keys), concurrency, filenames_vec, batch_size, cyclic,
+      skipPredicate, ddp_config.rank, ddp_config.world_size, counter.release(), io_config,
+      tree_files, tree_fraction, config.tree_sample_accept);
     return reinterpret_cast<SparseBatchStream*>(stream);
 } catch (const std::exception& error)
 {

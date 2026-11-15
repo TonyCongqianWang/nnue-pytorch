@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+from bisect import bisect_right
 from datetime import timedelta
 
 import torch
@@ -77,11 +78,15 @@ class Callback:
 
 
 class SearchTreeMix(Callback):
-    def __init__(self, dataset, initial_fraction, final_fraction=None, ramp_steps=0):
+    def __init__(
+        self, dataset, initial_fraction, final_fraction=None, ramp_steps=0, *, knots=()
+    ):
         self.dataset = dataset
         self.initial_fraction = initial_fraction
         self.final_fraction = final_fraction
         self.ramp_steps = ramp_steps
+        self.knots = knots
+        self.knot_progress = tuple(progress for progress, _ in knots)
         self.start_step = None
         self.target = initial_fraction
 
@@ -98,11 +103,20 @@ class SearchTreeMix(Callback):
         self._update(trainer.global_step)
 
     def _update(self, step):
-        if self.final_fraction is None:
+        if not self.knots and self.final_fraction is None:
             return
         progress = min(1.0, max(0.0, (step - self.start_step) / self.ramp_steps))
-        weight = 0.5 * (1.0 - math.cos(math.pi * progress))
-        target = (1.0 - weight) * self.initial_fraction + weight * self.final_fraction
+        if self.knots:
+            index = min(bisect_right(self.knot_progress, progress), len(self.knots) - 1)
+            left, low = self.knots[index - 1]
+            right, high = self.knots[index]
+            weight = (progress - left) / (right - left)
+            target = (1.0 - weight) * low + weight * high
+        else:
+            weight = 0.5 * (1.0 - math.cos(math.pi * progress))
+            target = (
+                1.0 - weight
+            ) * self.initial_fraction + weight * self.final_fraction
         if target != self.target:
             self.dataset.set_search_tree_fraction(target)
             self.target = target

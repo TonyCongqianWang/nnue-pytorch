@@ -180,7 +180,8 @@ struct FeaturedBatchStream final: Stream<SparseBatch> {
                         nnue::UniquePositionCounter*    counter        = nullptr,
                         DataloaderIOConfig              io_config      = {},
                         const std::vector<std::string>& tree_filenames = {},
-                        double                          tree_fraction  = 0.0);
+                        double                          tree_fraction  = 0.0,
+                        double                          tree_accept    = 1.0);
     ~FeaturedBatchStream() final;
 
     SparseBatch* next() override;

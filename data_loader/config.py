@@ -48,7 +48,7 @@ class DataloaderSkipConfig:
     ply_y4: float = 0.75
     """Ply soft filter control point y4."""
     tree_sample_accept: float = 1.0
-    """Acceptance probability for search-tree samples (ply 9999), which skip the other filters."""
+    """Acceptance probability for search-tree samples (ply 9999) before batch mixing. Other filters are bypassed."""
 
 
 @dataclass

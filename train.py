@@ -4,6 +4,7 @@ import signal
 import sys
 import warnings
 from dataclasses import replace
+from itertools import pairwise
 
 import numpy as np
 import torch
@@ -214,6 +215,28 @@ def prepare_stack_table(args) -> None:
             )
 
 
+def parse_search_tree_schedule(schedule: str) -> tuple[tuple[float, float], ...]:
+    try:
+        knots = tuple(
+            (float(progress), float(fraction))
+            for progress, fraction in (knot.split(":") for knot in schedule.split(","))
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "--search-tree-schedule expects progress:fraction pairs"
+        ) from exc
+    if (
+        knots[0][0] != 0.0
+        or knots[-1][0] != 1.0
+        or not all(0.0 <= fraction <= 1.0 for _, fraction in knots)
+        or not all(a[0] < b[0] for a, b in pairwise(knots))
+    ):
+        raise ValueError(
+            "Search-tree schedule progress must increase from 0 to 1 and fractions must be in [0, 1]"
+        )
+    return knots
+
+
 def main():
     args = tyro.cli(TrainingConfig)
     actual_threads, actual_workers = args.threads, args.num_workers
@@ -229,8 +252,19 @@ def main():
         raise ValueError(
             "A search-tree ramp requires a final fraction and positive steps"
         )
+    knots = ()
+    initial_tree_fraction = args.search_tree_fraction
+    tree_ramp_steps = args.search_tree_ramp_steps
+    if args.search_tree_schedule is not None:
+        if initial_tree_fraction != 0.0 or final_fraction is not None:
+            raise ValueError(
+                "--search-tree-schedule cannot be combined with fixed or ramp fractions"
+            )
+        knots = parse_search_tree_schedule(args.search_tree_schedule)
+        initial_tree_fraction = knots[0][1]
+        tree_ramp_steps = args.max_epochs * args.num_batches_per_epoch
     if not args.search_tree_datasets and (
-        args.search_tree_fraction != 0.0 or final_fraction is not None
+        initial_tree_fraction != 0.0 or final_fraction is not None or knots
     ):
         raise ValueError("Search-tree mixing requires --search-tree-datasets")
     if args.search_tree_datasets and not args.datasets:
@@ -437,7 +471,7 @@ def main():
         rank=rank,
         world_size=world_size,
         search_tree_filenames=args.search_tree_datasets,
-        search_tree_fraction=args.search_tree_fraction,
+        search_tree_fraction=initial_tree_fraction,
     )
 
     optimizer_and_schedulers = nnue.configure_optimizers()
@@ -469,9 +503,10 @@ def main():
         trainer_callbacks.append(
             SearchTreeMix(
                 train.dataset.dataset,
-                args.search_tree_fraction,
+                initial_tree_fraction,
                 final_fraction,
-                args.search_tree_ramp_steps,
+                tree_ramp_steps,
+                knots=knots,
             )
         )
     if 0 <= args.swa_start_epoch < args.max_epochs:

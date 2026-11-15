@@ -113,6 +113,10 @@ def create_sparse_batch_stream(
     create = c_lib.dll.create_sparse_batch_stream
     tree_args = ()
     if search_tree_filenames:
+        if not 0.0 < config.tree_sample_accept <= 1.0:
+            raise ValueError(
+                "tree_sample_accept must be in (0, 1] for a separate tree stream"
+            )
         if not cyclic:
             raise ValueError("Search-tree mixing requires a cyclic stream")
         if not filenames or any(

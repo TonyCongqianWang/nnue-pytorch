@@ -255,6 +255,13 @@ def main():
     knots = ()
     initial_tree_fraction = args.search_tree_fraction
     tree_ramp_steps = args.search_tree_ramp_steps
+    schedule_steps = args.search_tree_schedule_steps
+    if schedule_steps is not None and (
+        args.search_tree_schedule is None or schedule_steps <= 0
+    ):
+        raise ValueError(
+            "--search-tree-schedule-steps requires a knot schedule and positive steps"
+        )
     if args.search_tree_schedule is not None:
         if initial_tree_fraction != 0.0 or final_fraction is not None:
             raise ValueError(
@@ -262,7 +269,7 @@ def main():
             )
         knots = parse_search_tree_schedule(args.search_tree_schedule)
         initial_tree_fraction = knots[0][1]
-        tree_ramp_steps = args.max_epochs * args.num_batches_per_epoch
+        tree_ramp_steps = schedule_steps or args.max_epochs * args.num_batches_per_epoch
     if not args.search_tree_datasets and (
         initial_tree_fraction != 0.0 or final_fraction is not None or knots
     ):

@@ -33,6 +33,9 @@ class TrainingConfig:
     search_tree_schedule: str | None = None
     """Comma-separated progress:fraction knots spanning progress 0 to 1, interpolated linearly."""
 
+    search_tree_schedule_steps: int | None = None
+    """Total optimizer steps for the knot schedule. Defaults to this stage's planned steps."""
+
     validation_datasets: UseAppendAction[tuple[str, ...]] = ()
     """Validation data to use for validation instead of the training data."""
 

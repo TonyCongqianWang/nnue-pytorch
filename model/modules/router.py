@@ -28,8 +28,9 @@ def ieee_matmul_precision():
         torch.set_float32_matmul_precision(prev_precision)
 
 
-NUM_MATERIAL_STATES = 207
-NUM_FC0_MATERIAL_STATES = 107
+NUM_MATERIAL_STATES = 468
+HEAVY_CATEGORIES = ("Q-no", "Q-yes", "R-no", "R-yes", "Else-no", "Else-yes")
+NUM_FC0_MATERIAL_STATES = 240
 KING_STATES = 8
 WING_STATES = 5
 TAIL_GEOMETRY_STATES = KING_STATES * WING_STATES
@@ -41,7 +42,7 @@ FC0_CODEBOOK_DIM = 256
 CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
-ROUTER_HASH = 0x4D313100
+ROUTER_HASH = 0x4D313200
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -106,7 +107,8 @@ _MATERIAL_STATES = [
     (t, p, h)
     for t in range(16)
     for p in range(min(8, t) + 1)
-    for h in range(1 + int(t > p))
+    for h, minimum in enumerate((1, 3, 1, 3, 0, 1))
+    if t - p >= minimum and (h != 4 or t == p)
 ]
 _FC0_MATERIAL_STATES = sorted(
     {(t, relative_pawns(t, p), h) for t, p, h in _MATERIAL_STATES}
@@ -155,7 +157,12 @@ class MaterialEncoder(nn.Module):
         super().__init__()
         self.sides = nn.ModuleList(
             [
-                nn.ModuleList([nn.Embedding(n, dim) for n in (16, pawn_states, 2)])
+                nn.ModuleList(
+                    [
+                        nn.Embedding(n, dim)
+                        for n in (16, pawn_states, len(HEAVY_CATEGORIES))
+                    ]
+                )
                 for _ in range(2)
             ]
         )
@@ -187,6 +194,8 @@ class MoERouter(nn.Module):
         commitment_cost=0.005,
         fc0_balance_kl_cost=0.001,
         tail_balance_kl_cost=0.001,
+        fc0_balance_kl_smoothing=0.05,
+        tail_balance_kl_smoothing=0.05,
         temperature=0.2,
         diversity_cost=0.01,
         reseed_dead_experts=True,
@@ -216,6 +225,10 @@ class MoERouter(nn.Module):
         self.balance_kl_costs = {
             "fc0": fc0_balance_kl_cost,
             "tail": tail_balance_kl_cost,
+        }
+        self.balance_kl_smoothing = {
+            "fc0": fc0_balance_kl_smoothing,
+            "tail": tail_balance_kl_smoothing,
         }
         self.temperature, self.diversity_cost = temperature, diversity_cost
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
@@ -255,8 +268,7 @@ class MoERouter(nn.Module):
             )
             self.register_buffer(
                 f"validation_heavy_{name}",
-                torch.zeros(2, count, 2, dtype=torch.int64),
-                persistent=False,
+                torch.zeros(2, count, len(HEAVY_CATEGORIES), dtype=torch.int64),
             )
         for name, cb in self.codebooks.items():
             self.register_buffer(
@@ -336,6 +348,7 @@ class MoERouter(nn.Module):
         soft_ema: torch.Tensor | None = None,
         *,
         top_k: int = 1,
+        smoothing: float = 0.05,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with ieee_matmul_precision():
             z_sq = torch.sum(z**2, dim=-1, keepdim=True)
@@ -367,9 +380,9 @@ class MoERouter(nn.Module):
             prob_mean = probs.mean(dim=0)
 
             # The forward value measures hard wins; soft probabilities supply
-            # the gradient. Mix in 5% uniform traffic to bound the slope at zero.
+            # the gradient. Mix in uniform traffic to bound the slope at zero.
             traffic = f + (prob_mean - prob_mean.detach())
-            balance_loss = -(0.95 * k_exp * traffic + 0.05).log().mean()
+            balance_loss = -((1 - smoothing) * k_exp * traffic + smoothing).log().mean()
             if traffic_ema is not None and soft_ema is not None:
                 with torch.no_grad():
                     traffic_ema.lerp_(f, 1.0 - self.ema_decay)
@@ -542,6 +555,7 @@ class MoERouter(nn.Module):
                     hard,
                     soft,
                     top_k=top_k,
+                    smoothing=self.balance_kl_smoothing[name],
                 )
                 if mix_experts:
                     with torch.no_grad():
@@ -582,7 +596,10 @@ class MoERouter(nn.Module):
             for name, index in zip(MOE_BANKS, ids):
                 counts = getattr(self, f"validation_heavy_{name}")
                 for side, material in enumerate((ours, theirs)):
-                    key = index * 2 + self.tail_material_decode[material, 2]
+                    key = (
+                        index * len(HEAVY_CATEGORIES)
+                        + self.tail_material_decode[material, 2]
+                    )
                     counts[side].view(-1).scatter_add_(0, key, torch.ones_like(key))
         zero = torch.zeros((), device=c_fc0.device)
         return *ids, zero, zero, zero

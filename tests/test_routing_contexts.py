@@ -23,6 +23,7 @@ def get_context_indices(board):
         h = int(
             chess.popcount((board.knights | board.bishops) & own) + pair > opponents
         )
+        h += 2 * (0 if board.queens & own else 1 if board.rooks & own else 2)
         pawns = board.pawns & own
         wings = bool(pawns & 0x0F0F0F0F0F0F0F0F) + 2 * bool(pawns & 0xF0F0F0F0F0F0F0F0)
         return (
@@ -48,10 +49,10 @@ def get_context_indices(board):
 
 
 def test_material_layout_bijection():
-    assert NUM_MATERIAL_STATES == 207
+    assert NUM_MATERIAL_STATES == 468
     for i in range(NUM_MATERIAL_STATES):
         assert encode_material_state(*decode_material_state(i)) == i
-    for args in [(0, 0, 1), (1, 2, 0), (1, 0, 2)]:
+    for args in [(0, 0, 1), (1, 2, 0), (1, 0, 3)]:
         with pytest.raises(ValueError):
             encode_material_state(*args)
 

@@ -46,6 +46,9 @@ class SerializeConfig:
     histogram_mode: Literal["none", "aggregate", "all"] = "aggregate"
     """Quantized stats: aggregate across experts by default; all prints each expert."""
 
+    diagnostics_path: str | None = None
+    """Write compact expert diagnostics JSON from a checkpoint export."""
+
     ft_perm: str | None = None
     """Path to a file that defines the permutation to use on the feature transformer."""
 
@@ -172,6 +175,12 @@ def main():
     )
     nnue.to(device)
     prepare_for_export(nnue.model)
+    if serialize_config.diagnostics_path is not None:
+        if not target_is_nnue:
+            raise ValueError("Export diagnostics require an NNUE target")
+        from model.utils.export_diagnostics import write_export_diagnostics
+
+        write_export_diagnostics(nnue.model, serialize_config.diagnostics_path)
 
     if serialize_config.ft_optimize and serialize_config.ft_perm is not None:
         raise ValueError("Options --ft_perm and --ft_optimize are mutually exclusive.")

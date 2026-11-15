@@ -572,18 +572,20 @@ constexpr int relative_pawns(int pieces, int pawns) {
 
 constexpr auto MATERIAL_IDS = [] {
     struct Tables {
-        std::array<std::array<std::array<int, 2>, 9>, 16> tail{};
-        std::array<std::array<std::array<int, 2>, 4>, 16> fc0{};
+        std::array<std::array<std::array<int, 6>, 9>, 16> tail{};
+        std::array<std::array<std::array<int, 6>, 4>, 16> fc0{};
         int tailCount = 0, fc0Count = 0;
     } tables;
     for (int t = 0; t < 16; ++t)
     {
         for (int p = 0; p <= std::min(8, t); ++p)
-            for (int h = 0; h <= int(t > p); ++h)
-            {
-                tables.tail[t][p][h]                   = tables.tailCount++;
-                tables.fc0[t][relative_pawns(t, p)][h] = -1;
-            }
+            for (int h = 0; h < 6; ++h)
+                if (constexpr int minimum[] = {1, 3, 1, 3, 0, 1};
+                    t - p >= minimum[h] && (h != 4 || t == p))
+                {
+                    tables.tail[t][p][h]                   = tables.tailCount++;
+                    tables.fc0[t][relative_pawns(t, p)][h] = -1;
+                }
         for (auto& row : tables.fc0[t])
             for (int& id : row)
                 if (id == -1)
@@ -592,7 +594,7 @@ constexpr auto MATERIAL_IDS = [] {
     return tables;
 }();
 
-static_assert(MATERIAL_IDS.fc0Count == 107 && MATERIAL_IDS.tailCount == 207);
+static_assert(MATERIAL_IDS.fc0Count == 240 && MATERIAL_IDS.tailCount == 468);
 
 int joint_wings(int us, int them) {
     if (us == 3 || them == 3)
@@ -612,7 +614,11 @@ static MaterialContext material_context(const Position& pos, Color perspective) 
     const bool pair    = (bishops & 0x55AA55AA55AA55AAULL) && (bishops & ~0x55AA55AA55AA55AAULL);
     const int  rooks   = pos.piecesBB(Piece(PieceType::Rook, perspective)).count();
     const int  queens  = pos.piecesBB(Piece(PieceType::Queen, perspective)).count();
-    const int  h       = t - p - rooks - queens + pair > rooks + 2 * queens;
+    const int  h       = 2
+                  * (queens  ? 0
+                     : rooks ? 1
+                             : 2)
+                + (t - p - rooks - queens + pair > rooks + 2 * queens);
     const auto pawns = pos.piecesBB(Piece(PieceType::Pawn, perspective)).bits();
     const int wings = bool(pawns & 0x0F0F0F0F0F0F0F0FULL) + 2 * bool(pawns & 0xF0F0F0F0F0F0F0F0ULL);
     return {MATERIAL_IDS.fc0[t][relative_pawns(t, p)][h], MATERIAL_IDS.tail[t][p][h], wings};

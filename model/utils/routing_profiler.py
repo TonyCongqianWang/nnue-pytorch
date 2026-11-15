@@ -5,7 +5,12 @@ import sys
 import numpy as np
 import torch
 
-from ..modules.router import KING_STATES, MOE_BANKS, TAIL_GEOMETRY_STATES
+from ..modules.router import (
+    HEAVY_CATEGORIES,
+    KING_STATES,
+    MOE_BANKS,
+    TAIL_GEOMETRY_STATES,
+)
 
 
 def _table(headers, rows, file):
@@ -42,7 +47,7 @@ def print_routing_profile(model, file=None):
         n = len(router.codebooks[name])
         count = np.bincount(ids, minlength=n)
         sums = np.zeros((4, n))
-        heavy = np.zeros((2, n, 2), dtype=np.int64)
+        heavy = np.zeros((2, n, len(HEAVY_CATEGORIES)), dtype=np.int64)
         geometry = np.zeros((TAIL_GEOMETRY_STATES, n))
         for start in range(0, len(ids), 65536):
             chunk = ids[start : start + 65536]
@@ -53,8 +58,9 @@ def print_routing_profile(model, file=None):
                 sums[i] += np.bincount(chunk, weights=values, minlength=n)
             for side, categories in enumerate((own[:, 2], opp[:, 2])):
                 heavy[side] += np.bincount(
-                    chunk * 2 + categories, minlength=n * 2
-                ).reshape(n, 2)
+                    chunk * len(HEAVY_CATEGORIES) + categories,
+                    minlength=heavy[side].size,
+                ).reshape(heavy[side].shape)
             if name == "tail":
                 group = index % TAIL_GEOMETRY_STATES
                 geometry += np.bincount(
@@ -69,7 +75,7 @@ def print_routing_profile(model, file=None):
             "Val %",
             "T us/opp",
             "RelP us/opp" if name == "fc0" else "P us/opp",
-            "Minor edge % STM / OPP (No/Yes)",
+            "Heavy % STM / OPP (Q-/Q+/R-/R+/E-/E+)",
         ]
         if name == "tail":
             headers.append("Wing state % (0/1/2/3/4)")

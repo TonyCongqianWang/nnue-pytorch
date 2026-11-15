@@ -45,6 +45,8 @@ class NNUEModel(nn.Module):
             dim=config.moe_tail_codebook_dim,
             fc0_balance_kl_cost=config.moe_fc0_balance_kl_cost,
             tail_balance_kl_cost=config.moe_tail_balance_kl_cost,
+            fc0_balance_kl_smoothing=config.moe_fc0_balance_kl_smoothing,
+            tail_balance_kl_smoothing=config.moe_tail_balance_kl_smoothing,
             diversity_cost=config.moe_weight_diversity_cost,
             temperature=config.moe_weight_temperature,
         )

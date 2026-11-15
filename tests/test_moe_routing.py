@@ -118,8 +118,8 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
     fc0_table, tail_table = text.split("TAIL: 256 experts")
     assert "Wing state %" not in fc0_table
     assert "Wing state %" in tail_table
-    assert "Minor edge % STM / OPP (No/Yes)" in fc0_table
-    assert "Minor edge % STM / OPP (No/Yes)" in tail_table
+    assert "Heavy % STM / OPP (Q-/Q+/R-/R+/E-/E+)" in fc0_table
+    assert "Heavy % STM / OPP (Q-/Q+/R-/R+/E-/E+)" in tail_table
     NNUEWriter(m, histogram_mode="none")
     assert capsys.readouterr().out == ""
 

@@ -61,7 +61,7 @@ def test_native_heavy_features_and_context(heavy):
 
 @pytest.mark.parametrize(
     "pieces, category",
-    [("qrbn", 0), ("qbb", 1), ("rbb", 1), ("bb", 1), ("b", 1), ("nn", 1), ("", 0)],
+    [("qrbn", 0), ("qbb", 1), ("r", 2), ("rbb", 3), ("", 4), ("b", 5)],
 )
 def test_material_minor_edge(pieces, category):
     board = chess.Board("7k/8/8/8/8/8/8/7K b - - 0 1")

@@ -47,12 +47,25 @@ class ModelConfig(LayerStacksConfig):
     """FC0 coefficient for KL from uniform to smoothed hard top-1 traffic."""
     moe_tail_balance_kl_cost: float = 0.001
     """Tail coefficient for KL from uniform to smoothed hard top-1 traffic."""
+    moe_fc0_balance_kl_smoothing: float = 0.05
+    """Uniform smoothing mass for FC0 hard-traffic KL."""
+    moe_tail_balance_kl_smoothing: float = 0.05
+    """Uniform smoothing mass for tail hard-traffic KL."""
+
     moe_weight_diversity_cost: float = 0.0
     """Weight-router codebook diversity coefficient."""
     moe_weight_temperature: float = 0.2
     """Weight-router balancing softmax temperature."""
 
     def __post_init__(self):
+        if not all(
+            0 < value < 1
+            for value in (
+                self.moe_fc0_balance_kl_smoothing,
+                self.moe_tail_balance_kl_smoothing,
+            )
+        ):
+            raise ValueError("MoE KL smoothing must be between zero and one")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
             raise ValueError("MoE expert counts must be FC0 2–64 and tail 2–256")
         if (

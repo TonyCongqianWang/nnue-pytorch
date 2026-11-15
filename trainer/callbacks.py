@@ -1021,7 +1021,9 @@ class MoEDeadExpertReseeder(Callback):
         os.makedirs(directory, exist_ok=True)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            categories = ("no_minor_edge", "minor_edge")
+            from model.modules.router import HEAVY_CATEGORIES
+
+            categories = HEAVY_CATEGORIES
             heavy_columns = [
                 f"{side}_{category}"
                 for side in ("stm", "opp")

@@ -73,7 +73,7 @@ def get_histogram_callback(hist_title: str, verbose: bool):
     return histogram_callback
 
 
-from ..modules.router import FC0_ROUTER_TABLE_SIZE, ROUTER_TABLE_SIZE, get_router_hash
+from ..modules.router import get_router_hash
 
 
 def pack_lookup_table(values, bits):
@@ -389,13 +389,14 @@ class NNUEReader:
                     )
 
         router = self.model.router
-        fc0_size = 0 if router.shared_routing else FC0_ROUTER_TABLE_SIZE
+        fc0_size = router.fc0_lut.numel()
+        tail_size = router.lut.numel()
         tail_bits = 6 if router.shared_routing else 8
         fc0_bytes = (fc0_size * 6 + 7) // 8
-        tail_bytes = (ROUTER_TABLE_SIZE * tail_bits + 7) // 8
+        tail_bytes = (tail_size * tail_bits + 7) // 8
         router.load_lookup_tables(
             unpack_lookup_table(self.f.read(fc0_bytes), fc0_size, 6),
-            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, tail_bits),
+            unpack_lookup_table(self.f.read(tail_bytes), tail_size, tail_bits),
         )
         if self.f.read(1):
             raise ValueError("Unexpected trailing network data")

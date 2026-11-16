@@ -6,7 +6,13 @@ import torch
 from model.config import ModelConfig
 from model.model import NNUEModel
 from model.modules.features import DEFAULT_FEATURES
-from model.modules.router import MoERouter
+from model.modules.router import (
+    NUM_FC0_MATERIAL_STATES,
+    TAIL_GEOMETRY_STATES,
+    MoERouter,
+    encode_material_state,
+    make_router_index,
+)
 from model.utils.serialize import (
     CountingExporter,
     NNUEReader,
@@ -14,6 +20,33 @@ from model.utils.serialize import (
     pack_lookup_table,
     unpack_lookup_table,
 )
+
+
+def test_shared_routing_combines_relative_pawns_with_geometry():
+    router = MoERouter(4, 4, dim=8, shared=True).eval()
+    same_band = [(10, 2, 0), (10, 4, 0)]
+    contexts = [
+        (*same_band[0], 0, 0),
+        (*same_band[1], 0, 0),
+        (*same_band[0], 3, 2),
+        (10, 7, 0, 0, 0),
+    ]
+    relative = [
+        make_router_index(encode_material_state(t, p, h, first_layer=True), 0)
+        for t, p, h, _, _ in contexts
+    ]
+    exact = [
+        make_router_index(encode_material_state(t, p, h), 0, king, wings)
+        for t, p, h, king, wings in contexts
+    ]
+    assert relative[0] == relative[1] and exact[0] != exact[1]
+    assert router.lut.numel() == NUM_FC0_MATERIAL_STATES**2 * TAIL_GEOMETRY_STATES
+    router.lut_valid = True
+    router.lut[relative[0] * TAIL_GEOMETRY_STATES + exact[2] % TAIL_GEOMETRY_STATES] = 1
+    router.lut[relative[3] * TAIL_GEOMETRY_STATES] = 2
+    fc0, tail, *_ = router(torch.tensor(relative), torch.tensor(exact))
+    torch.testing.assert_close(fc0, torch.tensor([0, 0, 1, 2]))
+    torch.testing.assert_close(tail, fc0)
 
 
 @pytest.mark.parametrize("bits", [6, 8])

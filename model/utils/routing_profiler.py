@@ -73,7 +73,7 @@ def print_routing_profile(model, file=None):
             "LUT %",
             "Val %",
             "T us/opp",
-            "RelP us/opp" if name == "fc0" else "P us/opp",
+            "RelP us/opp" if name == "fc0" or router.shared_routing else "P us/opp",
             "Heavy % STM / OPP (Q-/Q+/R-/R+/E-/E+)",
         ]
         if name == "tail":

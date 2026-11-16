@@ -43,6 +43,7 @@ CODEBOOK_DIM = 2048
 FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
 ROUTER_HASH = 0x4D313200
+SHARED_ROUTER_HASH = 0x4D313400
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -87,11 +88,8 @@ def codebook_diversity_loss(cb: torch.Tensor) -> torch.Tensor:
 def get_router_hash(
     num_fc0_experts=NUM_FC0_EXPERTS, num_weight_experts=NUM_WEIGHT_EXPERTS, shared=False
 ):
-    return (
-        ROUTER_HASH
-        ^ (0x100 if shared else 0)
-        ^ ((num_fc0_experts << 16) | num_weight_experts)
-    )
+    router_hash = SHARED_ROUTER_HASH if shared else ROUTER_HASH
+    return router_hash ^ ((num_fc0_experts << 16) | num_weight_experts)
 
 
 def relative_pawns(total, pawns):
@@ -224,7 +222,8 @@ class MoERouter(nn.Module):
         )
         self.material_states = {
             "fc0": material_states or NUM_FC0_MATERIAL_STATES,
-            "tail": material_states or NUM_MATERIAL_STATES,
+            "tail": material_states
+            or (NUM_FC0_MATERIAL_STATES if shared else NUM_MATERIAL_STATES),
         }
         self.num_contexts = self.material_states["tail"] ** 2 * TAIL_GEOMETRY_STATES
         self.commitment_cost = commitment_cost
@@ -242,7 +241,7 @@ class MoERouter(nn.Module):
         self.encoders = nn.ModuleDict()
         if not shared:
             self.encoders["fc0"] = MaterialEncoder(fc0_dim, 4)
-        self.encoders["tail"] = MaterialEncoder(dim, 9)
+        self.encoders["tail"] = MaterialEncoder(dim, 4 if shared else 9)
         self.king = nn.Embedding(KING_STATES, dim)
         self.wings = nn.Embedding(WING_STATES, dim)
         for emb in (self.king, self.wings):
@@ -258,7 +257,9 @@ class MoERouter(nn.Module):
             "fc0_material_decode", torch.tensor(_FC0_MATERIAL_STATES), persistent=False
         )
         self.register_buffer(
-            "tail_material_decode", torch.tensor(_MATERIAL_STATES), persistent=False
+            "tail_material_decode",
+            torch.tensor(_FC0_MATERIAL_STATES if shared else _MATERIAL_STATES),
+            persistent=False,
         )
         for name, cb in self.codebooks.items():
             count = len(cb)
@@ -564,6 +565,10 @@ class MoERouter(nn.Module):
         mix_experts=False,
         codebook=None,
     ):
+        if self.shared_routing:
+            # The loader provides the relative-pawn material pair in c_fc0
+            # and the wing/king suffix in c_tail.
+            c_tail = c_fc0 * TAIL_GEOMETRY_STATES + c_tail % TAIL_GEOMETRY_STATES
         if self.training:
             ids, parts = [], []
             bank_scale = 1.0 / len(self.active_banks)
@@ -618,7 +623,7 @@ class MoERouter(nn.Module):
                 self.validation_joint_counts.scatter_add_(
                     0, pair, torch.ones_like(pair)
                 )
-            # Both banks see the same heavy categories, which the exact tail context encodes.
+            # The full context encodes the heavy categories for both sides.
             ours, theirs, _ = decompose_router_index(
                 c_tail, material_states=self.material_states["tail"]
             )

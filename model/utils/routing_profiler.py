@@ -8,7 +8,6 @@ import torch
 from ..modules.router import (
     HEAVY_CATEGORIES,
     KING_STATES,
-    MOE_BANKS,
     TAIL_GEOMETRY_STATES,
 )
 
@@ -40,7 +39,7 @@ def print_routing_profile(model, file=None):
     tables = router.get_lookup_table()
     print("\nMoE10 routing profiles. Export sorts by validation traffic.", file=file)
     print("Heavy and wing shares are within each expert's LUT contexts.", file=file)
-    for name, table in zip(MOE_BANKS, tables):
+    for name, table in zip(router.active_banks, tables[-len(router.active_banks) :]):
         material = getattr(router, f"{name}_material_decode").cpu().numpy()
         states = router.material_states[name]
         ids = table.cpu().numpy()
@@ -107,5 +106,6 @@ def print_routing_profile(model, file=None):
                 )
             rows.append(row)
 
-        print(f"\n{name.upper()}: {n} experts, {len(ids):,} contexts", file=file)
+        label = "Stack" if router.shared_routing else name.upper()
+        print(f"\n{label}: {n} experts, {len(ids):,} contexts", file=file)
         _table(headers, rows, file)

@@ -10,10 +10,10 @@ concurrency:
   cancel-in-progress: true
 
 # Match the engine's NNUE_TEST_SMALL build. Adapter/codebook dimensions are
-# training-only; the coalesced inference net has four FC0 and four tail experts.
+# training-only; the coalesced inference net has four shared stack experts.
 env:
   SMALL_MODEL: >-
-    --l1=256 --moe-fc0-experts=4 --moe-tail-experts=4
+    --l1=256 --moe-shared-router --moe-fc0-experts=4 --moe-tail-experts=4
     --moe-fc0-codebook-dim=8 --moe-tail-codebook-dim=8
     --moe-fc0-rank=4 --moe-tail-rank=4
 
@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: 176dbd6f746515ae96c01f59e1feafef9db2b5e1
+          ref: 90ecade68812f86531aa985378353facf0dc8357
           path: Stockfish
           persist-credentials: false
 
@@ -93,7 +93,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: TonyCongqianWang/Stockfish
-          ref: 176dbd6f746515ae96c01f59e1feafef9db2b5e1
+          ref: 90ecade68812f86531aa985378353facf0dc8357
           path: Stockfish
           persist-credentials: false
 
@@ -112,4 +112,4 @@ jobs:
           ./run_docker.sh CPU ${{ github.workspace }} --skip-build --non-interactive --exec \
             env OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -u cross_check_eval.py --random-weights \
             --data .pgo/small.binpack --engine ./Stockfish/src/stockfish --device=cpu \
-            --count 512 --seed 42 --max-error 2 --max-ckpt-error 0 $SMALL_MODEL
+            --count 512 --seed 42 --max-error 2 --max-ckpt-error 0 --moe-fc0-direct $SMALL_MODEL

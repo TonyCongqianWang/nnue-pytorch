@@ -78,6 +78,11 @@ def main():
                 for f in fields(ModelConfig)
                 if type(f.default) is int
             ),
+            *(
+                "--" + f.name.replace("_", "-")
+                for f in fields(ModelConfig)
+                if type(f.default) is bool and getattr(model_config, f.name)
+            ),
         ]
     )
     resumed_batch_size = args.batch_size * 2

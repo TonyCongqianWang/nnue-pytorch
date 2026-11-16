@@ -40,6 +40,7 @@ class NNUEModel(nn.Module):
         self.input_feature_name = self.input.INPUT_FEATURE_NAME
         self.feature_hash = self.input.HASH
         self.router = MoERouter(
+            shared=config.moe_shared_router,
             num_fc0_experts=config.moe_fc0_experts,
             num_weight_experts=config.moe_tail_experts,
             fc0_dim=config.moe_fc0_codebook_dim,

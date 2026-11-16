@@ -36,8 +36,10 @@ class ModelConfig(LayerStacksConfig):
     moe_mix_interval: int = 0
     """Apply weighted top-2 FC0 and top-4 tail training every N optimizer steps. Zero disables."""
 
+    moe_shared_router: bool = False
+    """Route the entire stack through the full-context router."""
     moe_fc0_direct: bool = False
-    """Train one FC0 weight and bias table indexed by the learned router."""
+    """Train direct expert weights and biases for FC0, or for the whole stack with shared routing."""
     moe_diversity_space: Literal["bottleneck", "weights"] = "bottleneck"
     """Tensor to regularize in both banks, before clipping and fake quantization."""
     moe_fc0_bottleneck_diversity_cost: float = 0.0
@@ -85,6 +87,13 @@ class ModelConfig(LayerStacksConfig):
             raise ValueError(
                 "MoE regularization costs and mixing interval must be nonnegative"
             )
+        if self.moe_shared_router:
+            if self.moe_fc0_experts != self.moe_tail_experts:
+                raise ValueError("Shared routing requires equal expert counts")
+            if self.moe_mix_interval:
+                raise ValueError("Expert mixing is unavailable with shared routing")
+            if self.moe_fc0_direct and self.moe_tail_bottleneck_diversity_cost:
+                raise ValueError("Direct stacks do not use generator diversity")
         if self.moe_fc0_direct and (
             self.moe_fc0_zero_mean_init or self.moe_fc0_bottleneck_diversity_cost
         ):
@@ -111,11 +120,13 @@ class ModelConfig(LayerStacksConfig):
                     default=f.default,
                 )
         parser.add_argument("--moe-fc0-direct", action="store_true")
+        parser.add_argument("--moe-shared-router", action="store_true")
 
     @staticmethod
     def get_model_config(args) -> "ModelConfig":
         return ModelConfig(
             moe_fc0_direct=getattr(args, "moe_fc0_direct", False),
+            moe_shared_router=getattr(args, "moe_shared_router", False),
             **{
                 f.name: getattr(args, f.name)
                 for f in fields(ModelConfig)

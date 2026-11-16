@@ -69,7 +69,7 @@ def write_export_diagnostics(model, path):
     _print_spectra(report["projections"].items())
 
     orders = {}
-    for bank in MOE_BANKS:
+    for bank in router.active_banks:
         counts = getattr(router, f"validation_counts_{bank}").cpu()
         orders[bank] = torch.argsort(counts, descending=True, stable=True)
         n = len(counts)
@@ -105,12 +105,17 @@ def write_export_diagnostics(model, path):
 
     print("[Export diagnostics] Centered codebooks, bottlenecks and expert weights")
     codebooks = dict(zip(MOE_BANKS, router.codebook))
-    for bank, vectors in codebooks.items():
+    for bank in router.active_banks:
+        vectors = codebooks[bank]
         report["routers"][bank]["codebook"] = _spectrum(vectors)
     _print_spectra(
-        (f"{bank} codebook", report["routers"][bank]["codebook"]) for bank in MOE_BANKS
+        (f"{bank} codebook", report["routers"][bank]["codebook"])
+        for bank in router.active_banks
     )
-    for name, bank, layer in zip(names, ("fc0", "tail", "tail"), layers.dense_layers()):
+    fc0_bank = "tail" if router.shared_routing else "fc0"
+    for name, bank, layer in zip(
+        names, (fc0_bank, "tail", "tail"), layers.dense_layers()
+    ):
         vectors = codebooks[bank]
         h = None if layer.is_direct else layer._bottleneck(vectors)
         weight, bias = layer.get_all_weights_and_biases(vectors, bottleneck=h)

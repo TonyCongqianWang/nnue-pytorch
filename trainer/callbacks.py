@@ -851,7 +851,11 @@ class MoEDeadExpertReseeder(Callback):
     def on_validation_epoch_end(self, trainer):
         if getattr(trainer, "sanity_checking", False):
             return
-        from model.modules.router import MOE_LOSS_COMPONENTS, ieee_matmul_precision
+        from model.modules.router import (
+            MOE_BANKS,
+            MOE_LOSS_COMPONENTS,
+            ieee_matmul_precision,
+        )
 
         from .engine import _unwrap_module
 
@@ -859,16 +863,18 @@ class MoEDeadExpertReseeder(Callback):
         final = getattr(trainer, "validation_is_final", False)
         if final and getattr(trainer, "world_size", 1) > 1:
             # One small collective per table, only at the final boundary.
-            for name in ("fc0", "tail"):
+            for name in router.active_banks:
                 dist.all_reduce(getattr(router, f"validation_counts_{name}"))
                 dist.all_reduce(getattr(router, f"validation_heavy_{name}"))
-            dist.all_reduce(router.validation_joint_counts)
+            if not router.shared_routing:
+                dist.all_reduce(router.validation_joint_counts)
         router.collect_lut_diagnostics = router.collect_joint_diagnostics = False
         if getattr(trainer, "rank", 0) != 0:
             return
         scope = "all ranks" if final else "rank-0"
         # These are training snapshots. Validation must not alter traffic EMAs.
-        for row, (name, _, hard, soft, codebook) in enumerate(router.banks()):
+        for name, _, hard, soft, codebook in router.banks():
+            row = MOE_BANKS.index(name)
             hard = hard.detach().float().cpu()
             soft = soft.detach().float().cpu()
             with ieee_matmul_precision():
@@ -1038,11 +1044,11 @@ class MoEDeadExpertReseeder(Callback):
             writer.writerow(
                 ["bank", "fc0_id", "tail_id", "count", "fraction", *heavy_columns]
             )
-            for name in ("fc0", "tail"):
+            for name in router.active_banks:
                 counts = getattr(router, f"validation_counts_{name}").cpu()
                 heavy = getattr(router, f"validation_heavy_{name}").cpu()
                 total = max(int(counts.sum()), 1)
-                if name == "fc0":
+                if name == router.active_banks[0]:
                     for side, totals in zip(("STM", "OPP"), heavy.sum(dim=1).tolist()):
                         shares = ", ".join(
                             f"{c}={100 * n / total:.1f}%"
@@ -1053,7 +1059,7 @@ class MoEDeadExpertReseeder(Callback):
                     writer.writerow(
                         [
                             name,
-                            i if name == "fc0" else "",
+                            i if name == "fc0" or router.shared_routing else "",
                             i if name == "tail" else "",
                             count,
                             count / total,
@@ -1077,6 +1083,15 @@ class MoEDeadExpertReseeder(Callback):
         def entropy(counts):
             p = counts.double() / counts.sum().clamp_min(1)
             return float(-(p * p.clamp_min(1e-300).log2()).sum())
+
+        if router.shared_routing:
+            counts = router.validation_counts_tail.cpu()
+            print(
+                f"[Final shared routing, all ranks] n={int(counts.sum())} "
+                f"H(stack)={entropy(counts):.4f}; counts: {path}",
+                flush=True,
+            )
+            return
 
         h0 = entropy(router.validation_counts_fc0.cpu())
         ht = entropy(router.validation_counts_tail.cpu())

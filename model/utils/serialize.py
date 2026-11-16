@@ -179,8 +179,11 @@ class NNUEWriter:
             expert = bucket if first else bucket - model.layer_stacks.l1.count
             for layer, key in zip(layers, keys):
                 self.write_fc_layer(model, layer, key, f"{bank} expert {expert}")
-        self.exporter.extend(pack_lookup_table(fc0_table, 6))
-        self.exporter.extend(pack_lookup_table(tail_table, 8))
+        if model.router.shared_routing:
+            self.exporter.extend(pack_lookup_table(tail_table, 6))
+        else:
+            self.exporter.extend(pack_lookup_table(fc0_table, 6))
+            self.exporter.extend(pack_lookup_table(tail_table, 8))
         if self.histogram_mode == "aggregate":
             for name, values in self._layer_histograms.items():
                 get_histogram_callback("all experts", True)(name, torch.cat(values))
@@ -211,7 +214,8 @@ class NNUEWriter:
         size += stacks.l1.count * (4 + layer_size(stacks.l1))
         size += stacks.count * (4 + layer_size(stacks.l2) + layer_size(stacks.output))
         size += (model.router.fc0_lut.numel() * 6 + 7) // 8
-        size += (model.router.lut.numel() * 8 + 7) // 8
+        tail_bits = 6 if model.router.shared_routing else 8
+        size += (model.router.lut.numel() * tail_bits + 7) // 8
         return size
 
     def _layer_histogram_callback(self, desc):
@@ -263,6 +267,7 @@ class NNUEWriter:
         router_hash = get_router_hash(
             model.router.num_fc0_experts,
             model.router.num_weight_experts,
+            model.router.shared_routing,
         )
         router_hash ^= int(model.quantization.config.weight_scale_l1) ^ 256
         net_hash = fc_hash ^ model.feature_hash ^ (model.L1 * 2) ^ router_hash
@@ -383,11 +388,14 @@ class NNUEReader:
                         layer.layer_key,
                     )
 
-        fc0_bytes = (FC0_ROUTER_TABLE_SIZE * 6 + 7) // 8
-        tail_bytes = (ROUTER_TABLE_SIZE * 8 + 7) // 8
-        self.model.router.load_lookup_tables(
-            unpack_lookup_table(self.f.read(fc0_bytes), FC0_ROUTER_TABLE_SIZE, 6),
-            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, 8),
+        router = self.model.router
+        fc0_size = 0 if router.shared_routing else FC0_ROUTER_TABLE_SIZE
+        tail_bits = 6 if router.shared_routing else 8
+        fc0_bytes = (fc0_size * 6 + 7) // 8
+        tail_bytes = (ROUTER_TABLE_SIZE * tail_bits + 7) // 8
+        router.load_lookup_tables(
+            unpack_lookup_table(self.f.read(fc0_bytes), fc0_size, 6),
+            unpack_lookup_table(self.f.read(tail_bytes), ROUTER_TABLE_SIZE, tail_bits),
         )
         if self.f.read(1):
             raise ValueError("Unexpected trailing network data")
@@ -398,6 +406,7 @@ class NNUEReader:
         router_hash = get_router_hash(
             self.model.router.num_fc0_experts,
             self.model.router.num_weight_experts,
+            self.model.router.shared_routing,
         )
         router_hash ^= int(self.model.quantization.config.weight_scale_l1) ^ 256
         expected_hash = fc_hash ^ feature_hash ^ (self.config.L1 * 2) ^ router_hash

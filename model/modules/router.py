@@ -85,9 +85,13 @@ def codebook_diversity_loss(cb: torch.Tensor) -> torch.Tensor:
 
 
 def get_router_hash(
-    num_fc0_experts=NUM_FC0_EXPERTS, num_weight_experts=NUM_WEIGHT_EXPERTS
+    num_fc0_experts=NUM_FC0_EXPERTS, num_weight_experts=NUM_WEIGHT_EXPERTS, shared=False
 ):
-    return ROUTER_HASH ^ ((num_fc0_experts << 16) | num_weight_experts)
+    return (
+        ROUTER_HASH
+        ^ (0x100 if shared else 0)
+        ^ ((num_fc0_experts << 16) | num_weight_experts)
+    )
 
 
 def relative_pawns(total, pawns):
@@ -182,7 +186,7 @@ class MaterialEncoder(nn.Module):
 
 
 class MoERouter(nn.Module):
-    """Separate material-only FC0 and material/three-bit-king tail routers."""
+    """Full-context routing, with an optional independent material-only FC0 router."""
 
     def __init__(
         self,
@@ -201,6 +205,7 @@ class MoERouter(nn.Module):
         reseed_dead_experts=True,
         ema_decay=0.998,
         codebook_target_norm=1.0,
+        shared=False,
     ):
         super().__init__()
         if not (
@@ -212,6 +217,7 @@ class MoERouter(nn.Module):
             )
         ):
             raise ValueError("MoE10 supports 64 FC0 and 256 tail experts")
+        self.shared = shared
         self.num_fc0_experts, self.num_weight_experts = (
             num_fc0_experts,
             num_weight_experts,
@@ -233,19 +239,18 @@ class MoERouter(nn.Module):
         self.temperature, self.diversity_cost = temperature, diversity_cost
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
-        self.encoders = nn.ModuleDict(
-            {"fc0": MaterialEncoder(fc0_dim, 4), "tail": MaterialEncoder(dim, 9)}
-        )
+        self.encoders = nn.ModuleDict()
+        if not shared:
+            self.encoders["fc0"] = MaterialEncoder(fc0_dim, 4)
+        self.encoders["tail"] = MaterialEncoder(dim, 9)
         self.king = nn.Embedding(KING_STATES, dim)
         self.wings = nn.Embedding(WING_STATES, dim)
         for emb in (self.king, self.wings):
             nn.init.uniform_(emb.weight, -1 / math.sqrt(dim), 1 / math.sqrt(dim))
-        self.codebooks = nn.ParameterDict(
-            {
-                "fc0": nn.Parameter(torch.empty(num_fc0_experts, fc0_dim)),
-                "tail": nn.Parameter(torch.empty(num_weight_experts, dim)),
-            }
-        )
+        self.codebooks = nn.ParameterDict()
+        if not shared:
+            self.codebooks["fc0"] = nn.Parameter(torch.empty(num_fc0_experts, fc0_dim))
+        self.codebooks["tail"] = nn.Parameter(torch.empty(num_weight_experts, dim))
         for parameter in self.codebooks.values():
             bound = 1 / math.sqrt(parameter.shape[1])
             nn.init.uniform_(parameter, -bound, bound)
@@ -284,7 +289,9 @@ class MoERouter(nn.Module):
         self.collect_joint_diagnostics = False
         self.register_buffer(
             "fc0_lut",
-            torch.zeros(self.material_states["fc0"] ** 2, dtype=torch.long),
+            torch.zeros(
+                0 if shared else self.material_states["fc0"] ** 2, dtype=torch.long
+            ),
             persistent=False,
         )
         self.register_buffer(
@@ -303,16 +310,28 @@ class MoERouter(nn.Module):
         self.lut_margin_samples = [0, 0]
         self.last_reseed_details, self.last_reseed_parents = {}, {}
 
+    @property
+    def shared_routing(self):
+        return getattr(self, "shared", False)
+
+    @property
+    def active_banks(self):
+        return ("tail",) if self.shared_routing else MOE_BANKS
+
     def normalized_codebook(self, name):
-        return center_and_rms_norm(self.codebooks[name], self.codebook_target_norm)
+        source = "tail" if self.shared_routing else name
+        return center_and_rms_norm(self.codebooks[source], self.codebook_target_norm)
 
     @property
     def codebook(self):
-        return tuple(self.normalized_codebook(name) for name in MOE_BANKS)
+        tail = self.normalized_codebook("tail")
+        return (tail if self.shared_routing else self.normalized_codebook("fc0"), tail)
 
     def banks(self, codebook=None):
         vectors = self.codebook if codebook is None else codebook
-        for name, normalized in zip(MOE_BANKS, vectors):
+        for name, normalized in zip(
+            self.active_banks, vectors[-len(self.active_banks) :]
+        ):
             yield (
                 name,
                 self.codebooks[name],
@@ -467,7 +486,8 @@ class MoERouter(nn.Module):
         # Generate the large tail table in bounded chunks.
         self.lut_margin_valid = False
         with ieee_matmul_precision():
-            for row, name in enumerate(MOE_BANKS):
+            for name in self.active_banks:
+                row = MOE_BANKS.index(name)
                 table = self.fc0_lut if name == "fc0" else self.lut
                 cb = self.normalized_codebook(name)
                 cb_sq = cb.square().sum(-1)[None]
@@ -518,12 +538,15 @@ class MoERouter(nn.Module):
 
     @torch.no_grad()
     def export_permutations(self):
-        return {
+        orders = {
             name: torch.argsort(
                 getattr(self, f"validation_counts_{name}"), descending=True, stable=True
             )
-            for name in MOE_BANKS
+            for name in self.active_banks
         }
+        if self.shared_routing:
+            orders["fc0"] = orders["tail"]
+        return orders
 
     @torch.no_grad()
     def export_lookup_tables(self, orders):
@@ -543,6 +566,7 @@ class MoERouter(nn.Module):
     ):
         if self.training:
             ids, parts = [], []
+            bank_scale = 1.0 / len(self.active_banks)
             for name, _, hard, soft, cb in self.banks(codebook):
                 context = c_fc0 if name == "fc0" else c_tail
                 z = self.get_context_vector(context, name)
@@ -565,35 +589,40 @@ class MoERouter(nn.Module):
                 ids.append(index)
                 parts.extend(
                     [
-                        commit * 0.5,
-                        balance * self.balance_kl_costs[name] * 0.5,
-                        codebook_diversity_loss(cb) * self.diversity_cost * 0.5
+                        commit * bank_scale,
+                        balance * self.balance_kl_costs[name] * bank_scale,
+                        codebook_diversity_loss(cb) * self.diversity_cost * bank_scale
                         if self.diversity_cost
                         else commit.new_zeros(()),
                     ]
                 )
             parts = torch.stack(parts)
             with torch.no_grad():
-                self.loss_component_sum.add_(parts.detach())
+                self.loss_component_sum[-len(parts) :].add_(parts.detach())
                 self.loss_component_batches.add_(1)
             self.lut_valid = self.lut_margin_valid = False
+            if self.shared_routing:
+                ids = ids * 2
             return *ids, parts.sum(), parts[::3].sum(), parts[1::3].sum()
-        tables = self.get_lookup_table()
-        ids = tuple(
-            table[index.long()] for table, index in zip(tables, (c_fc0, c_tail))
-        )
+        fc0_table, tail_table = self.get_lookup_table()
+        tail = tail_table[c_tail.long()]
+        ids = (tail if self.shared_routing else fc0_table[c_fc0.long()], tail)
+        active_ids = ids[-len(self.active_banks) :]
         if self.collect_lut_diagnostics:
-            for name, index in zip(MOE_BANKS, ids):
+            for name, index in zip(self.active_banks, active_ids):
                 count = getattr(self, f"validation_counts_{name}")
                 count.scatter_add_(0, index, torch.ones_like(index, dtype=count.dtype))
         if self.collect_joint_diagnostics:
-            pair = ids[0] * self.num_weight_experts + ids[1]
-            self.validation_joint_counts.scatter_add_(0, pair, torch.ones_like(pair))
+            if not self.shared_routing:
+                pair = ids[0] * self.num_weight_experts + ids[1]
+                self.validation_joint_counts.scatter_add_(
+                    0, pair, torch.ones_like(pair)
+                )
             # Both banks see the same heavy categories, which the exact tail context encodes.
             ours, theirs, _ = decompose_router_index(
                 c_tail, material_states=self.material_states["tail"]
             )
-            for name, index in zip(MOE_BANKS, ids):
+            for name, index in zip(self.active_banks, active_ids):
                 counts = getattr(self, f"validation_heavy_{name}")
                 for side, material in enumerate((ours, theirs)):
                     key = (

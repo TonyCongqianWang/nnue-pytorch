@@ -29,15 +29,17 @@ class LayerStacks(nn.Module):
         if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
             raise ValueError("MoE8 requires equal even hidden widths, at least four")
         self.count, self.quantization = count, quantization
+        direct = getattr(config, "moe_fc0_direct", False)
+        shared = getattr(config, "moe_shared_router", False)
         self.l1 = MoeLinear(
             config.L1,
             config.L2,
             fc0_count,
             rank=fc0_rank,
-            codebook_dim=fc0_dim,
+            codebook_dim=codebook_dim if shared else fc0_dim,
             quantization=quantization,
             layer_key="ls_l1",
-            direct=getattr(config, "moe_fc0_direct", False),
+            direct=direct,
             dual_bias=True,
         )
         self.l2 = MoeLinear(
@@ -48,6 +50,7 @@ class LayerStacks(nn.Module):
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l2",
+            direct=direct and shared,
             dual_bias=True,
         )
         self.output = MoeLinear(
@@ -58,6 +61,7 @@ class LayerStacks(nn.Module):
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_output",
+            direct=direct and shared,
         )
 
     def dense_layers(self):

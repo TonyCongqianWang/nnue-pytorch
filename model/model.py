@@ -29,10 +29,14 @@ class NNUEModel(nn.Module):
         self.quantization = QuantizationManager(config.quantize_config, hidden_sizes)
 
         self.num_ls_buckets = config.moe_tail_experts
-        self.diversity_space = config.moe_diversity_space
         self.bottleneck_diversity_costs = (
             config.moe_fc0_bottleneck_diversity_cost,
             config.moe_tail_bottleneck_diversity_cost,
+        )
+
+        self.weight_diversity_costs = (
+            config.moe_fc0_weight_diversity_cost,
+            config.moe_tail_weight_diversity_cost,
         )
 
         self.input = ComposedFeatureTransformer(feature_cls, self.L1, self.quantization)
@@ -49,6 +53,8 @@ class NNUEModel(nn.Module):
             tail_balance_kl_cost=config.moe_tail_balance_kl_cost,
             fc0_balance_kl_smoothing=config.moe_fc0_balance_kl_smoothing,
             tail_balance_kl_smoothing=config.moe_tail_balance_kl_smoothing,
+            commitment_cost=config.moe_commitment_cost,
+            commitment_context_ratio=config.moe_commitment_context_ratio,
             diversity_cost=config.moe_weight_diversity_cost,
             temperature=config.moe_weight_temperature,
         )
@@ -166,11 +172,13 @@ class NNUEModel(nn.Module):
             codebook=codebook,
         )
         parameters = (None, None, None)
-        if self.training and any(self.bottleneck_diversity_costs):
+        if self.training and any(
+            (*self.bottleneck_diversity_costs, *self.weight_diversity_costs)
+        ):
             parameters, diversity = self.layer_stacks.training_parameters(
                 codebook,
                 self.bottleneck_diversity_costs,
-                getattr(self, "diversity_space", "bottleneck"),
+                self.weight_diversity_costs,
             )
             moe_loss = moe_loss + diversity
         self.moe_loss = moe_loss

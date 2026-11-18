@@ -44,6 +44,7 @@ FC0_ADAPTER_RANK = 64
 ADAPTER_RANK = 512
 ROUTER_HASH = 0x4D313200
 SHARED_ROUTER_HASH = 0x4D313400
+DEFAULT_COMMITMENT_COST = 0.005 / 2048
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
@@ -193,7 +194,8 @@ class MoERouter(nn.Module):
         fc0_dim=FC0_CODEBOOK_DIM,
         dim=CODEBOOK_DIM,
         material_states=None,
-        commitment_cost=0.005,
+        commitment_cost=DEFAULT_COMMITMENT_COST,
+        commitment_context_ratio=0.25,
         fc0_balance_kl_cost=0.001,
         tail_balance_kl_cost=0.001,
         fc0_balance_kl_smoothing=0.05,
@@ -227,6 +229,7 @@ class MoERouter(nn.Module):
         }
         self.num_contexts = self.material_states["tail"] ** 2 * TAIL_GEOMETRY_STATES
         self.commitment_cost = commitment_cost
+        self.commitment_context_ratio = commitment_context_ratio
         self.balance_kl_costs = {
             "fc0": fc0_balance_kl_cost,
             "tail": tail_balance_kl_cost,
@@ -310,6 +313,7 @@ class MoERouter(nn.Module):
         self.lut_valid = self.lut_margin_valid = self.collect_lut_diagnostics = False
         self.lut_margin_samples = [0, 0]
         self.last_reseed_details, self.last_reseed_parents = {}, {}
+        self.validation_context_samples = {}
 
     @property
     def shared_routing(self):
@@ -318,6 +322,81 @@ class MoERouter(nn.Module):
     @property
     def active_banks(self):
         return ("tail",) if self.shared_routing else MOE_BANKS
+
+    def bank_label(self, name):
+        return "stack" if self.shared_routing else name
+
+    @property
+    def loss_component_names(self):
+        return tuple(
+            f"{self.bank_label(bank)}_{term}"
+            for bank in self.active_banks
+            for term in ("commitment", "balance", "diversity")
+        )
+
+    def commitment_loss(self, context, selected):
+        context_error = (context - selected.detach()).square().sum(-1).mean()
+        codebook_error = (selected - context.detach()).square().sum(-1).mean()
+        return self.commitment_cost * (
+            self.commitment_context_ratio * context_error + codebook_error
+        )
+
+    @staticmethod
+    def traffic_balance_loss(soft_fraction, hard_fraction, smoothing):
+        traffic = hard_fraction.detach() + (soft_fraction - soft_fraction.detach())
+        return -((1 - smoothing) * len(traffic) * traffic + smoothing).log().mean()
+
+    @torch.enable_grad()
+    def gradient_diagnostics(self, name, counts):
+        """One bounded validation sample; no optimizer or accumulated .grad updates."""
+        sample = self.validation_context_samples.get(name)
+        if sample is None or not counts.sum():
+            return None
+        with torch.inference_mode(False), ieee_matmul_precision():
+            context = self.get_context_vector(sample.clone(), name)
+            codebook = self.normalized_codebook(name)
+            distances = (
+                context.square().sum(-1, keepdim=True)
+                + codebook.square().sum(-1)[None]
+                - 2 * context @ codebook.T
+            )
+            selected = codebook[distances.argmin(-1)]
+            commitment = self.commitment_loss(context, selected)
+            hard = counts.detach().to(context.device, context.dtype)
+            hard = hard / hard.sum()
+            soft = F.softmax(-distances / max(self.temperature, 1e-4), -1).mean(0)
+            balance = self.balance_kl_costs[name] * self.traffic_balance_loss(
+                soft, hard, self.balance_kl_smoothing[name]
+            )
+            parameters = list(self.encoders[name].parameters())
+            if name == "tail":
+                parameters.extend((self.king.weight, self.wings.weight))
+            parameters.append(self.codebooks[name])
+            scale = 1.0 / len(self.active_banks)
+            gradients = []
+            for objective in (commitment, balance):
+                gs = torch.autograd.grad(
+                    scale * objective, parameters, retain_graph=True
+                )
+                gradients.append(
+                    (
+                        torch.stack([g.square().sum() for g in gs[:-1]]).sum().sqrt(),
+                        gs[-1].norm(),
+                    )
+                )
+            return {
+                "sample_n": len(sample),
+                "distance_l2": float(
+                    (context - selected).square().sum(-1).mean().detach()
+                ),
+                "selected_cos": float(
+                    F.cosine_similarity(context, selected).mean().detach()
+                ),
+                "commitment_encoder_grad": float(gradients[0][0]),
+                "commitment_codebook_grad": float(gradients[0][1]),
+                "balance_encoder_grad": float(gradients[1][0]),
+                "balance_codebook_grad": float(gradients[1][1]),
+            }
 
     def normalized_codebook(self, name):
         source = "tail" if self.shared_routing else name
@@ -385,9 +464,9 @@ class MoERouter(nn.Module):
                 routed = indices
             z_q = F.embedding(indices, codebook)
 
-            # Commitment loss
-            vq_loss = 0.25 * F.mse_loss(z, z_q.detach()) + F.mse_loss(z_q, z.detach())
-            commit_loss = self.commitment_cost * vq_loss
+            # Mean over positions, summing coordinates makes the coefficient
+            # independent of the router embedding dimension.
+            commit_loss = self.commitment_loss(z, z_q)
 
             # Load balancing auxiliary loss
             k_exp = num_experts
@@ -401,8 +480,7 @@ class MoERouter(nn.Module):
 
             # The forward value measures hard wins; soft probabilities supply
             # the gradient. Mix in uniform traffic to bound the slope at zero.
-            traffic = f + (prob_mean - prob_mean.detach())
-            balance_loss = -((1 - smoothing) * k_exp * traffic + smoothing).log().mean()
+            balance_loss = self.traffic_balance_loss(prob_mean, f, smoothing)
             if traffic_ema is not None and soft_ema is not None:
                 with torch.no_grad():
                     traffic_ema.lerp_(f, 1.0 - self.ema_decay)
@@ -614,6 +692,12 @@ class MoERouter(nn.Module):
         ids = (tail if self.shared_routing else fc0_table[c_fc0.long()], tail)
         active_ids = ids[-len(self.active_banks) :]
         if self.collect_lut_diagnostics:
+            contexts = (c_tail,) if self.shared_routing else (c_fc0, c_tail)
+            for name, context in zip(self.active_banks, contexts):
+                if name not in self.validation_context_samples:
+                    self.validation_context_samples[name] = (
+                        context[:512].detach().clone()
+                    )
             for name, index in zip(self.active_banks, active_ids):
                 count = getattr(self, f"validation_counts_{name}")
                 count.scatter_add_(0, index, torch.ones_like(index, dtype=count.dtype))

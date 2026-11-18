@@ -140,3 +140,93 @@ def test_mixed_routes_preserve_winners_and_hard_traffic_kl():
         torch.testing.assert_close(r.loss_component_sum[index], expected)
     r.eval()
     assert r(c, c, mix_experts=True)[1].shape == (3,)
+
+
+def test_commitment_is_dimension_independent_and_matches_2048_baseline():
+    torch.manual_seed(17)
+    router = MoERouter(material_states=2, fc0_dim=4, dim=4)
+    context = torch.randn(5, 8, requires_grad=True)
+    selected = torch.randn(5, 8, requires_grad=True)
+    value = router.commitment_loss(context, selected)
+    expanded_context = context.repeat_interleave(256, dim=1) / 16
+    expanded_selected = selected.repeat_interleave(256, dim=1) / 16
+    expected = 0.005 * (
+        0.25
+        * torch.nn.functional.mse_loss(expanded_context, expanded_selected.detach())
+        + torch.nn.functional.mse_loss(expanded_selected, expanded_context.detach())
+    )
+    expanded = router.commitment_loss(expanded_context, expanded_selected)
+    torch.testing.assert_close(value, expected)
+    torch.testing.assert_close(value, expanded)
+    for actual in (expected, expanded):
+        for left, right in zip(
+            torch.autograd.grad(value, (context, selected), retain_graph=True),
+            torch.autograd.grad(actual, (context, selected), retain_graph=True),
+        ):
+            torch.testing.assert_close(left, right)
+
+
+def test_shared_gradient_diagnostics_preserve_parameter_grads_and_traffic():
+    router = MoERouter(4, 4, dim=8, material_states=2, shared=True, diversity_cost=0)
+    router.eval()
+    router.collect_lut_diagnostics = True
+    router.collect_joint_diagnostics = True
+    router(torch.arange(4), torch.tensor([0, 1, 2, 3]))
+    counts = router.validation_counts_tail.clone()
+    state = {k: v.clone() for k, v in router.state_dict().items()}
+    before = {
+        k: getattr(router, k).clone() for k in ("ema_traffic_tail", "ema_soft_tail")
+    }
+    with torch.inference_mode():
+        diagnostics = router.gradient_diagnostics("tail", counts)
+    assert diagnostics["sample_n"] == 4
+    assert all(torch.isfinite(torch.tensor(v)) for v in diagnostics.values())
+    assert diagnostics["commitment_encoder_grad"] > 0
+    assert diagnostics["commitment_codebook_grad"] > 0
+    assert router.loss_component_names == (
+        "stack_commitment",
+        "stack_balance",
+        "stack_diversity",
+    )
+    assert all(p.grad is None for p in router.parameters())
+    for key, tensor in router.state_dict().items():
+        torch.testing.assert_close(tensor, state[key])
+    for key, tensor in before.items():
+        torch.testing.assert_close(getattr(router, key), tensor)
+
+
+def test_weight_diversity_adds_to_bottleneck_diversity():
+    from model.config import ModelConfig
+    from model.modules.layer_stacks import LayerStacks
+    from model.quantize import QuantizationConfig, QuantizationManager
+
+    stacks = LayerStacks(
+        4,
+        ModelConfig(L1=8, L2=4, L3=4),
+        QuantizationManager(QuantizationConfig()),
+        rank=4,
+        codebook_dim=8,
+        fc0_count=4,
+        fc0_rank=4,
+        fc0_dim=8,
+    )
+    codebooks = (torch.randn(4, 8), torch.randn(4, 8))
+    costs = (0.004, 0.006)
+    _, bottleneck = stacks.training_parameters(codebooks, costs, (0, 0))
+    _, weights = stacks.training_parameters(codebooks, (0, 0), costs)
+    parameters, both = stacks.training_parameters(codebooks, costs, costs)
+    torch.testing.assert_close(both, bottleneck + weights)
+    for layer, vectors, params in zip(
+        stacks.dense_layers(), (codebooks[0], codebooks[1], codebooks[1]), parameters
+    ):
+        for cached, fresh in zip(params, layer.get_all_weights_and_biases(vectors)):
+            torch.testing.assert_close(cached, fresh)
+    projection = stacks.l1.adapter_up
+    bottleneck_gradient = torch.autograd.grad(
+        bottleneck, projection, allow_unused=True, retain_graph=True
+    )[0]
+    assert bottleneck_gradient is None
+    weight_gradient = torch.autograd.grad(weights, projection)[0]
+    both_gradient = torch.autograd.grad(both, projection)[0]
+    assert weight_gradient.abs().sum() > 0
+    torch.testing.assert_close(both_gradient, weight_gradient)

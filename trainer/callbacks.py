@@ -841,6 +841,7 @@ class MoEDeadExpertReseeder(Callback):
             getattr(router, f"validation_heavy_{name}").zero_()
         final = getattr(trainer, "validation_is_final", False)
         router.validation_joint_counts.zero_()
+        router.validation_context_samples.clear()
         router.collect_joint_diagnostics = final and not trainer.sanity_checking
         router.collect_lut_diagnostics = (
             final or getattr(trainer, "rank", 0) == 0
@@ -853,7 +854,6 @@ class MoEDeadExpertReseeder(Callback):
             return
         from model.modules.router import (
             MOE_BANKS,
-            MOE_LOSS_COMPONENTS,
             ieee_matmul_precision,
         )
 
@@ -874,6 +874,7 @@ class MoEDeadExpertReseeder(Callback):
         scope = "all ranks" if final else "rank-0"
         # These are training snapshots. Validation must not alter traffic EMAs.
         for name, _, hard, soft, codebook in router.banks():
+            label = router.bank_label(name)
             row = MOE_BANKS.index(name)
             hard = hard.detach().float().cpu()
             soft = soft.detach().float().cpu()
@@ -894,7 +895,7 @@ class MoEDeadExpertReseeder(Callback):
                 for i in lowest
             )
             print(
-                f"[Routing {name}, rank-0 training EMA] min={hard.min():.3g} "
+                f"[Routing {label}, rank-0 training EMA] min={hard.min():.3g} "
                 f"max={hard.max():.3g} effective={effective:.1f}/{k} "
                 f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
                 flush=True,
@@ -905,12 +906,12 @@ class MoEDeadExpertReseeder(Callback):
                 (-(observed * observed.clamp_min(1e-12).log()).sum()).exp().item()
             )
             print(
-                f"[Validation routing {name}, {scope}] active={int((counts > 0).sum())}/{k} "
+                f"[Validation routing {label}, {scope}] active={int((counts > 0).sum())}/{k} "
                 f"effective={observed_effective:.1f} min={observed.min():.3g} max={observed.max():.3g} "
                 f"n={int(counts.sum())} min_count={int(counts.min())}",
                 flush=True,
             )
-            geometry = f"max_cos={max_cosine:.5f} pair={pair}"
+            geometry = f"codebook_max_cos={max_cosine:.5f} pair={pair}"
             if router.lut_margin_valid:
                 gap_min, gap_mean, near_ties = (
                     router.lut_margin_stats[row].cpu().tolist()
@@ -919,24 +920,35 @@ class MoEDeadExpertReseeder(Callback):
                     f"; LUT margin sample n={router.lut_margin_samples[row]} "
                     f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
                 )
-            print(f"[Routing geometry {name}] {geometry}", flush=True)
+            print(f"[Routing geometry {label}] {geometry}", flush=True)
+            diagnostics = router.gradient_diagnostics(
+                name, getattr(router, f"validation_counts_{name}")
+            )
+            if diagnostics is not None:
+                print(
+                    f"[Routing gradients {label}, rank-0 sample, validation hard shares] "
+                    + ", ".join(
+                        f"{key}={value:.6g}" for key, value in diagnostics.items()
+                    ),
+                    flush=True,
+                )
             runner_ups = getattr(router, f"runner_up_counts_{name}", None)
             if runner_ups is not None:
                 exposure = runner_ups.cpu()
                 if exposure.sum() > 0:
                     print(
-                        f"[Training runner-up routing {name}, rank-0] "
+                        f"[Training runner-up routing {label}, rank-0] "
                         f"active={int((exposure > 0).sum())}/{k} "
                         f"n={int(exposure.sum())} min_count={int(exposure.min())}",
                         flush=True,
                     )
                     runner_ups.zero_()
+        self._log_expert_diversity(trainer)
         if final:
-            self._log_fc0_rank(trainer)
             self._save_final_routing(trainer, router)
         terms = [
             f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
-            for name in MOE_LOSS_COMPONENTS
+            for name in router.loss_component_names
             if f"train_moe_{name}_epoch" in trainer.callback_metrics
         ]
         if terms:
@@ -985,11 +997,11 @@ class MoEDeadExpertReseeder(Callback):
 
     def on_train_start(self, trainer):
         if trainer.rank == 0:
-            self._log_fc0_rank(trainer)
+            self._log_expert_diversity(trainer)
 
     @staticmethod
     @torch.no_grad()
-    def _log_fc0_rank(trainer):
+    def _log_expert_diversity(trainer):
         from model.modules.router import ieee_matmul_precision
 
         from .engine import _unwrap_module
@@ -999,29 +1011,64 @@ class MoEDeadExpertReseeder(Callback):
         if stacks is None:
             return
 
-        def effective_rank(gram):
-            energy = torch.linalg.eigvalsh(gram.cpu().double()).clamp_min(0)
-            mass = energy / energy.sum().clamp_min(1e-30)
-            return float(torch.exp(-(mass * mass.clamp_min(1e-30).log()).sum()))
-
-        layer = stacks.l1
+        codebooks = model.router.codebook
         with ieee_matmul_precision():
-            if layer.is_direct:
-                w = layer.direct_weight.reshape(layer.count, -1)
-                w = w - w.mean(dim=0)
-                weights = w @ w.T
-                bottleneck = ""
-            else:
-                h = layer._bottleneck(model.router.normalized_codebook("fc0"))
-                h = h - h.mean(dim=0)
-                bottleneck = f"bottleneck={effective_rank(h @ h.T):.2f} "
-                weights = h @ (layer.adapter_up.T @ layer.adapter_up) @ h.T
-        print(
-            f"[FC0 effective rank] step={trainer.global_step} "
-            f"{bottleneck}"
-            f"weight residual={effective_rank(weights):.2f}",
-            flush=True,
-        )
+            for name, layer, vectors, bottleneck_cost, weight_cost in zip(
+                ("FC0", "FC1", "readout"),
+                stacks.dense_layers(),
+                (codebooks[0], codebooks[1], codebooks[1]),
+                (
+                    model.bottleneck_diversity_costs[0],
+                    model.bottleneck_diversity_costs[1] / 2,
+                    model.bottleneck_diversity_costs[1] / 2,
+                ),
+                (
+                    model.weight_diversity_costs[0],
+                    model.weight_diversity_costs[1] / 2,
+                    model.weight_diversity_costs[1] / 2,
+                ),
+            ):
+                h = None if layer.is_direct else layer._bottleneck(vectors)
+                weight, _ = layer.get_all_weights_and_biases(vectors, bottleneck=h)
+                weight = weight.reshape(layer.count, -1)
+                centered = weight - weight.mean(0)
+                norms = centered.norm(dim=1)
+                unit = centered / norms[:, None].clamp_min(1e-12)
+                cosine = unit @ unit.T
+                cosine.fill_diagonal_(-torch.inf)
+                energy = torch.linalg.eigvalsh(
+                    (centered @ centered.T).double()
+                ).clamp_min(0)
+                mass = energy / energy.sum().clamp_min(1e-30)
+                rank = (-(mass * mass.clamp_min(1e-30).log()).sum()).exp()
+                bottleneck_loss = (
+                    0.0
+                    if not bottleneck_cost
+                    else float(bottleneck_cost * layer.centered_diversity(h))
+                )
+                weight_loss = (
+                    0.0
+                    if not weight_cost
+                    else float(weight_cost * layer.centered_diversity(weight))
+                )
+                bottleneck_stats = ""
+                if h is not None:
+                    normalized = torch.nn.functional.normalize(h - h.mean(0), dim=1)
+                    gram = normalized @ normalized.T
+                    gram.fill_diagonal_(-torch.inf)
+                    bottleneck_stats = (
+                        f"bottleneck_centered_max_cos={float(gram.max()):.5f} "
+                    )
+                print(
+                    f"[Expert diversity {name}] step={trainer.global_step} "
+                    f"bottleneck_loss={bottleneck_loss:.6g} weight_gram_loss={weight_loss:.6g} "
+                    f"{bottleneck_stats}"
+                    f"float_centered_rank={float(rank):.3f} "
+                    f"weight_RMS={float(weight.square().mean().sqrt()):.6g} "
+                    f"centered_RMS={float(centered.square().mean().sqrt()):.6g} "
+                    f"weight_centered_max_cos={float(cosine.max()):.5f}",
+                    flush=True,
+                )
 
     @staticmethod
     def _save_final_routing(trainer, router):
@@ -1041,9 +1088,10 @@ class MoEDeadExpertReseeder(Callback):
                 for side in ("stm", "opp")
                 for category in categories
             ]
-            writer.writerow(
-                ["bank", "fc0_id", "tail_id", "count", "fraction", *heavy_columns]
+            id_columns = (
+                ["expert_id"] if router.shared_routing else ["fc0_id", "tail_id"]
             )
+            writer.writerow(["bank", *id_columns, "count", "fraction", *heavy_columns])
             for name in router.active_banks:
                 counts = getattr(router, f"validation_counts_{name}").cpu()
                 heavy = getattr(router, f"validation_heavy_{name}").cpu()
@@ -1058,9 +1106,15 @@ class MoEDeadExpertReseeder(Callback):
                 for i, count in enumerate(counts.tolist()):
                     writer.writerow(
                         [
-                            name,
-                            i if name == "fc0" or router.shared_routing else "",
-                            i if name == "tail" else "",
+                            router.bank_label(name),
+                            *(
+                                [i]
+                                if router.shared_routing
+                                else [
+                                    i if name == "fc0" else "",
+                                    i if name == "tail" else "",
+                                ]
+                            ),
                             count,
                             count / total,
                             *heavy[:, i].flatten().tolist(),

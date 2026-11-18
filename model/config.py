@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, fields
-from typing import Annotated, Literal
+from typing import Annotated
 
 import tyro
 from tyro.conf import OmitArgPrefixes
@@ -8,6 +8,7 @@ from .modules import FeatureConfig, LayerStacksConfig
 from .modules.router import (
     ADAPTER_RANK,
     CODEBOOK_DIM,
+    DEFAULT_COMMITMENT_COST,
     FC0_ADAPTER_RANK,
     FC0_CODEBOOK_DIM,
     NUM_FC0_EXPERTS,
@@ -40,12 +41,14 @@ class ModelConfig(LayerStacksConfig):
     """Route the entire stack through the full-context router."""
     moe_fc0_direct: bool = False
     """Train direct expert weights and biases for FC0, or for the whole stack with shared routing."""
-    moe_diversity_space: Literal["bottleneck", "weights"] = "bottleneck"
-    """Tensor to regularize in both banks, before clipping and fake quantization."""
     moe_fc0_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered FC0 variance in the selected diversity space."""
+    """Penalty on concentration of centered FC0 bottleneck variance."""
     moe_tail_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered tail variance in the selected diversity space."""
+    """Penalty on concentration of centered tail bottleneck variance."""
+    moe_fc0_weight_diversity_cost: float = 0.0
+    """Additional penalty on centered generated FC0 weights before clipping and QAT."""
+    moe_tail_weight_diversity_cost: float = 0.0
+    """Additional penalty on centered generated FC1/readout weights before clipping and QAT."""
     moe_fc0_zero_mean_init: bool = False
     """Start generated FC0 weights at zero expert mean."""
 
@@ -57,6 +60,11 @@ class ModelConfig(LayerStacksConfig):
     """Uniform smoothing mass for FC0 hard-traffic KL."""
     moe_tail_balance_kl_smoothing: float = 0.05
     """Uniform smoothing mass for tail hard-traffic KL."""
+
+    moe_commitment_cost: float = DEFAULT_COMMITMENT_COST
+    """Coefficient for mean per-position squared L2 commitment distance."""
+    moe_commitment_context_ratio: float = 0.25
+    """Context-to-codebook attraction relative to codebook-to-context attraction."""
 
     moe_weight_diversity_cost: float = 0.0
     """Weight-router codebook diversity coefficient."""
@@ -76,9 +84,14 @@ class ModelConfig(LayerStacksConfig):
             raise ValueError("MoE expert counts must be FC0 2–64 and tail 2–256")
         if (
             min(
+                self.moe_commitment_cost,
+                self.moe_commitment_context_ratio,
+                self.moe_weight_diversity_cost,
                 self.moe_fc0_balance_kl_cost,
                 self.moe_tail_balance_kl_cost,
                 self.moe_mix_interval,
+                self.moe_fc0_weight_diversity_cost,
+                self.moe_tail_weight_diversity_cost,
                 self.moe_fc0_bottleneck_diversity_cost,
                 self.moe_tail_bottleneck_diversity_cost,
             )

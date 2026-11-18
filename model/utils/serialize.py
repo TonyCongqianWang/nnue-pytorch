@@ -192,8 +192,11 @@ class NNUEWriter:
 
             print_routing_profile(model)
             if self.histogram_mode == "all":
-                for name, order in orders.items():
-                    print(f"Export {name}, new -> training IDs: {order.tolist()}")
+                for name in model.router.active_banks:
+                    order = orders[name]
+                    print(
+                        f"Export {model.router.bank_label(name)}, new -> training IDs: {order.tolist()}"
+                    )
 
     @staticmethod
     def _payload_size(model):

@@ -82,10 +82,10 @@ def write_export_diagnostics(model, path):
             float(values.max()),
         )
         print(
-            f"[Export traffic {bank}] positions={total:,} active={n - zero}/{n} "
+            f"[Export traffic {router.bank_label(bank)}] positions={total:,} active={n - zero}/{n} "
             f"zero={zero} min/median/max={minimum:.6g}/{median:.6g}/{maximum:.6g}"
         )
-        report["routers"][bank] = {
+        report["routers"][router.bank_label(bank)] = {
             "total": total,
             "counts": counts.tolist(),
             "zero": zero,
@@ -95,7 +95,7 @@ def write_export_diagnostics(model, path):
             .tolist(),
         }
         if total:
-            report["routers"][bank].update(
+            report["routers"][router.bank_label(bank)].update(
                 bottom_decile_share=float(
                     values.sort().values[: max(1, (n + 9) // 10)].sum()
                 ),
@@ -107,9 +107,12 @@ def write_export_diagnostics(model, path):
     codebooks = dict(zip(MOE_BANKS, router.codebook))
     for bank in router.active_banks:
         vectors = codebooks[bank]
-        report["routers"][bank]["codebook"] = _spectrum(vectors)
+        report["routers"][router.bank_label(bank)]["codebook"] = _spectrum(vectors)
     _print_spectra(
-        (f"{bank} codebook", report["routers"][bank]["codebook"])
+        (
+            f"{router.bank_label(bank)} codebook",
+            report["routers"][router.bank_label(bank)]["codebook"],
+        )
         for bank in router.active_banks
     )
     fc0_bank = "tail" if router.shared_routing else "fc0"
@@ -133,7 +136,7 @@ def write_export_diagnostics(model, path):
         if h is not None:
             entries["bottleneck"] = _spectrum(h)
             rows.append((f"{name} bottleneck", entries["bottleneck"]))
-        traffic = report["routers"][bank]
+        traffic = report["routers"][router.bank_label(bank)]
         for label, k in (
             ("all", layer.count),
             ("top 25%", layer.count // 4),

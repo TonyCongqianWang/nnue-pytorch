@@ -67,24 +67,30 @@ class LayerStacks(nn.Module):
     def dense_layers(self):
         return self.l1, self.l2, self.output
 
-    def training_parameters(self, codebook, costs, diversity_space):
+    def training_parameters(self, codebook, bottleneck_costs, weight_costs):
         parameters, loss = [], 0.0
-        for layers, vectors, cost in zip(
-            ((self.l1,), (self.l2, self.output)), codebook, costs
+        for layers, vectors, bottleneck_cost, weight_cost in zip(
+            ((self.l1,), (self.l2, self.output)),
+            codebook,
+            bottleneck_costs,
+            weight_costs,
         ):
             for layer in layers:
-                if not cost:
+                if not (bottleneck_cost or weight_cost):
                     parameters.append(None)
                     continue
-                h = layer._bottleneck(vectors)
-                params = layer.get_all_weights_and_biases(bottleneck=h)
+                h = None if layer.is_direct else layer._bottleneck(vectors)
+                params = layer.get_all_weights_and_biases(vectors, bottleneck=h)
                 parameters.append(params)
-                matrix = (
-                    params[0].reshape(layer.count, -1)
-                    if diversity_space == "weights"
-                    else h
-                )
-                loss = loss + (cost / len(layers)) * layer.centered_diversity(matrix)
+                if bottleneck_cost:
+                    loss = loss + (
+                        bottleneck_cost / len(layers)
+                    ) * layer.centered_diversity(h)
+                if weight_cost:
+                    matrix = params[0].reshape(layer.count, -1)
+                    loss = loss + (
+                        weight_cost / len(layers)
+                    ) * layer.centered_diversity(matrix)
         return tuple(parameters), loss
 
     def forward(

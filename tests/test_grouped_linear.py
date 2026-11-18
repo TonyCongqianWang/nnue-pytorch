@@ -69,7 +69,6 @@ def _check_forward_and_all_gradients(
         layer_key="ls_l1",
     ).cuda()
     with torch.no_grad():
-        layer.adapter_down.normal_(std=0.02)
         layer.adapter_up.normal_(std=0.02)
         layer.bias_adapter.normal_(std=0.02)
     # Strided all-zero, dense and 75%-zero inputs; uneven/empty buckets and partial tiles.
@@ -174,7 +173,6 @@ def test_grouped_dispatch_gate(count, expected, monkeypatch):
         layer_key="ls_l1",
     ).cuda()
     with torch.no_grad():
-        layer.adapter_down.normal_(std=0.02)
         layer.adapter_up.normal_(std=0.02)
         layer.bias_adapter.normal_(std=0.02)
     x = torch.randn(257, 1024, device="cuda", requires_grad=True)
@@ -341,7 +339,6 @@ def test_grouped_fallback_compiles(count, device):
         layer_key="ls_l1",
     ).to(device)
     with torch.no_grad():
-        layer.adapter_down.normal_(std=0.02)
         layer.adapter_up.normal_(std=0.02)
         layer.bias_adapter.normal_(std=0.02)
     x = torch.randn(3, 1024, device=device, requires_grad=True)

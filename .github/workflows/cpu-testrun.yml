@@ -15,7 +15,6 @@ env:
   SMALL_MODEL: >-
     --l1=256 --moe-shared-router --moe-fc0-experts=4 --moe-tail-experts=4
     --moe-fc0-codebook-dim=8 --moe-tail-codebook-dim=8
-    --moe-fc0-rank=4 --moe-tail-rank=4
 
 jobs:
   train-and-cross-check:

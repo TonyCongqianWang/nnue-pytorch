@@ -3,9 +3,7 @@ from torch import nn
 
 from .moe_linear import ExpertParameters, MoeLinear
 from .router import (
-    ADAPTER_RANK,
     CODEBOOK_DIM,
-    FC0_ADAPTER_RANK,
     FC0_CODEBOOK_DIM,
     NUM_FC0_EXPERTS,
 )
@@ -19,10 +17,8 @@ class LayerStacks(nn.Module):
         count,
         config,
         quantization,
-        rank=ADAPTER_RANK,
         codebook_dim=CODEBOOK_DIM,
         fc0_count=NUM_FC0_EXPERTS,
-        fc0_rank=FC0_ADAPTER_RANK,
         fc0_dim=FC0_CODEBOOK_DIM,
     ):
         super().__init__()
@@ -30,12 +26,11 @@ class LayerStacks(nn.Module):
             raise ValueError("MoE8 requires equal even hidden widths, at least four")
         self.count, self.quantization = count, quantization
         direct = getattr(config, "moe_fc0_direct", False)
-        shared = getattr(config, "moe_shared_router", False)
+        self.shared = shared = getattr(config, "moe_shared_router", False)
         self.l1 = MoeLinear(
             config.L1,
             config.L2,
             fc0_count,
-            rank=fc0_rank,
             codebook_dim=codebook_dim if shared else fc0_dim,
             quantization=quantization,
             layer_key="ls_l1",
@@ -46,7 +41,6 @@ class LayerStacks(nn.Module):
             2 * config.L2,
             config.L3,
             count,
-            rank=rank,
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_l2",
@@ -57,7 +51,6 @@ class LayerStacks(nn.Module):
             2 * (config.L2 + config.L3),
             1,
             count,
-            rank=rank,
             codebook_dim=codebook_dim,
             quantization=quantization,
             layer_key="ls_output",
@@ -67,25 +60,26 @@ class LayerStacks(nn.Module):
     def dense_layers(self):
         return self.l1, self.l2, self.output
 
-    def training_parameters(self, codebook, bottleneck_costs, weight_costs):
+    def training_parameters(self, codebook, adapter_cost, weight_costs):
         parameters, loss = [], 0.0
-        for layers, vectors, bottleneck_cost, weight_cost in zip(
-            ((self.l1,), (self.l2, self.output)),
-            codebook,
-            bottleneck_costs,
-            weight_costs,
+        # Shared routing and weight generation use the exact same adapter table.
+        # Compute its diversity Gram once, independently of the weight expansions.
+        vectors = (codebook[0],) if self.shared else codebook
+        if adapter_cost:
+            loss = (
+                adapter_cost
+                * sum(MoeLinear.centered_diversity(h) for h in vectors)
+                / len(vectors)
+            )
+        for layers, vectors, weight_cost in zip(
+            ((self.l1,), (self.l2, self.output)), codebook, weight_costs
         ):
             for layer in layers:
-                if not (bottleneck_cost or weight_cost):
+                if not (adapter_cost or weight_cost):
                     parameters.append(None)
                     continue
-                h = None if layer.is_direct else layer._bottleneck(vectors)
-                params = layer.get_all_weights_and_biases(vectors, bottleneck=h)
+                params = layer.get_all_weights_and_biases(vectors)
                 parameters.append(params)
-                if bottleneck_cost:
-                    loss = loss + (
-                        bottleneck_cost / len(layers)
-                    ) * layer.centered_diversity(h)
                 if weight_cost:
                     matrix = params[0].reshape(layer.count, -1)
                     loss = loss + (

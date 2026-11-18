@@ -86,7 +86,6 @@ def test_ddp_reseeding_synchronizes_both_banks(monkeypatch):
         model=SimpleNamespace(model=SimpleNamespace(router=router)),
         global_step=1024,
         world_size=2,
-        rank=1,
         optimizer=SimpleNamespace(state=state),
     )
     monkeypatch.setattr(callbacks.dist, "is_available", lambda: True)
@@ -204,17 +203,18 @@ def test_weight_diversity_adds_to_bottleneck_diversity():
         4,
         ModelConfig(L1=8, L2=4, L3=4),
         QuantizationManager(QuantizationConfig()),
-        rank=4,
         codebook_dim=8,
         fc0_count=4,
-        fc0_rank=4,
         fc0_dim=8,
     )
-    codebooks = (torch.randn(4, 8), torch.randn(4, 8))
+    codebooks = (
+        torch.randn(4, 8, requires_grad=True),
+        torch.randn(4, 8, requires_grad=True),
+    )
     costs = (0.004, 0.006)
-    _, bottleneck = stacks.training_parameters(codebooks, costs, (0, 0))
-    _, weights = stacks.training_parameters(codebooks, (0, 0), costs)
-    parameters, both = stacks.training_parameters(codebooks, costs, costs)
+    _, bottleneck = stacks.training_parameters(codebooks, 0.004, (0, 0))
+    _, weights = stacks.training_parameters(codebooks, 0, costs)
+    parameters, both = stacks.training_parameters(codebooks, 0.004, costs)
     torch.testing.assert_close(both, bottleneck + weights)
     for layer, vectors, params in zip(
         stacks.dense_layers(), (codebooks[0], codebooks[1], codebooks[1]), parameters
@@ -277,3 +277,38 @@ def test_rank_power_target_attracts_top_expert_and_resists_collapse():
         loss = router.traffic_balance_loss(logits.softmax(0), hard, 0.001, target)
         (gradient,) = torch.autograd.grad(loss, logits)
         assert gradient[missing] < 0
+
+
+def test_shared_codebook_is_the_adapter_for_every_layer():
+    from model.config import ModelConfig
+    from model.modules.layer_stacks import LayerStacks
+    from model.quantize import QuantizationConfig, QuantizationManager
+
+    router = MoERouter(64, 64, dim=64, shared=True, material_states=2)
+    config = ModelConfig(
+        L1=8,
+        L2=4,
+        L3=4,
+        moe_shared_router=True,
+        moe_fc0_experts=64,
+        moe_tail_experts=64,
+    )
+    stacks = LayerStacks(64, config, QuantizationManager(QuantizationConfig()))
+    codebook = router.codebook
+    assert codebook[0] is codebook[1]
+    assert torch.linalg.matrix_rank(codebook[0]) == 64
+    for layer in stacks.dense_layers():
+        assert "adapter_down" not in dict(layer.named_parameters())
+        weight, bias = layer.get_all_weights_and_biases(codebook[0])
+        torch.testing.assert_close(
+            weight.reshape(64, -1),
+            torch.nn.functional.linear(codebook[0], layer.adapter_up),
+        )
+        torch.testing.assert_close(
+            bias.reshape(64, -1),
+            torch.nn.functional.linear(codebook[0], layer.bias_adapter),
+        )
+    _, loss = stacks.training_parameters(codebook, 0.008, (0, 0))
+    torch.testing.assert_close(loss, 0.008 * stacks.l1.centered_diversity(codebook[0]))
+    (gradient,) = torch.autograd.grad(loss, router.codebooks["tail"])
+    assert gradient.abs().sum() > 0 and gradient.isfinite().all()

@@ -38,10 +38,8 @@ FC0_ROUTER_TABLE_SIZE = NUM_FC0_MATERIAL_STATES**2
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2 * TAIL_GEOMETRY_STATES
 NUM_FC0_EXPERTS = 64
 NUM_WEIGHT_EXPERTS = 256
-FC0_CODEBOOK_DIM = 256
-CODEBOOK_DIM = 2048
-FC0_ADAPTER_RANK = 64
-ADAPTER_RANK = 512
+FC0_CODEBOOK_DIM = 64
+CODEBOOK_DIM = 64
 ROUTER_HASH = 0x4D313200
 SHARED_ROUTER_HASH = 0x4D313400
 DEFAULT_COMMITMENT_COST = 0.005 / 2048
@@ -427,7 +425,10 @@ class MoERouter(nn.Module):
 
     def normalized_codebook(self, name):
         source = "tail" if self.shared_routing else name
-        return center_and_rms_norm(self.codebooks[source], self.codebook_target_norm)
+        # Coordinate centering would confine a 64-dimensional shared adapter
+        # table to 63 directions before every layer's linear expansion.
+        normalize = rms_norm if self.shared_routing else center_and_rms_norm
+        return normalize(self.codebooks[source], self.codebook_target_norm)
 
     @property
     def codebook(self):
@@ -462,7 +463,8 @@ class MoERouter(nn.Module):
         )
         if bank == "tail":
             raw = raw + self.king(king % KING_STATES) + self.wings(king // KING_STATES)
-        return center_and_rms_norm(raw, self.codebook_target_norm)
+        normalize = rms_norm if self.shared_routing else center_and_rms_norm
+        return normalize(raw, self.codebook_target_norm)
 
     def quantize(
         self,

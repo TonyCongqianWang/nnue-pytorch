@@ -38,7 +38,10 @@ def print_routing_profile(model, file=None):
     router = model.router
     tables = router.get_lookup_table()
     print("\nMoE10 routing profiles. Export sorts by validation traffic.", file=file)
-    print("Heavy and wing shares are within each expert's LUT contexts.", file=file)
+    print(
+        "Material and geometry summaries weight assigned LUT contexts equally.",
+        file=file,
+    )
     for name, table in zip(router.active_banks, tables[-len(router.active_banks) :]):
         material = getattr(router, f"{name}_material_decode").cpu().numpy()
         states = router.material_states[name]
@@ -69,7 +72,8 @@ def print_routing_profile(model, file=None):
         val = getattr(router, f"validation_counts_{name}").cpu().numpy()
         total_val = val.sum()
         headers = [
-            "ID",
+            "Model ID",
+            "Export ID",
             "LUT %",
             "Val %",
             "T us/opp",
@@ -84,7 +88,7 @@ def print_routing_profile(model, file=None):
             return "/".join(f"{100 * value / total:.0f}" for value in counts)
 
         rows = []
-        for expert in np.argsort(-val, kind="stable"):
+        for export_id, expert in enumerate(np.argsort(-val, kind="stable")):
             heavy_shares = (
                 " : ".join(
                     shares(heavy[side, expert], count[expert]) for side in range(2)
@@ -94,6 +98,7 @@ def print_routing_profile(model, file=None):
             )
             row = [
                 expert,
+                export_id,
                 f"{100 * count[expert] / len(ids):.2f}",
                 f"{100 * val[expert] / total_val:.2f}" if total_val else "-",
                 f"{means[0, expert]:.1f}/{means[1, expert]:.1f}",

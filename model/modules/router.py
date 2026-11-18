@@ -196,6 +196,7 @@ class MoERouter(nn.Module):
         material_states=None,
         commitment_cost=DEFAULT_COMMITMENT_COST,
         commitment_context_ratio=0.25,
+        balance_power=0.0,
         fc0_balance_kl_cost=0.001,
         tail_balance_kl_cost=0.001,
         fc0_balance_kl_smoothing=0.05,
@@ -230,6 +231,7 @@ class MoERouter(nn.Module):
         self.num_contexts = self.material_states["tail"] ** 2 * TAIL_GEOMETRY_STATES
         self.commitment_cost = commitment_cost
         self.commitment_context_ratio = commitment_context_ratio
+        self.balance_power = balance_power
         self.balance_kl_costs = {
             "fc0": fc0_balance_kl_cost,
             "tail": tail_balance_kl_cost,
@@ -266,6 +268,14 @@ class MoERouter(nn.Module):
         )
         for name, cb in self.codebooks.items():
             count = len(cb)
+            ranked_target = torch.arange(1, count + 1, dtype=torch.float32).pow(
+                -balance_power
+            )
+            self.register_buffer(
+                f"balance_rank_target_{name}",
+                ranked_target / ranked_target.sum(),
+                persistent=False,
+            )
             self.register_buffer(
                 f"ema_traffic_{name}", torch.full((count,), 1 / count), persistent=False
             )
@@ -341,10 +351,24 @@ class MoERouter(nn.Module):
             self.commitment_context_ratio * context_error + codebook_error
         )
 
+    @torch.no_grad()
+    def balance_target(self, name, traffic):
+        ranked = getattr(self, f"balance_rank_target_{name}")
+        if self.balance_power == 0:
+            return ranked
+        order = torch.argsort(traffic, descending=True, stable=True)
+        target = torch.empty_like(ranked)
+        target[order] = ranked
+        return target
+
     @staticmethod
-    def traffic_balance_loss(soft_fraction, hard_fraction, smoothing):
+    def traffic_balance_loss(soft_fraction, hard_fraction, smoothing, target=None):
         traffic = hard_fraction.detach() + (soft_fraction - soft_fraction.detach())
-        return -((1 - smoothing) * len(traffic) * traffic + smoothing).log().mean()
+        if target is None:
+            target = torch.full_like(traffic, 1.0 / len(traffic))
+        target = target.detach()
+        smoothed = (1 - smoothing) * traffic + smoothing / len(traffic)
+        return (target * (target.log() - smoothed.log())).sum()
 
     @torch.enable_grad()
     def gradient_diagnostics(self, name, counts):
@@ -366,7 +390,10 @@ class MoERouter(nn.Module):
             hard = hard / hard.sum()
             soft = F.softmax(-distances / max(self.temperature, 1e-4), -1).mean(0)
             balance = self.balance_kl_costs[name] * self.traffic_balance_loss(
-                soft, hard, self.balance_kl_smoothing[name]
+                soft,
+                hard,
+                self.balance_kl_smoothing[name],
+                self.balance_target(name, getattr(self, f"ema_traffic_{name}")),
             )
             parameters = list(self.encoders[name].parameters())
             if name == "tail":
@@ -448,6 +475,7 @@ class MoERouter(nn.Module):
         *,
         top_k: int = 1,
         smoothing: float = 0.05,
+        balance_target=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with ieee_matmul_precision():
             z_sq = torch.sum(z**2, dim=-1, keepdim=True)
@@ -480,7 +508,9 @@ class MoERouter(nn.Module):
 
             # The forward value measures hard wins; soft probabilities supply
             # the gradient. Mix in uniform traffic to bound the slope at zero.
-            balance_loss = self.traffic_balance_loss(prob_mean, f, smoothing)
+            balance_loss = self.traffic_balance_loss(
+                prob_mean, f, smoothing, balance_target
+            )
             if traffic_ema is not None and soft_ema is not None:
                 with torch.no_grad():
                     traffic_ema.lerp_(f, 1.0 - self.ema_decay)
@@ -663,6 +693,7 @@ class MoERouter(nn.Module):
                     soft,
                     top_k=top_k,
                     smoothing=self.balance_kl_smoothing[name],
+                    balance_target=self.balance_target(name, hard),
                 )
                 if mix_experts:
                     with torch.no_grad():

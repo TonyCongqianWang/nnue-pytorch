@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field, fields
 from typing import Annotated
 
@@ -68,10 +69,14 @@ class ModelConfig(LayerStacksConfig):
 
     moe_weight_diversity_cost: float = 0.0
     """Weight-router codebook diversity coefficient."""
+    moe_balance_power: float = 0.0
+    """Target hard traffic proportional to EMA traffic rank ** (-power); zero is uniform."""
     moe_weight_temperature: float = 0.2
     """Weight-router balancing softmax temperature."""
 
     def __post_init__(self):
+        if not math.isfinite(self.moe_balance_power) or self.moe_balance_power < 0:
+            raise ValueError("MoE balancing power must be finite and nonnegative")
         if not all(
             0 < value < 1
             for value in (

@@ -57,6 +57,7 @@ class NNUEModel(nn.Module):
             commitment_context_ratio=config.moe_commitment_context_ratio,
             diversity_cost=config.moe_weight_diversity_cost,
             temperature=config.moe_weight_temperature,
+            balance_power=config.moe_balance_power,
         )
         self.layer_stacks = LayerStacks(
             self.num_ls_buckets,

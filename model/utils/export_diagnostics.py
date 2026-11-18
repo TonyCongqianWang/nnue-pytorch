@@ -88,6 +88,13 @@ def write_export_diagnostics(model, path):
         report["routers"][router.bank_label(bank)] = {
             "total": total,
             "counts": counts.tolist(),
+            "export_to_training_ids": orders[bank].tolist(),
+            "balance_power": router.balance_power,
+            "balance_rank_targets": getattr(router, f"balance_rank_target_{bank}")
+            .cpu()
+            .tolist(),
+            "commitment_cost": router.commitment_cost,
+            "commitment_context_ratio": router.commitment_context_ratio,
             "zero": zero,
             "heavy_categories": HEAVY_CATEGORIES,
             "heavy_counts_stm_opp": getattr(router, f"validation_heavy_{bank}")

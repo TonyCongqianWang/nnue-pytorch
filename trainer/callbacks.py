@@ -921,6 +921,15 @@ class MoEDeadExpertReseeder(Callback):
                     f"min={gap_min:.3g} mean={gap_mean:.3g} fraction<=1e-6={near_ties:.3g}"
                 )
             print(f"[Routing geometry {label}] {geometry}", flush=True)
+            target = getattr(router, f"balance_rank_target_{name}")
+            print(
+                f"[Routing KL target {label}] power={router.balance_power:.6g} "
+                f"top={100 * float(target[0]):.4f}% "
+                f"bottom={100 * float(target[-1]):.4f}% "
+                f"coefficient={router.balance_kl_costs[name]:.6g} "
+                f"smoothing={router.balance_kl_smoothing[name]:.6g}",
+                flush=True,
+            )
             diagnostics = router.gradient_diagnostics(
                 name, getattr(router, f"validation_counts_{name}")
             )

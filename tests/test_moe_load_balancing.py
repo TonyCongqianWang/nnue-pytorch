@@ -230,3 +230,50 @@ def test_weight_diversity_adds_to_bottleneck_diversity():
     both_gradient = torch.autograd.grad(both, projection)[0]
     assert weight_gradient.abs().sum() > 0
     torch.testing.assert_close(both_gradient, weight_gradient)
+
+
+def test_rank_power_target_attracts_top_expert_and_resists_collapse():
+    router = MoERouter(
+        64,
+        64,
+        dim=8,
+        material_states=2,
+        shared=True,
+        balance_power=0.4658379531227075,
+    )
+    traffic = torch.arange(64, 0, -1, dtype=torch.float32)
+    target = router.balance_target("tail", traffic)
+    torch.testing.assert_close(target.sum(), torch.tensor(1.0))
+    torch.testing.assert_close(target[0], torch.tensor(4 / 64))
+    assert target[-1] > 0.5 / 64
+    assert not target.requires_grad
+    # The same rank curve follows a different expert when the EMA order changes.
+    reverse = router.balance_target("tail", traffic.flip(0))
+    torch.testing.assert_close(reverse, target.flip(0))
+
+    for top_share, expected_sign in ((1 / 64, -1), (0.2, 1)):
+        hard = torch.full((64,), (1 - top_share) / 63)
+        hard[0] = top_share
+        logits = hard.log().requires_grad_()
+        soft = logits.softmax(0)
+        loss = router.traffic_balance_loss(soft, hard, 0.001, target)
+        (gradient,) = torch.autograd.grad(loss, logits)
+        assert expected_sign * gradient[0] > 0
+
+    collapsed = torch.zeros(64)
+    collapsed[0] = 1
+    logits = torch.zeros(64, requires_grad=True)
+    loss = router.traffic_balance_loss(logits.softmax(0), collapsed, 0.001, target)
+    (gradient,) = torch.autograd.grad(loss, logits)
+    assert torch.isfinite(loss) and torch.isfinite(gradient).all()
+    assert gradient[0] > 0
+    assert gradient[1:].sum() < 0
+    # Check recovery of a missing expert at both ends of the rank curve.
+    for missing in (0, 63):
+        hard = target.clone()
+        hard[missing] = 0
+        hard /= hard.sum()
+        logits = torch.zeros(64, requires_grad=True)
+        loss = router.traffic_balance_loss(logits.softmax(0), hard, 0.001, target)
+        (gradient,) = torch.autograd.grad(loss, logits)
+        assert gradient[missing] < 0

@@ -392,8 +392,11 @@ def test_moe_optimizer_param_groups():
         elif group["weight_decay"] == 2e-4:
             found_dense = True
             expected_dense = {
+                id(nnue.model.layer_stacks.l1.adapter_down),
                 id(nnue.model.layer_stacks.l1.adapter_up),
+                id(nnue.model.layer_stacks.l2.adapter_down),
                 id(nnue.model.layer_stacks.l2.adapter_up),
+                id(nnue.model.layer_stacks.output.adapter_down),
                 id(nnue.model.layer_stacks.output.adapter_up),
             }
             assert {id(p) for p in group["params"]} == expected_dense

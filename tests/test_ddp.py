@@ -128,6 +128,8 @@ def _sync_worker(rank, world_size, port, root_dir, num_batches):
         config.model_config.moe_tail_experts = 4
         config.model_config.moe_fc0_codebook_dim = 8
         config.model_config.moe_tail_codebook_dim = 8
+        config.model_config.moe_fc0_rank = 4
+        config.model_config.moe_tail_rank = 4
         # RangerLite hands back its lookahead weights at the end of an epoch,
         # which equal the initial ones until its first merge (5 steps)
         config.optimizer_config.optimizer_name = "adamw"
@@ -232,6 +234,8 @@ def test_train_script_two_ranks(tmp_path):
         "--moe-tail-experts=4",
         "--moe-fc0-codebook-dim=8",
         "--moe-tail-codebook-dim=8",
+        "--moe-fc0-rank=4",
+        "--moe-tail-rank=4",
         f"--batch-size={batch_size}",
         f"--epoch-size={epoch_size}",
         "--validation-size=512",

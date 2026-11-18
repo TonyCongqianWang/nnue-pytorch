@@ -1022,32 +1022,23 @@ class MoEDeadExpertReseeder(Callback):
 
         codebooks = model.router.codebook
         with ieee_matmul_precision():
-            vectors_by_bank = dict(zip(("fc0", "tail"), codebooks))
-            for bank in model.router.active_banks:
-                vectors = vectors_by_bank[bank]
-                cost = model.adapter_diversity_cost / len(model.router.active_banks)
-                centered = vectors - vectors.mean(0)
-                normalized = torch.nn.functional.normalize(centered, dim=1)
-                cosine = normalized @ normalized.T
-                cosine.fill_diagonal_(-torch.inf)
-                loss = cost * stacks.l1.centered_diversity(vectors)
-                print(
-                    f"[Adapter diversity {model.router.bank_label(bank)}] "
-                    f"dimension={vectors.shape[1]} weighted_loss={float(loss):.6g} "
-                    f"centered_max_cos={float(cosine.max()):.5f}",
-                    flush=True,
-                )
-            for name, layer, vectors, weight_cost in zip(
+            for name, layer, vectors, bottleneck_cost, weight_cost in zip(
                 ("FC0", "FC1", "readout"),
                 stacks.dense_layers(),
                 (codebooks[0], codebooks[1], codebooks[1]),
+                (
+                    model.bottleneck_diversity_costs[0],
+                    model.bottleneck_diversity_costs[1] / 2,
+                    model.bottleneck_diversity_costs[1] / 2,
+                ),
                 (
                     model.weight_diversity_costs[0],
                     model.weight_diversity_costs[1] / 2,
                     model.weight_diversity_costs[1] / 2,
                 ),
             ):
-                weight, _ = layer.get_all_weights_and_biases(vectors)
+                h = None if layer.is_direct else layer._bottleneck(vectors)
+                weight, _ = layer.get_all_weights_and_biases(vectors, bottleneck=h)
                 weight = weight.reshape(layer.count, -1)
                 centered = weight - weight.mean(0)
                 norms = centered.norm(dim=1)
@@ -1059,14 +1050,28 @@ class MoEDeadExpertReseeder(Callback):
                 ).clamp_min(0)
                 mass = energy / energy.sum().clamp_min(1e-30)
                 rank = (-(mass * mass.clamp_min(1e-30).log()).sum()).exp()
+                bottleneck_loss = (
+                    0.0
+                    if not bottleneck_cost
+                    else float(bottleneck_cost * layer.centered_diversity(h))
+                )
                 weight_loss = (
                     0.0
                     if not weight_cost
                     else float(weight_cost * layer.centered_diversity(weight))
                 )
+                bottleneck_stats = ""
+                if h is not None:
+                    normalized = torch.nn.functional.normalize(h - h.mean(0), dim=1)
+                    gram = normalized @ normalized.T
+                    gram.fill_diagonal_(-torch.inf)
+                    bottleneck_stats = (
+                        f"bottleneck_centered_max_cos={float(gram.max()):.5f} "
+                    )
                 print(
                     f"[Expert diversity {name}] step={trainer.global_step} "
-                    f"weight_gram_loss={weight_loss:.6g} "
+                    f"bottleneck_loss={bottleneck_loss:.6g} weight_gram_loss={weight_loss:.6g} "
+                    f"{bottleneck_stats}"
                     f"float_centered_rank={float(rank):.3f} "
                     f"weight_RMS={float(weight.square().mean().sqrt()):.6g} "
                     f"centered_RMS={float(centered.square().mean().sqrt()):.6g} "

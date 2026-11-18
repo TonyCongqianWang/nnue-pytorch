@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..quantize import QuantizationManager
-from .router import CODEBOOK_DIM, ieee_matmul_precision
+from .router import ADAPTER_RANK, CODEBOOK_DIM, ieee_matmul_precision, rms_norm
 
 try:
     from .grouped_linear import grouped_l1, grouped_l1_preferred
@@ -33,7 +33,7 @@ class ExpertParameters:
 
 class MoeLinear(nn.Module):
     """
-    Expert weights and biases expanded directly from router adapter vectors.
+    Mixture-of-Experts (MoE) Linear layer with low-rank adapter projection from codebook embeddings.
     Dynamically generates expert weights and biases on the fly or accesses coalesced tables.
     """
 
@@ -42,6 +42,7 @@ class MoeLinear(nn.Module):
         in_features: int,
         out_features: int,
         count: int,
+        rank: int = ADAPTER_RANK,
         codebook_dim: int = CODEBOOK_DIM,
         quantization: QuantizationManager | None = None,
         layer_key: str | None = None,
@@ -57,6 +58,7 @@ class MoeLinear(nn.Module):
         self.out_features = out_features
         self.bias_features = out_features * (2 if dual_bias else 1)
         self.count = count
+        self.rank = rank
         self.codebook_dim = codebook_dim
         self.quantization = quantization
         self.layer_key = layer_key
@@ -70,14 +72,13 @@ class MoeLinear(nn.Module):
                 torch.empty(count * out_features, in_features)
             )
             self.direct_bias = nn.Parameter(torch.zeros(count * self.bias_features))
-            self.adapter_up = self.bias_adapter = None
+            self.adapter_down = self.adapter_up = self.bias_adapter = None
         else:
+            self.adapter_down = nn.Parameter(torch.empty(rank, codebook_dim))
             self.adapter_up = nn.Parameter(
-                torch.empty(out_features * in_features, codebook_dim)
+                torch.empty(out_features * in_features, rank)
             )
-            self.bias_adapter = nn.Parameter(
-                torch.empty(self.bias_features, codebook_dim)
-            )
+            self.bias_adapter = nn.Parameter(torch.empty(self.bias_features, rank))
         self.register_parameter(
             "shared_weight",
             nn.Parameter(torch.zeros(out_features, in_features))
@@ -96,9 +97,9 @@ class MoeLinear(nn.Module):
 
         self._reset_parameters()
         if orthogonal_up_init:
-            if codebook_dim > self.adapter_up.shape[0]:
+            if rank > self.adapter_up.shape[0]:
                 raise ValueError(
-                    "Adapter dimension exceeds the number of weight coefficients"
+                    "FC0 adapter rank exceeds the number of weight coefficients"
                 )
             # Preserve the uniform initialization's expected Frobenius norm
             # without changing the random initialization of subsequent layers.
@@ -107,10 +108,14 @@ class MoeLinear(nn.Module):
 
     @property
     def is_direct(self):
-        return hasattr(self, "direct_weight")
+        return self.adapter_down is None
 
     def weight_parameters(self):
-        return (self.direct_weight,) if self.is_direct else (self.adapter_up,)
+        return (
+            (self.direct_weight,)
+            if self.is_direct
+            else (self.adapter_down, self.adapter_up)
+        )
 
     def bias_parameter(self):
         return self.direct_bias if self.is_direct else self.bias_adapter
@@ -120,12 +125,29 @@ class MoeLinear(nn.Module):
             bound = 1.0 / math.sqrt(self.in_features)
             nn.init.uniform_(self.direct_weight, -bound, bound)
             return
+        bound_cb = 1.0 / math.sqrt(self.codebook_dim) if self.codebook_dim > 0 else 0.0
+        nn.init.uniform_(self.adapter_down, -bound_cb, bound_cb)
+
         # Each column is a complete layer basis. The unit-L2 bottleneck
-        # preserves its variance when blending bases.
+        # preserves its variance when blending bases; no extra rank factor.
         bound_up = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
         nn.init.uniform_(self.adapter_up, -bound_up, bound_up)
 
         nn.init.zeros_(self.bias_adapter)
+
+    def _bottleneck(self, codebook: torch.Tensor) -> torch.Tensor:
+        if codebook.shape[-1] != self.codebook_dim:
+            raise ValueError(
+                f"codebook dimension mismatch in MoeLinear: "
+                f"adapter_down expects {self.codebook_dim}, got {codebook.shape[-1]}"
+            )
+        with ieee_matmul_precision():
+            return rms_norm(
+                F.linear(F.gelu(codebook), self.adapter_down), target_norm=1.0
+            )
+
+    def bottleneck_diversity_loss(self, codebook):
+        return self.centered_diversity(self._bottleneck(codebook))
 
     @staticmethod
     def centered_diversity(h):
@@ -138,7 +160,7 @@ class MoeLinear(nn.Module):
     @torch.no_grad()
     def zero_expert_mean_at_init(self, codebook):
         with ieee_matmul_precision():
-            h = codebook
+            h = self._bottleneck(codebook)
             mean = h.mean(0)
             energy = mean.square().sum()
             if energy <= 1e-12:
@@ -166,28 +188,28 @@ class MoeLinear(nn.Module):
 
     def get_expert_weight_and_bias(self, c):
         with ieee_matmul_precision():
-            h = c
+            h = self._bottleneck(c)
             return self._expand_weights(h), F.linear(h, self.bias_adapter)
 
     def get_delta_weights(self, codebook):
-        return self._generate_weights(codebook).view(
+        return self._generate_weights(self._bottleneck(codebook)).view(
             -1, self.out_features, self.in_features
         )
 
     def get_delta_biases(self, codebook):
-        return F.linear(codebook, self.bias_adapter)
+        return F.linear(self._bottleneck(codebook), self.bias_adapter)
 
-    def get_all_weights_and_biases(self, codebook=None):
+    def get_all_weights_and_biases(self, codebook=None, *, bottleneck=None):
         if self.is_coalesced:
             return self.coalesced_weight, self.coalesced_bias
         if self.is_direct:
             return self.direct_weight, self.direct_bias
-        if codebook is None:
+        if codebook is None and bottleneck is None:
             raise ValueError(
                 "codebook must be provided when MoeLinear is not coalesced"
             )
         with ieee_matmul_precision():
-            h = codebook
+            h = self._bottleneck(codebook) if bottleneck is None else bottleneck
             return (
                 self._expand_weights(h)
                 .reshape(self.count * self.out_features, self.in_features)
@@ -324,11 +346,11 @@ class MoeLinear(nn.Module):
             self.direct_weight.copy_(self.direct_weight[:, permutation])
         else:
             reshaped = self.adapter_up.view(
-                self.out_features, self.in_features, self.codebook_dim
+                self.out_features, self.in_features, self.rank
             )
             permuted = reshaped[:, permutation, :].contiguous()
             self.adapter_up.copy_(
-                permuted.view(self.out_features * self.in_features, self.codebook_dim)
+                permuted.view(self.out_features * self.in_features, self.rank)
             )
         if self.shared_weight is not None:
             self.shared_weight.copy_(self.shared_weight[:, permutation])

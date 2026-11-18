@@ -57,11 +57,15 @@ def write_export_diagnostics(model, path):
 
     report = {"projections": {}, "routers": {}, "generators": {}}
     names = ("FC0", "FC1", "readout")
-    print("[Export diagnostics] Weight expansions centered along the adapter axis")
+    print("[Export diagnostics] Adapter projections centered along the bottleneck axis")
     for name, layer in zip(names, layers.dense_layers()):
         if layer.is_direct:
             continue
-        report["projections"][f"{name} up transpose"] = _spectrum(layer.adapter_up.T)
+        for suffix, matrix in (
+            ("down", layer.adapter_down),
+            ("up transpose", layer.adapter_up.T),
+        ):
+            report["projections"][f"{name} {suffix}"] = _spectrum(matrix)
     _print_spectra(report["projections"].items())
 
     orders = {}
@@ -106,7 +110,7 @@ def write_export_diagnostics(model, path):
                 below_ten_percent_uniform=int((n * values < 0.1).sum()),
             )
 
-    print("[Export diagnostics] Shared adapter codebooks and centered expert weights")
+    print("[Export diagnostics] Centered codebooks, bottlenecks and expert weights")
     codebooks = dict(zip(MOE_BANKS, router.codebook))
     for bank in router.active_banks:
         vectors = codebooks[bank]
@@ -123,7 +127,8 @@ def write_export_diagnostics(model, path):
         names, (fc0_bank, "tail", "tail"), layers.dense_layers()
     ):
         vectors = codebooks[bank]
-        weight, bias = layer.get_all_weights_and_biases(vectors)
+        h = None if layer.is_direct else layer._bottleneck(vectors)
+        weight, bias = layer.get_all_weights_and_biases(vectors, bottleneck=h)
         clipped = model.quantization.clip_ls_weight(weight, layer.layer_key)
         _, quantized = model.quantization.quantize_fc_layer(
             bias, clipped, layer.layer_key
@@ -132,9 +137,12 @@ def write_export_diagnostics(model, path):
             weight.reshape(layer.count, -1).cpu(),
             quantized.reshape(layer.count, -1).cpu(),
         )
-        entries = {"adapter_router": router.bank_label(bank), "weights": {}}
+        entries = {"weights": {}}
         report["generators"][name] = entries
         rows = []
+        if h is not None:
+            entries["bottleneck"] = _spectrum(h)
+            rows.append((f"{name} bottleneck", entries["bottleneck"]))
         traffic = report["routers"][router.bank_label(bank)]
         for label, k in (
             ("all", layer.count),

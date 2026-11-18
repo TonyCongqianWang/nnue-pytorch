@@ -38,10 +38,9 @@ FC0_ROUTER_TABLE_SIZE = NUM_FC0_MATERIAL_STATES**2
 ROUTER_TABLE_SIZE = NUM_MATERIAL_STATES**2 * TAIL_GEOMETRY_STATES
 NUM_FC0_EXPERTS = 64
 NUM_WEIGHT_EXPERTS = 256
-FC0_CODEBOOK_DIM = 256
-CODEBOOK_DIM = 2048
-FC0_ADAPTER_RANK = 64
-ADAPTER_RANK = 512
+FC0_CODEBOOK_DIM = 64
+CONTEXT_DIM = 2048
+CODEBOOK_DIM = 64
 ROUTER_HASH = 0x4D313200
 SHARED_ROUTER_HASH = 0x4D313400
 DEFAULT_COMMITMENT_COST = 0.005 / 2048
@@ -193,6 +192,7 @@ class MoERouter(nn.Module):
         num_weight_experts=NUM_WEIGHT_EXPERTS,
         fc0_dim=FC0_CODEBOOK_DIM,
         dim=CODEBOOK_DIM,
+        context_dim=None,
         material_states=None,
         commitment_cost=DEFAULT_COMMITMENT_COST,
         commitment_context_ratio=0.25,
@@ -243,14 +243,26 @@ class MoERouter(nn.Module):
         self.temperature, self.diversity_cost = temperature, diversity_cost
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
+        context_dim = (context_dim or dim) if shared else dim
+        self.adapter_down = (
+            nn.Parameter(torch.empty(dim, context_dim)) if shared else None
+        )
+        if self.adapter_down is not None:
+            nn.init.uniform_(
+                self.adapter_down,
+                -1 / math.sqrt(context_dim),
+                1 / math.sqrt(context_dim),
+            )
         self.encoders = nn.ModuleDict()
         if not shared:
             self.encoders["fc0"] = MaterialEncoder(fc0_dim, 4)
-        self.encoders["tail"] = MaterialEncoder(dim, 4 if shared else 9)
-        self.king = nn.Embedding(KING_STATES, dim)
-        self.wings = nn.Embedding(WING_STATES, dim)
+        self.encoders["tail"] = MaterialEncoder(context_dim, 4 if shared else 9)
+        self.king = nn.Embedding(KING_STATES, context_dim)
+        self.wings = nn.Embedding(WING_STATES, context_dim)
         for emb in (self.king, self.wings):
-            nn.init.uniform_(emb.weight, -1 / math.sqrt(dim), 1 / math.sqrt(dim))
+            nn.init.uniform_(
+                emb.weight, -1 / math.sqrt(context_dim), 1 / math.sqrt(context_dim)
+            )
         self.codebooks = nn.ParameterDict()
         if not shared:
             self.codebooks["fc0"] = nn.Parameter(torch.empty(num_fc0_experts, fc0_dim))
@@ -398,6 +410,8 @@ class MoERouter(nn.Module):
             parameters = list(self.encoders[name].parameters())
             if name == "tail":
                 parameters.extend((self.king.weight, self.wings.weight))
+            if self.shared_routing:
+                parameters.append(self.adapter_down)
             parameters.append(self.codebooks[name])
             scale = 1.0 / len(self.active_banks)
             gradients = []
@@ -427,7 +441,10 @@ class MoERouter(nn.Module):
 
     def normalized_codebook(self, name):
         source = "tail" if self.shared_routing else name
-        return center_and_rms_norm(self.codebooks[source], self.codebook_target_norm)
+        # Coordinate centering would confine a 64-dimensional shared adapter
+        # table to 63 directions before every layer's linear expansion.
+        normalize = rms_norm if self.shared_routing else center_and_rms_norm
+        return normalize(self.codebooks[source], self.codebook_target_norm)
 
     @property
     def codebook(self):
@@ -462,7 +479,14 @@ class MoERouter(nn.Module):
         )
         if bank == "tail":
             raw = raw + self.king(king % KING_STATES) + self.wings(king // KING_STATES)
-        return center_and_rms_norm(raw, self.codebook_target_norm)
+        normalized = center_and_rms_norm(raw, self.codebook_target_norm)
+        if self.shared_routing:
+            with ieee_matmul_precision():
+                return rms_norm(
+                    F.linear(F.gelu(normalized), self.adapter_down),
+                    self.codebook_target_norm,
+                )
+        return normalized
 
     def quantize(
         self,

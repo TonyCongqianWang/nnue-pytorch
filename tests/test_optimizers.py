@@ -392,11 +392,8 @@ def test_moe_optimizer_param_groups():
         elif group["weight_decay"] == 2e-4:
             found_dense = True
             expected_dense = {
-                id(nnue.model.layer_stacks.l1.adapter_down),
                 id(nnue.model.layer_stacks.l1.adapter_up),
-                id(nnue.model.layer_stacks.l2.adapter_down),
                 id(nnue.model.layer_stacks.l2.adapter_up),
-                id(nnue.model.layer_stacks.output.adapter_down),
                 id(nnue.model.layer_stacks.output.adapter_up),
             }
             assert {id(p) for p in group["params"]} == expected_dense
@@ -405,3 +402,31 @@ def test_moe_optimizer_param_groups():
     assert registered_params == all_model_params, (
         f"Missing {all_model_params - registered_params} params from optimizer!"
     )
+
+
+def test_shared_context_projection_uses_dense_decay_once():
+    from model import ModelConfig
+
+    config = NNUEConfig(
+        features="Full_Threats",
+        model_config=ModelConfig(
+            L1=8,
+            L2=4,
+            L3=4,
+            moe_shared_router=True,
+            moe_fc0_experts=4,
+            moe_tail_experts=4,
+            moe_context_dim=32,
+            moe_tail_codebook_dim=8,
+        ),
+        optimizer_config=OptimizerConfig(dense_weight_decay=0.001),
+    )
+    nnue = NNUE(config=config)
+    opt = nnue.configure_optimizers()[0][0]
+    projection = nnue.model.router.adapter_down
+    assigned = [
+        g for g in opt.param_groups if any(p is projection for p in g["params"])
+    ]
+    assert len(assigned) == 1 and assigned[0]["weight_decay"] == 0.001
+    parameters = [id(p) for g in opt.param_groups for p in g["params"]]
+    assert len(parameters) == len(set(parameters)) == len(list(nnue.model.parameters()))

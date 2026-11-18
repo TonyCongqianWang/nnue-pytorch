@@ -86,7 +86,6 @@ def test_ddp_reseeding_synchronizes_both_banks(monkeypatch):
         model=SimpleNamespace(model=SimpleNamespace(router=router)),
         global_step=1024,
         world_size=2,
-        rank=1,
         optimizer=SimpleNamespace(state=state),
     )
     monkeypatch.setattr(callbacks.dist, "is_available", lambda: True)
@@ -204,17 +203,18 @@ def test_weight_diversity_adds_to_bottleneck_diversity():
         4,
         ModelConfig(L1=8, L2=4, L3=4),
         QuantizationManager(QuantizationConfig()),
-        rank=4,
         codebook_dim=8,
         fc0_count=4,
-        fc0_rank=4,
         fc0_dim=8,
     )
-    codebooks = (torch.randn(4, 8), torch.randn(4, 8))
+    codebooks = (
+        torch.randn(4, 8, requires_grad=True),
+        torch.randn(4, 8, requires_grad=True),
+    )
     costs = (0.004, 0.006)
-    _, bottleneck = stacks.training_parameters(codebooks, costs, (0, 0))
-    _, weights = stacks.training_parameters(codebooks, (0, 0), costs)
-    parameters, both = stacks.training_parameters(codebooks, costs, costs)
+    _, bottleneck = stacks.training_parameters(codebooks, 0.004, (0, 0))
+    _, weights = stacks.training_parameters(codebooks, 0, costs)
+    parameters, both = stacks.training_parameters(codebooks, 0.004, costs)
     torch.testing.assert_close(both, bottleneck + weights)
     for layer, vectors, params in zip(
         stacks.dense_layers(), (codebooks[0], codebooks[1], codebooks[1]), parameters
@@ -277,3 +277,82 @@ def test_rank_power_target_attracts_top_expert_and_resists_collapse():
         loss = router.traffic_balance_loss(logits.softmax(0), hard, 0.001, target)
         (gradient,) = torch.autograd.grad(loss, logits)
         assert gradient[missing] < 0
+
+
+def test_shared_codebook_is_the_adapter_for_every_layer():
+    from model.config import ModelConfig
+    from model.modules.layer_stacks import LayerStacks
+    from model.quantize import QuantizationConfig, QuantizationManager
+
+    router = MoERouter(64, 64, dim=64, context_dim=2048, shared=True, material_states=2)
+    config = ModelConfig(
+        L1=8,
+        L2=4,
+        L3=4,
+        moe_shared_router=True,
+        moe_fc0_experts=64,
+        moe_tail_experts=64,
+    )
+    stacks = LayerStacks(64, config, QuantizationManager(QuantizationConfig()))
+    codebook = router.codebook
+    assert codebook[0] is codebook[1]
+    assert router.encoders["tail"].sides[0][0].weight.shape[1] == 2048
+    assert router.adapter_down.shape == (64, 2048)
+    assert router.codebooks["tail"].shape == (64, 64)
+    assert torch.linalg.matrix_rank(codebook[0]) == 64
+    for layer in stacks.dense_layers():
+        assert "adapter_down" not in dict(layer.named_parameters())
+        weight, bias = layer.get_all_weights_and_biases(codebook[0])
+        torch.testing.assert_close(
+            weight.reshape(64, -1),
+            torch.nn.functional.linear(codebook[0], layer.adapter_up),
+        )
+        torch.testing.assert_close(
+            bias.reshape(64, -1),
+            torch.nn.functional.linear(codebook[0], layer.bias_adapter),
+        )
+    _, loss = stacks.training_parameters(codebook, 0.008, (0, 0))
+    torch.testing.assert_close(loss, 0.008 * stacks.l1.centered_diversity(codebook[0]))
+    (gradient,) = torch.autograd.grad(loss, router.codebooks["tail"])
+    assert gradient.abs().sum() > 0 and gradient.isfinite().all()
+    indices = torch.arange(4)
+    vectors = router.codebook
+    fc0, tail, *_ = router(indices, indices, codebook=vectors)
+    score = stacks(torch.rand(4, 8), vectors, fc0, tail, False, False).sum()
+    projection_gradient, codebook_gradient = torch.autograd.grad(
+        score, (router.adapter_down, router.codebooks["tail"]), allow_unused=True
+    )
+    assert projection_gradient is None
+    assert codebook_gradient.isfinite().all() and codebook_gradient.abs().sum() > 0
+
+
+def test_context_generator_projects_before_codebook_selection():
+    from model.modules.router import (
+        center_and_rms_norm,
+        decompose_router_index,
+        rms_norm,
+    )
+
+    router = MoERouter(
+        4, 4, dim=8, context_dim=32, shared=True, material_states=2, diversity_cost=0
+    )
+    indices = torch.tensor([0, 1, 41, 42])
+    ours, theirs, geometry = decompose_router_index(indices, material_states=2)
+    raw = (
+        router.encoders["tail"](ours, theirs, router.tail_material_decode)
+        + router.king(geometry % 8)
+        + router.wings(geometry // 8)
+    )
+    expected = rms_norm(
+        torch.nn.functional.linear(
+            torch.nn.functional.gelu(center_and_rms_norm(raw)), router.adapter_down
+        )
+    )
+    actual = router.get_context_vector(indices)
+    assert raw.shape == (4, 32) and actual.shape == (4, 8)
+    torch.testing.assert_close(actual, expected)
+    ids, _, commitment, _ = router.quantize(actual, router.codebook[0], 4)
+    distances = (actual[:, None] - router.codebook[0][None]).square().sum(-1)
+    torch.testing.assert_close(ids, distances.argmin(-1))
+    (gradient,) = torch.autograd.grad(commitment, router.adapter_down)
+    assert gradient.isfinite().all() and gradient.abs().sum() > 0

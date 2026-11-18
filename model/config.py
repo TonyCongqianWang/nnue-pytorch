@@ -7,10 +7,9 @@ from tyro.conf import OmitArgPrefixes
 
 from .modules import FeatureConfig, LayerStacksConfig
 from .modules.router import (
-    ADAPTER_RANK,
     CODEBOOK_DIM,
+    CONTEXT_DIM,
     DEFAULT_COMMITMENT_COST,
-    FC0_ADAPTER_RANK,
     FC0_CODEBOOK_DIM,
     NUM_FC0_EXPERTS,
     NUM_WEIGHT_EXPERTS,
@@ -26,15 +25,12 @@ class ModelConfig(LayerStacksConfig):
     """Number of FC0 experts (2–64)."""
     moe_tail_experts: int = NUM_WEIGHT_EXPERTS
     """Number of FC1/output experts (2–256)."""
+    moe_context_dim: int = CONTEXT_DIM
+    """Context embedding width before normalization, GELU and shared down-projection."""
     moe_fc0_codebook_dim: int = FC0_CODEBOOK_DIM
     """FC0 context embedding and codebook dimension."""
     moe_tail_codebook_dim: int = CODEBOOK_DIM
-    """Tail context embedding and codebook dimension."""
-    moe_fc0_rank: int = FC0_ADAPTER_RANK
-    """FC0 hypernetwork adapter bottleneck width."""
-    moe_tail_rank: int = ADAPTER_RANK
-    """FC1/output hypernetwork adapter bottleneck width."""
-
+    """Shared learned codebook and adapter-vector width after context projection."""
     moe_mix_interval: int = 0
     """Apply weighted top-2 FC0 and top-4 tail training every N optimizer steps. Zero disables."""
 
@@ -42,10 +38,8 @@ class ModelConfig(LayerStacksConfig):
     """Route the entire stack through the full-context router."""
     moe_fc0_direct: bool = False
     """Train direct expert weights and biases for FC0, or for the whole stack with shared routing."""
-    moe_fc0_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered FC0 bottleneck variance."""
-    moe_tail_bottleneck_diversity_cost: float = 0.0
-    """Penalty on concentration of centered tail bottleneck variance."""
+    moe_adapter_diversity_cost: float = 0.0
+    """Penalty on concentration of centered shared adapter/codebook variance."""
     moe_fc0_weight_diversity_cost: float = 0.0
     """Additional penalty on centered generated FC0 weights before clipping and QAT."""
     moe_tail_weight_diversity_cost: float = 0.0
@@ -97,8 +91,7 @@ class ModelConfig(LayerStacksConfig):
                 self.moe_mix_interval,
                 self.moe_fc0_weight_diversity_cost,
                 self.moe_tail_weight_diversity_cost,
-                self.moe_fc0_bottleneck_diversity_cost,
-                self.moe_tail_bottleneck_diversity_cost,
+                self.moe_adapter_diversity_cost,
             )
             < 0
         ):
@@ -110,20 +103,19 @@ class ModelConfig(LayerStacksConfig):
                 raise ValueError("Shared routing requires equal expert counts")
             if self.moe_mix_interval:
                 raise ValueError("Expert mixing is unavailable with shared routing")
-            if self.moe_fc0_direct and self.moe_tail_bottleneck_diversity_cost:
-                raise ValueError("Direct stacks do not use generator diversity")
-        if self.moe_fc0_direct and (
-            self.moe_fc0_zero_mean_init or self.moe_fc0_bottleneck_diversity_cost
-        ):
-            raise ValueError(
-                "Direct FC0 does not use generator initialization or diversity"
-            )
+        if self.moe_fc0_direct and self.moe_fc0_zero_mean_init:
+            raise ValueError("Direct FC0 does not use generator initialization")
         if self.moe_mix_interval and self.moe_tail_experts < 4:
             raise ValueError("MoE mixing requires at least four tail experts")
-        if min(self.moe_fc0_codebook_dim, self.moe_tail_codebook_dim) < 2:
-            raise ValueError("MoE codebook dimensions must be at least two")
-        if min(self.moe_fc0_rank, self.moe_tail_rank) < 1:
-            raise ValueError("MoE adapter ranks must be positive")
+        if (
+            min(
+                self.moe_context_dim,
+                self.moe_fc0_codebook_dim,
+                self.moe_tail_codebook_dim,
+            )
+            < 2
+        ):
+            raise ValueError("MoE context and codebook dimensions must be at least two")
 
     @staticmethod
     def add_model_args(parser):

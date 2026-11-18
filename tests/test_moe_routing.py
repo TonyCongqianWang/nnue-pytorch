@@ -160,10 +160,10 @@ def test_aggregate_histograms_are_default_and_count_all_experts(capsys):
 def test_basis_initialization_preserves_variance():
     from model.modules.moe_linear import MoeLinear
 
-    for rank in [64, 512]:
+    for dim in [8, 64]:
         torch.manual_seed(8)
-        layer = MoeLinear(128, 32, 8, rank=rank, codebook_dim=64)
-        cb = torch.nn.functional.normalize(torch.randn(8, 64), dim=1)
+        layer = MoeLinear(128, 32, 8, codebook_dim=dim)
+        cb = torch.nn.functional.normalize(torch.randn(8, dim), dim=1)
         weights = layer.get_delta_weights(cb)
         assert (
             abs(weights.square().mean().sqrt().item() / (1 / (3 * 128)) ** 0.5 - 1)
@@ -174,27 +174,26 @@ def test_basis_initialization_preserves_variance():
 def test_fc0_orthogonal_basis_scale_and_bottleneck_penalty():
     from model.modules.moe_linear import MoeLinear
 
-    kwargs = {"rank": 8, "codebook_dim": 16}
+    kwargs = {"codebook_dim": 16}
     torch.manual_seed(17)
-    regular = MoeLinear(32, 4, 8, **kwargs)
+    MoeLinear(32, 4, 8, **kwargs)
     after_regular = torch.rand(4)
     torch.manual_seed(17)
     orthogonal = MoeLinear(32, 4, 8, orthogonal_up_init=True, **kwargs)
-    torch.testing.assert_close(orthogonal.adapter_down, regular.adapter_down)
     torch.testing.assert_close(torch.rand(4), after_regular)
     basis = orthogonal.adapter_up
-    torch.testing.assert_close(basis.T @ basis, (4 / 3) * torch.eye(8))
-    cb = torch.randn(8, 16)
-    loss = orthogonal.bottleneck_diversity_loss(cb)
+    torch.testing.assert_close(basis.T @ basis, (4 / 3) * torch.eye(16))
+    cb = torch.randn(8, 16, requires_grad=True)
+    loss = orthogonal.centered_diversity(cb)
     assert 1 / 7 <= loss <= 1
-    (gradient,) = torch.autograd.grad(loss, orthogonal.adapter_down)
+    (gradient,) = torch.autograd.grad(loss, cb)
     assert gradient.isfinite().all() and gradient.abs().sum() > 0
 
 
 def test_centered_fc0_weights_survive_coalescing():
     from model.modules.moe_linear import MoeLinear
 
-    layer = MoeLinear(8, 4, 5, rank=4, codebook_dim=8, factorized=True)
+    layer = MoeLinear(8, 4, 5, codebook_dim=8, factorized=True)
     codebook = torch.randn(5, 8)
     original, biases = layer.get_all_weights_and_biases(codebook)
     original = original.view(5, 4, 8)
@@ -208,12 +207,11 @@ def test_centered_fc0_weights_survive_coalescing():
     torch.testing.assert_close(exported, centered)
 
 
-def test_zero_expert_mean_and_reuse_bottleneck():
+def test_zero_expert_mean_initialization():
     from model.modules.moe_linear import MoeLinear
 
-    layer = MoeLinear(16, 8, 8, rank=8, codebook_dim=16)
+    layer = MoeLinear(16, 8, 8, codebook_dim=16)
     cb = torch.randn(8, 16)
-    h = layer._bottleneck(cb)
     before = layer.get_delta_weights(cb)
     layer.zero_expert_mean_at_init(cb)
     after = layer.get_delta_weights(cb)
@@ -221,9 +219,3 @@ def test_zero_expert_mean_and_reuse_bottleneck():
         after.mean(0), torch.zeros_like(after[0]), atol=1e-7, rtol=0
     )
     torch.testing.assert_close(after.norm(), (before - before.mean(0)).norm())
-    direct = layer.get_all_weights_and_biases(cb)
-    cached = layer.get_all_weights_and_biases(bottleneck=h)
-    torch.testing.assert_close(cached, direct)
-    torch.testing.assert_close(
-        layer.centered_diversity(h), layer.bottleneck_diversity_loss(cb)
-    )

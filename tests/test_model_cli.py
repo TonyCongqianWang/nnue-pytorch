@@ -23,8 +23,6 @@ SMALL_ARGS = [
     "--moe-tail-experts=6",
     "--moe-fc0-codebook-dim=8",
     "--moe-tail-codebook-dim=16",
-    "--moe-fc0-rank=3",
-    "--moe-tail-rank=5",
 ]
 
 
@@ -40,12 +38,10 @@ def test_model_flags_are_shared_by_all_entry_points(entry, required):
     config = tyro.cli(entry, args=required + SMALL_ARGS).nnue_config.model_config
     model = NNUEModel(DEFAULT_FEATURES, config)
     fc0, fc1, output = model.layer_stacks.dense_layers()
-    assert [
-        (layer.count, layer.rank, layer.codebook_dim) for layer in (fc0, fc1, output)
-    ] == [
-        (4, 3, 8),
-        (6, 5, 16),
-        (6, 5, 16),
+    assert [(layer.count, layer.codebook_dim) for layer in (fc0, fc1, output)] == [
+        (4, 8),
+        (6, 16),
+        (6, 16),
     ]
     assert model.router.codebooks["fc0"].shape == (4, 8)
     assert model.router.codebooks["tail"].shape == (6, 16)
@@ -103,5 +99,6 @@ def test_pipeline_forwards_model_options_to_each_stage(monkeypatch, tmp_path):
                 parsed.append(result.nnue_config.model_config)
     assert len(parsed) == 8
     assert all(
-        c.L1 == 32 and c.moe_fc0_experts == 4 and c.moe_tail_rank == 5 for c in parsed
+        c.L1 == 32 and c.moe_fc0_experts == 4 and c.moe_tail_codebook_dim == 16
+        for c in parsed
     )

@@ -154,10 +154,8 @@ def make_stacks():
         3,
         LayerStacksConfig(L1=4, L2=4, L3=4),
         QuantizationManager(QuantizationConfig()),
-        rank=4,
         codebook_dim=8,
         fc0_count=2,
-        fc0_rank=3,
         fc0_dim=8,
     )
     for layer in s.dense_layers():
@@ -219,9 +217,9 @@ def test_default_shapes_and_independent_router_sizes():
 
     s = LayerStacks(256, LayerStacksConfig(), QuantizationManager(QuantizationConfig()))
     assert [
-        (l.count, l.in_features, l.out_features, l.rank, l.codebook_dim)
+        (l.count, l.in_features, l.out_features, l.codebook_dim)
         for l in s.dense_layers()
-    ] == [(64, 1024, 32, 64, 256), (256, 64, 32, 512, 2048), (256, 128, 1, 512, 2048)]
+    ] == [(64, 1024, 32, 64), (256, 64, 32, 64), (256, 128, 1, 64)]
     assert sum(l.in_features * l.out_features for l in s.dense_layers()) == 34944
     assert not hasattr(s, "opp")
 
@@ -236,10 +234,8 @@ def test_generator_gradients_and_expert_biases_without_optimizer():
         3,
         LayerStacksConfig(L1=4, L2=4, L3=4),
         QuantizationManager(QuantizationConfig()),
-        rank=4,
         codebook_dim=8,
         fc0_count=2,
-        fc0_rank=3,
         fc0_dim=8,
     )
     f, t, loss, *_ = router(torch.tensor([0, 1, 2, 3]), torch.tensor([0, 9, 18, 31]))
@@ -264,7 +260,7 @@ def test_generator_gradients_and_expert_biases_without_optimizer():
 
 def test_factorized_initialization_and_all_coalescing_paths():
     torch.manual_seed(9)
-    layer = MoeLinear(8, 4, 3, rank=4, codebook_dim=8, dual_bias=True, factorized=True)
+    layer = MoeLinear(8, 4, 3, codebook_dim=8, dual_bias=True, factorized=True)
     cb = torch.nn.functional.normalize(torch.randn(3, 8), dim=1)
     assert torch.count_nonzero(layer.shared_weight) == 0
     assert torch.count_nonzero(layer.adapter_up) > 0
@@ -317,10 +313,8 @@ def test_weighted_mix_uses_each_tail_with_its_own_activation():
         4,
         LayerStacksConfig(L1=4, L2=4, L3=4),
         QuantizationManager(QuantizationConfig()),
-        rank=4,
         codebook_dim=8,
         fc0_count=2,
-        fc0_rank=3,
         fc0_dim=8,
     )
     x = torch.rand(3, 4, requires_grad=True)

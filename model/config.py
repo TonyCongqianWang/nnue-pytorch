@@ -54,11 +54,15 @@ class ModelConfig(LayerStacksConfig):
     """Centroid attraction, averaged within each expert then across all experts."""
     moe_balance_power: float = 0.0
     """Target traffic proportional to EMA traffic rank ** (-power); zero is uniform."""
-    moe_balance_rate: float = 0.0001
+    moe_balance_rate: float = 0.001
     """Maximum routing-offset adjustment per optimizer step."""
+    moe_balance_warmup_rate: float = 0.01
+    """Initial offset adjustment limit, tapered linearly to moe_balance_rate."""
+    moe_balance_warmup_steps: int = 2048
+    """Optimizer steps over which to taper the initial offset feedback rate."""
     moe_balance_smoothing: float = 0.01
     """Uniform smoothing mass for direct traffic feedback."""
-    moe_balance_max_range: float = 0.5
+    moe_balance_max_range: float = 4.0
     """Maximum difference between routing offsets, in squared-distance units."""
 
     def __post_init__(self):
@@ -75,6 +79,8 @@ class ModelConfig(LayerStacksConfig):
                 self.moe_context_commitment_cost,
                 self.moe_centroid_commitment_cost,
                 self.moe_balance_rate,
+                self.moe_balance_warmup_rate,
+                self.moe_balance_warmup_steps,
                 self.moe_balance_max_range,
                 self.moe_mix_interval,
                 self.moe_fc0_weight_diversity_cost,

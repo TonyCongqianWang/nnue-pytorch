@@ -360,3 +360,118 @@ def test_global_counts_normalize_ddp_centroid_gradients(monkeypatch):
     expected = torch.autograd.grad(reference, codebook)[0]
     torch.testing.assert_close(sum(gradients) / 2, expected)
     torch.testing.assert_close(*offsets)
+
+
+def test_cold_start_does_not_credit_fictitious_uniform_traffic():
+    router = MoERouter(
+        64,
+        64,
+        dim=8,
+        context_dim=32,
+        shared=True,
+        material_states=2,
+        balance_power=0.4658379531227075,
+    )
+    counts = torch.zeros(64)
+    counts[33] = 131072
+    router.update_traffic("tail", counts)
+    torch.testing.assert_close(router.ema_traffic_tail, counts / counts.sum())
+    assert router.routing_offset_tail[33] < 0
+    assert (router.routing_offset_tail[torch.arange(64) != 33] > 0).all()
+    assert router.traffic_momentum("tail") == 0
+    torch.testing.assert_close(router.feedback_rate("tail"), torch.tensor(0.01))
+
+
+def test_momentum_and_feedback_warmup_match_their_definitions():
+    router = small_router()
+    numerator = torch.zeros(4)
+    for step, counts in enumerate(
+        (
+            torch.tensor([100.0, 0, 0, 0]),
+            torch.tensor([0.0, 50, 50, 0]),
+            torch.tensor([0.0, 0, 0, 100]),
+        ),
+        1,
+    ):
+        numerator = 0.99 * numerator + 0.01 * counts / counts.sum()
+        router.update_traffic("tail", counts)
+        torch.testing.assert_close(
+            router.ema_traffic_tail, numerator / (1 - 0.99**step)
+        )
+    router.balance_steps_tail.fill_(2049)
+    torch.testing.assert_close(router.feedback_rate("tail"), torch.tensor(0.001))
+    torch.testing.assert_close(router.traffic_momentum("tail"), torch.tensor(0.99))
+    other = small_router()
+    other.load_state_dict(router.state_dict())
+    torch.testing.assert_close(other.balance_steps_tail, router.balance_steps_tail)
+    torch.testing.assert_close(
+        other.feedback_rate("tail"), router.feedback_rate("tail")
+    )
+
+
+def test_narrow_cell_split_can_compete_with_a_nearby_expert():
+    router = small_router()
+    with torch.no_grad():
+        raw = router.codebooks["tail"]
+        raw.zero_()
+        raw[0, 0] = 1
+        raw[1, 2] = 1
+        raw[2, 0] = 1
+        raw[2, 1] = 0.005
+        raw[3, 3] = 1
+        points = torch.zeros(128, 8)
+        points[:, 0] = 1
+        points[:, 1] = torch.linspace(-0.001, 0.001, 128)
+        points = torch.nn.functional.normalize(points, dim=1)
+        router.recent_contexts_tail[:128] = torch.arange(128)
+        router.recent_context_sizes["tail"] = 128
+        router.ema_traffic_tail.copy_(torch.tensor([0.9, 0.001, 0.05, 0.049]))
+        router.get_context_vector = lambda ids, bank="tail": points[ids]
+        router.reseed_dead_experts_from_traffic()
+    assert router.last_reseed_parents["tail"] == {1: 0}
+    detail = router.last_reseed_details["tail"][1]
+    assert 0 < detail["separation_radians"] < 0.01
+    assert min(detail["sample_parent"], detail["sample_child"]) >= 12
+
+
+def test_early_diagnostics_leave_learning_state_untouched(capsys):
+    from torch import nn
+
+    from model.config import ModelConfig
+    from model.modules.layer_stacks import LayerStacks
+    from model.quantize import QuantizationConfig, QuantizationManager
+    from trainer.callbacks import MoEDeadExpertReseeder
+
+    config = ModelConfig(
+        L1=8, L2=4, L3=4, moe_shared_router=True, moe_fc0_experts=4, moe_tail_experts=4
+    )
+    model = nn.Module()
+    model.router = small_router()
+    model.layer_stacks = LayerStacks(
+        4,
+        config,
+        QuantizationManager(QuantizationConfig()),
+        codebook_dim=8,
+        fc0_count=4,
+        fc0_dim=8,
+    )
+    model.adapter_diversity_cost = 0.016
+    model.weight_diversity_costs = (0.002, 0.002)
+    trainer = SimpleNamespace(
+        model=SimpleNamespace(model=model), rank=0, global_step=0, optimizer=None
+    )
+    batch = (torch.zeros(4, 1),) * 6 + (torch.arange(4), torch.arange(4))
+    parameters = [p.detach().clone() for p in model.parameters()]
+    callback = MoEDeadExpertReseeder()
+    callback.on_train_batch_start(trainer, batch, 0)
+    assert model.router.balance_steps_tail == 0
+    assert model.router.routing_offset_tail.count_nonzero() == 0
+    assert model.router.loss_component_batches == 0
+    assert model.layer_stacks.regularization_batches == 0
+    assert all(p.grad is None for p in model.parameters())
+    for before, after in zip(parameters, model.parameters()):
+        torch.testing.assert_close(before, after)
+    text = capsys.readouterr().out
+    assert "Early routing step=0" in text
+    assert "Early gradients step=0" in text
+    assert not model.router.validation_context_samples

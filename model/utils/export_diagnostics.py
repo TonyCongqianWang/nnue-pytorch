@@ -105,6 +105,11 @@ def write_export_diagnostics(model, path):
             .tolist(),
             "controller": {
                 "rate": router.balance_rate,
+                "warmup_rate": router.balance_warmup_rate,
+                "warmup_steps": router.balance_warmup_steps,
+                "observations": int(getattr(router, f"balance_steps_{bank}")),
+                "effective_momentum": float(router.traffic_momentum(bank)),
+                "current_rate": float(router.feedback_rate(bank)),
                 "smoothing": router.balance_smoothing,
                 "max_range": router.balance_max_range,
                 "ema_decay": router.ema_decay,

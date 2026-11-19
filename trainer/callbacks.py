@@ -784,6 +784,76 @@ class MoEDeadExpertReseeder(Callback):
         self.temperature = temperature
         self.min_relative_utilization = min_relative_utilization
 
+    @staticmethod
+    def _context_batches(router, batch):
+        first, full = batch[-2:]
+        if router.shared_routing:
+            from model.modules.router import TAIL_GEOMETRY_STATES
+
+            full = first * TAIL_GEOMETRY_STATES + full % TAIL_GEOMETRY_STATES
+        return zip(
+            router.active_banks, (full,) if router.shared_routing else (first, full)
+        )
+
+    @torch.no_grad()
+    @torch.compiler.disable
+    def _log_early_routing(self, trainer, batch):
+        from model.modules.router import ieee_matmul_precision
+
+        from .engine import _unwrap_module
+
+        model = _unwrap_module(_unwrap_module(trainer.model).model)
+        router = model.router
+        with ieee_matmul_precision():
+            for name, indices in self._context_batches(router, batch):
+                indices = indices[:2048]
+                context = router.get_context_vector(indices, name)
+                codebook = router.normalized_codebook(name)
+                raw_distances = router.distances(context, codebook, name, biased=False)
+                offsets = getattr(router, f"routing_offset_{name}")
+                biased = (raw_distances - offsets).argmin(-1)
+                for title, assignments in (
+                    ("biased", biased),
+                    ("unbiased", raw_distances.argmin(-1)),
+                ):
+                    counts, _ = router.assignment_counts(assignments, len(codebook))
+                    share = counts / counts.sum().clamp_min(1)
+                    effective = (-(share * share.clamp_min(1e-30).log()).sum()).exp()
+                    print(
+                        f"[Early routing step={trainer.global_step}, {router.bank_label(name)}, {title}, rank-0 sample] "
+                        f"n={len(indices)} active={int((counts > 0).sum())}/{len(codebook)} "
+                        f"effective={float(effective):.3f} top={float(share.max()):.6g} "
+                        f"offset_range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:g} "
+                        f"rate={float(router.feedback_rate(name)):.6g} momentum={float(router.traffic_momentum(name)):.6g} "
+                        f"context_centered_RMS={float((context - context.mean(0)).square().mean().sqrt()):.6g} "
+                        f"selected_cos={float(torch.nn.functional.cosine_similarity(context, codebook[assignments]).mean()):.6g}",
+                        flush=True,
+                    )
+                previous = router.validation_context_samples.get(name)
+                router.validation_context_samples[name] = indices[:512].detach().clone()
+                diagnostics = router.gradient_diagnostics(
+                    name,
+                    counts,
+                    model=model,
+                    optimizer=getattr(trainer, "optimizer", None),
+                )
+                if previous is None:
+                    del router.validation_context_samples[name]
+                else:
+                    router.validation_context_samples[name] = previous
+                print(
+                    f"[Early gradients step={trainer.global_step}, {router.bank_label(name)}] "
+                    + ", ".join(
+                        f"{key}={value:.6g}" for key, value in diagnostics.items()
+                    ),
+                    flush=True,
+                )
+
+    @torch.compiler.disable
+    def on_train_batch_start(self, trainer, batch, batch_idx):
+        if trainer.global_step == 0 and getattr(trainer, "rank", 0) == 0:
+            self._log_early_routing(trainer, batch)
+
     @torch.no_grad()
     @torch.compiler.disable
     def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
@@ -791,15 +861,10 @@ class MoEDeadExpertReseeder(Callback):
 
         router = _unwrap_module(trainer.model).model.router
         if batch is not None and getattr(trainer, "rank", 0) == 0:
-            first, full = batch[-2:]
-            if router.shared_routing:
-                from model.modules.router import TAIL_GEOMETRY_STATES
-
-                full = first * TAIL_GEOMETRY_STATES + full % TAIL_GEOMETRY_STATES
-            for name, contexts in zip(
-                router.active_banks, (full,) if router.shared_routing else (first, full)
-            ):
+            for name, contexts in self._context_batches(router, batch):
                 router.remember_contexts(name, contexts)
+            if trainer.global_step in (128, 512, 2048):
+                self._log_early_routing(trainer, batch)
         if (
             self.reseed_interval > 0
             and trainer.global_step > 0
@@ -965,6 +1030,7 @@ class MoEDeadExpertReseeder(Callback):
                 f"[Routing controller {label}] power={router.balance_power:.6g} "
                 f"target_top={100 * float(target[0]):.4f}% target_bottom={100 * float(target[-1]):.4f}% "
                 f"smoothing={router.balance_smoothing:.6g} ema_decay={router.ema_decay:.6g} "
+                f"effective_momentum={float(router.traffic_momentum(name)):.6g} rate={float(router.feedback_rate(name)):.6g} "
                 f"offset_min/max={float(offsets.min()):.6g}/{float(offsets.max()):.6g} "
                 f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:.6g} "
                 f"at_range_limit={bool(offsets.max() - offsets.min() >= 0.999 * router.balance_max_range)} "

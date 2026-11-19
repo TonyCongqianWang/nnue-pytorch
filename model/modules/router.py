@@ -199,9 +199,11 @@ class MoERouter(nn.Module):
         context_commitment_cost=DEFAULT_CONTEXT_COMMITMENT_COST,
         centroid_commitment_cost=DEFAULT_CENTROID_COMMITMENT_COST,
         balance_power=0.0,
-        balance_rate=0.0001,
+        balance_rate=0.001,
+        balance_warmup_rate=0.01,
+        balance_warmup_steps=2048,
         balance_smoothing=0.01,
-        balance_max_range=0.5,
+        balance_max_range=4.0,
         reseed_dead_experts=True,
         ema_decay=0.99,
         codebook_target_norm=1.0,
@@ -234,6 +236,8 @@ class MoERouter(nn.Module):
         self.centroid_commitment_cost = centroid_commitment_cost
         self.balance_power = balance_power
         self.balance_rate = balance_rate
+        self.balance_warmup_rate = balance_warmup_rate
+        self.balance_warmup_steps = balance_warmup_steps
         self.balance_smoothing = balance_smoothing
         self.balance_max_range = balance_max_range
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
@@ -284,6 +288,9 @@ class MoERouter(nn.Module):
                 persistent=False,
             )
             self.register_buffer(f"ema_traffic_{name}", torch.full((count,), 1 / count))
+            self.register_buffer(
+                f"balance_steps_{name}", torch.zeros((), dtype=torch.int64)
+            )
             self.register_buffer(f"routing_offset_{name}", torch.zeros(count))
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
@@ -399,10 +406,32 @@ class MoERouter(nn.Module):
             self.centroid_commitment_cost * world / len(codebook) * centroid_error,
         )
 
+    def traffic_momentum(self, name):
+        # Bias-corrected EMA: the first batch replaces the uniform placeholder.
+        step = getattr(self, f"balance_steps_{name}").clamp_min(1)
+        return (
+            self.ema_decay
+            * (1 - self.ema_decay ** (step - 1))
+            / (1 - self.ema_decay**step).clamp_min(1e-12)
+        )
+
+    def feedback_rate(self, name):
+        step = getattr(self, f"balance_steps_{name}")
+        if not self.balance_warmup_steps:
+            return step.new_tensor(self.balance_rate, dtype=torch.float32)
+        fraction = ((step - 1) / self.balance_warmup_steps).clamp(0, 1)
+        return self.balance_warmup_rate + fraction * (
+            self.balance_rate - self.balance_warmup_rate
+        )
+
     @torch.no_grad()
     def update_traffic(self, name, counts):
+        getattr(self, f"balance_steps_{name}").add_(1)
         traffic = getattr(self, f"ema_traffic_{name}")
-        traffic.lerp_(counts / counts.sum().clamp_min(1), 1 - self.ema_decay)
+        traffic.lerp_(
+            counts / counts.sum().clamp_min(1), 1 - self.traffic_momentum(name)
+        )
+        rate = self.feedback_rate(name)
         offsets = getattr(self, f"routing_offset_{name}")
         # A common offset shift does not change assignments or consume the rate budget.
         offsets.sub_(offsets.mean())
@@ -411,14 +440,12 @@ class MoERouter(nn.Module):
         observed = (
             1 - self.balance_smoothing
         ) * traffic + self.balance_smoothing / len(traffic)
-        offsets.add_(self.balance_rate * (target.log() - observed.log()).clamp(-1, 1))
+        offsets.add_(rate * (target.log() - observed.log()).clamp(-1, 1))
         offsets.sub_(offsets.mean())
         span = offsets.max() - offsets.min()
         offsets.mul_((self.balance_max_range / span.clamp_min(1e-12)).clamp(max=1))
         delta = offsets - before
-        delta.mul_(
-            (self.balance_rate / delta.abs().max().clamp_min(1e-12)).clamp(max=1)
-        )
+        delta.mul_((rate / delta.abs().max().clamp_min(1e-12)).clamp(max=1))
         offsets.copy_(before + delta)
         getattr(self, f"offset_adjustment_{name}").copy_(delta)
         getattr(self, f"reseed_observed_{name}").add_(counts)
@@ -697,9 +724,12 @@ class MoERouter(nn.Module):
                         )
                         midpoint = F.normalize(centers.sum(0), dim=0)
                         axis = F.normalize(centers[1] - centers[0], dim=0)
-                        angle = (
-                            torch.acos((centers[0] * centers[1]).sum().clamp(-1, 1)) / 2
-                        ).clamp(0.05, 0.25)
+                        # Follow the sampled spread, including very narrow cells.
+                        # atan2 remains accurate when cosine rounds to one.
+                        angle = torch.atan2(
+                            (centers[1] - centers[0]).norm(),
+                            (centers[1] + centers[0]).norm(),
+                        ).clamp(max=0.25)
                         proposed = torch.stack(
                             (
                                 midpoint * angle.cos() - axis * angle.sin(),

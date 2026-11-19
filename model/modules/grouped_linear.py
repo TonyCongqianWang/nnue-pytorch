@@ -106,7 +106,7 @@ extern "C" __global__ void sparse_l1_forward(
 def _route_rows(indices, count):
     kernel = _route_kernels.get(count)
     if kernel is None:
-        # Threads stride across buckets, including the 512-expert tail.
+        # Threads stride across the expert tables.
         # Specializing the constant preserves the original eight-bucket code.
         kernel = cp.RawKernel(
             f"#define BUCKETS {count}\n"

@@ -10,7 +10,7 @@ from .router import (
 
 
 class LayerStacks(nn.Module):
-    """One full-width expert per layer; FC1 and output share a tail ID."""
+    """Dense layer tables selected by one shared stack ID when configured."""
 
     def __init__(
         self,

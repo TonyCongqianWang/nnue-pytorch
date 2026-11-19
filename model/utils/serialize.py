@@ -175,7 +175,7 @@ class NNUEWriter:
             first = len(layers) == 1
             self.int32(self.fc0_hash(model) if first else fc_hash)
             keys = ("ls_l1",) if first else ("ls_l2", "ls_output")
-            bank = "FC0" if first else "tail"
+            bank = model.router.bank_label("fc0" if first else "tail")
             expert = bucket if first else bucket - model.layer_stacks.l1.count
             for layer, key in zip(layers, keys):
                 self.write_fc_layer(model, layer, key, f"{bank} expert {expert}")

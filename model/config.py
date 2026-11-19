@@ -22,9 +22,9 @@ from .quantize import QuantizationConfig
 @dataclass(kw_only=True)
 class ModelConfig(LayerStacksConfig):
     moe_fc0_experts: int = NUM_FC0_EXPERTS
-    """Number of FC0 experts (2–64)."""
+    """First-layer expert-table count (2–64), equal to stack count with shared routing."""
     moe_tail_experts: int = NUM_WEIGHT_EXPERTS
-    """Number of FC1/output experts (2–256)."""
+    """Stack expert count with shared routing, or later-layer expert count otherwise."""
     moe_context_dim: int = CONTEXT_DIM
     """Context embedding width before normalization, GELU and shared down-projection."""
     moe_fc0_codebook_dim: int = FC0_CODEBOOK_DIM
@@ -80,7 +80,9 @@ class ModelConfig(LayerStacksConfig):
         ):
             raise ValueError("MoE KL smoothing must be between zero and one")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
-            raise ValueError("MoE expert counts must be FC0 2–64 and tail 2–256")
+            raise ValueError(
+                "MoE table counts must be first layer 2–64 and later layers 2–256"
+            )
         if (
             min(
                 self.moe_commitment_cost,
@@ -106,7 +108,7 @@ class ModelConfig(LayerStacksConfig):
         if self.moe_fc0_direct and self.moe_fc0_zero_mean_init:
             raise ValueError("Direct FC0 does not use generator initialization")
         if self.moe_mix_interval and self.moe_tail_experts < 4:
-            raise ValueError("MoE mixing requires at least four tail experts")
+            raise ValueError("MoE mixing requires at least four output expert tables")
         if (
             min(
                 self.moe_context_dim,

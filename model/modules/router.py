@@ -217,7 +217,9 @@ class MoERouter(nn.Module):
                 or 1 <= material_states <= NUM_FC0_MATERIAL_STATES
             )
         ):
-            raise ValueError("MoE10 supports 64 FC0 and 256 tail experts")
+            raise ValueError(
+                "MoE table counts must be first layer 2–64 and later layers 2–256"
+            )
         self.shared = shared
         self.num_fc0_experts, self.num_weight_experts = (
             num_fc0_experts,

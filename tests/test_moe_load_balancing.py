@@ -356,3 +356,24 @@ def test_context_generator_projects_before_codebook_selection():
     torch.testing.assert_close(ids, distances.argmin(-1))
     (gradient,) = torch.autograd.grad(commitment, router.adapter_down)
     assert gradient.isfinite().all() and gradient.abs().sum() > 0
+
+
+def test_shared_reseeding_message_uses_stack_label(capsys):
+    from types import SimpleNamespace
+
+    from trainer.callbacks import MoEDeadExpertReseeder
+
+    router = MoERouter(4, 4, dim=8, context_dim=16, material_states=2, shared=True)
+    router.ema_traffic_tail.fill_(1 / 3)
+    router.ema_traffic_tail[0] = 0
+    trainer = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(router=router)),
+        global_step=1024,
+        world_size=1,
+        rank=0,
+        optimizer=None,
+    )
+    MoEDeadExpertReseeder().on_train_batch_end(trainer)
+    message = capsys.readouterr().out
+    assert "Reseeded 1 stack expert(s)" in message
+    assert "tail expert" not in message

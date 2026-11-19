@@ -826,7 +826,7 @@ class MoEDeadExpertReseeder(Callback):
                     router.lut_valid = router.lut_margin_valid = False
                 if rank == 0 and parents:
                     print(
-                        f"[Step {trainer.global_step}] Reseeded {len(parents)} {name} expert(s): "
+                        f"[Step {trainer.global_step}] Reseeded {len(parents)} {router.bank_label(name)} expert(s): "
                         f"{self._reseed_description(router, name, parents)}",
                         flush=True,
                     )
@@ -1034,6 +1034,8 @@ class MoEDeadExpertReseeder(Callback):
                 print(
                     f"[Adapter diversity {model.router.bank_label(bank)}] "
                     f"dimension={vectors.shape[1]} weighted_loss={float(loss):.6g} "
+                    f"centered_RMS={float(centered.square().mean().sqrt()):.6g} "
+                    f"centered_energy_fraction={float(centered.square().sum() / vectors.square().sum().clamp_min(1e-30)):.6g} "
                     f"centered_max_cos={float(cosine.max()):.5f}",
                     flush=True,
                 )

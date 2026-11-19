@@ -1034,7 +1034,9 @@ class MoEDeadExpertReseeder(Callback):
                 f"offset_min/max={float(offsets.min()):.6g}/{float(offsets.max()):.6g} "
                 f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:.6g} "
                 f"at_range_limit={bool(offsets.max() - offsets.min() >= 0.999 * router.balance_max_range)} "
-                f"max_adjustment={float(adjustment.abs().max()):.6g}",
+                f"max_adjustment={float(adjustment.abs().max()):.6g} "
+                f"batch_top={float(getattr(router, f'batch_traffic_{name}').max()):.6g} "
+                f"trust_min/max={float(getattr(router, f'balance_trust_{name}').min()):.4g}/{float(getattr(router, f'balance_trust_{name}').max()):.4g}",
                 flush=True,
             )
             for title, values in (

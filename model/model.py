@@ -51,6 +51,7 @@ class NNUEModel(nn.Module):
             balance_rate=config.moe_balance_rate,
             balance_warmup_rate=config.moe_balance_warmup_rate,
             balance_warmup_steps=config.moe_balance_warmup_steps,
+            balance_batch_shrink=config.moe_balance_batch_shrink,
             balance_smoothing=config.moe_balance_smoothing,
             balance_max_range=config.moe_balance_max_range,
             balance_power=config.moe_balance_power,

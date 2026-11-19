@@ -172,12 +172,7 @@ class NNUE(nn.Module):
                     p
                     for layer in self.model.layer_stacks.dense_layers()
                     for p in layer.weight_parameters()
-                ]
-                + (
-                    [self.model.router.adapter_down]
-                    if self.model.router.shared_routing
-                    else []
-                ),
+                ],
                 "lr": LRs[4],
                 "weight_decay": dense_wd,
             },
@@ -190,11 +185,7 @@ class NNUE(nn.Module):
                 "weight_decay": 0.0,
             },
             {
-                "params": [
-                    p
-                    for p in self.model.router.parameters()
-                    if p is not self.model.router.adapter_down
-                ],
+                "params": list(self.model.router.parameters()),
                 "lr": LRs[0],
                 "weight_decay": 0.0,
             },

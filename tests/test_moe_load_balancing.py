@@ -475,3 +475,71 @@ def test_early_diagnostics_leave_learning_state_untouched(capsys):
     assert "Early routing step=0" in text
     assert "Early gradients step=0" in text
     assert not model.router.validation_context_samples
+
+
+def test_batch_feedback_uses_current_error_and_shrinks_unconfirmed_changes():
+    def feedback(history):
+        router = small_router(balance_warmup_steps=0)
+        router.ema_traffic_tail.copy_(history)
+        # Hold history fixed to isolate the current-batch response.
+        router.traffic_momentum = lambda name: torch.tensor(1.0)
+        router.update_traffic("tail", torch.tensor([100.0, 0.0, 0.0, 0.0]))
+        return router
+
+    confirmed = feedback(torch.tensor([1.0, 0.0, 0.0, 0.0]))
+    unconfirmed = feedback(torch.full((4,), 0.25))
+    torch.testing.assert_close(
+        unconfirmed.routing_offset_tail, 0.25 * confirmed.routing_offset_tail
+    )
+    torch.testing.assert_close(unconfirmed.balance_trust_tail, torch.full((4,), 0.25))
+    torch.testing.assert_close(confirmed.balance_trust_tail, torch.ones(4))
+    assert unconfirmed.routing_offset_tail[0] < 0
+    # A balanced batch needs no correction even if history is still imbalanced.
+    confirmed.update_traffic("tail", torch.ones(4))
+    torch.testing.assert_close(confirmed.offset_adjustment_tail, torch.zeros(4))
+
+
+def test_projection_init_scale_and_router_optimizer_group():
+    import math
+
+    from model import NNUE, ModelConfig, NNUEConfig
+    from model.optimizers import OptimizerConfig
+
+    torch.manual_seed(91)
+    router = small_router()
+    torch.manual_seed(91)
+    old_projection = torch.empty_like(router.adapter_down)
+    torch.nn.init.uniform_(old_projection, -1 / math.sqrt(32), 1 / math.sqrt(32))
+    torch.testing.assert_close(router.adapter_down, 4 * old_projection, rtol=0, atol=0)
+    model_config = ModelConfig(
+        L1=8,
+        L2=4,
+        L3=4,
+        moe_shared_router=True,
+        moe_fc0_experts=4,
+        moe_tail_experts=4,
+        moe_context_dim=32,
+        moe_fc0_codebook_dim=8,
+        moe_tail_codebook_dim=8,
+    )
+    nnue = NNUE(
+        NNUEConfig(
+            features="K32H3^",
+            model_config=model_config,
+            optimizer_config=OptimizerConfig(
+                optimizer_name="adamw", dense_weight_decay=0.001
+            ),
+        )
+    )
+    optimizers, _ = nnue.configure_optimizers()
+    groups = optimizers[0].param_groups
+    projection = nnue.model.router.adapter_down
+    matches = [g for g in groups if any(p is projection for p in g["params"])]
+    assert len(matches) == 1 and matches[0]["weight_decay"] == 0
+    embedding = next(nnue.model.router.encoders["tail"].parameters())
+    assert any(p is embedding for p in matches[0]["params"])
+    dense = nnue.model.layer_stacks.l1.adapter_up
+    assert (
+        next(g for g in groups if any(p is dense for p in g["params"]))["weight_decay"]
+        == 0.001
+    )

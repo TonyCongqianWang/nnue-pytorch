@@ -202,6 +202,7 @@ class MoERouter(nn.Module):
         balance_rate=0.001,
         balance_warmup_rate=0.01,
         balance_warmup_steps=2048,
+        balance_batch_shrink=0.25,
         balance_smoothing=0.01,
         balance_max_range=4.0,
         reseed_dead_experts=True,
@@ -238,6 +239,7 @@ class MoERouter(nn.Module):
         self.balance_rate = balance_rate
         self.balance_warmup_rate = balance_warmup_rate
         self.balance_warmup_steps = balance_warmup_steps
+        self.balance_batch_shrink = balance_batch_shrink
         self.balance_smoothing = balance_smoothing
         self.balance_max_range = balance_max_range
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
@@ -247,11 +249,10 @@ class MoERouter(nn.Module):
             nn.Parameter(torch.empty(dim, context_dim)) if shared else None
         )
         if self.adapter_down is not None:
-            nn.init.uniform_(
-                self.adapter_down,
-                -1 / math.sqrt(context_dim),
-                1 / math.sqrt(context_dim),
-            )
+            # Output normalization largely cancels this scale. Under Adam,
+            # larger parameters slow angular updates without a separate LR.
+            bound = 4 / math.sqrt(context_dim)
+            nn.init.uniform_(self.adapter_down, -bound, bound)
         self.encoders = nn.ModuleDict()
         if not shared:
             self.encoders["fc0"] = MaterialEncoder(fc0_dim, 4)
@@ -292,6 +293,8 @@ class MoERouter(nn.Module):
                 f"balance_steps_{name}", torch.zeros((), dtype=torch.int64)
             )
             self.register_buffer(f"routing_offset_{name}", torch.zeros(count))
+            self.register_buffer(f"batch_traffic_{name}", torch.zeros(count))
+            self.register_buffer(f"balance_trust_{name}", torch.ones(count))
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
             )
@@ -428,19 +431,32 @@ class MoERouter(nn.Module):
     def update_traffic(self, name, counts):
         getattr(self, f"balance_steps_{name}").add_(1)
         traffic = getattr(self, f"ema_traffic_{name}")
-        traffic.lerp_(
-            counts / counts.sum().clamp_min(1), 1 - self.traffic_momentum(name)
-        )
+        current = counts / counts.sum().clamp_min(1)
+        getattr(self, f"batch_traffic_{name}").copy_(current)
+        traffic.lerp_(current, 1 - self.traffic_momentum(name))
         rate = self.feedback_rate(name)
         offsets = getattr(self, f"routing_offset_{name}")
         # A common offset shift does not change assignments or consume the rate budget.
         offsets.sub_(offsets.mean())
         before = offsets.clone()
         target = self.balance_target(name, traffic)
-        observed = (
-            1 - self.balance_smoothing
-        ) * traffic + self.balance_smoothing / len(traffic)
-        offsets.add_(rate * (target.log() - observed.log()).clamp(-1, 1))
+
+        def smooth(fraction):
+            return (
+                1 - self.balance_smoothing
+            ) * fraction + self.balance_smoothing / len(fraction)
+
+        target_log = smooth(target).log()
+        batch_signal = (target_log - smooth(current).log()).clamp(-1, 1)
+        ema_signal = (target_log - smooth(traffic).log()).clamp(-1, 1)
+        # History controls confidence, never the direction of the batch signal.
+        trust = self.balance_batch_shrink + (1 - self.balance_batch_shrink) * (
+            batch_signal * ema_signal
+        ).clamp_min(0)
+        getattr(self, f"balance_trust_{name}").copy_(trust)
+        signal = batch_signal - batch_signal.mean()
+        signal = signal / signal.abs().max().clamp_min(1)
+        offsets.add_(rate * trust * signal)
         offsets.sub_(offsets.mean())
         span = offsets.max() - offsets.min()
         offsets.mul_((self.balance_max_range / span.clamp_min(1e-12)).clamp(max=1))
@@ -547,6 +563,14 @@ class MoERouter(nn.Module):
                     (context - context.mean(0)).square().mean().sqrt().detach()
                 ),
             }
+            for group in set(groups):
+                ps = [p for p, key in zip(parameters, groups) if key == group]
+                report[f"{group}_parameter_RMS"] = float(
+                    (
+                        sum(p.detach().square().sum() for p in ps)
+                        / sum(p.numel() for p in ps)
+                    ).sqrt()
+                )
             for label, objective in objectives.items():
                 gradients = torch.autograd.grad(
                     objective, parameters, retain_graph=True, allow_unused=True

@@ -60,6 +60,8 @@ class ModelConfig(LayerStacksConfig):
     """Initial offset adjustment limit, tapered linearly to moe_balance_rate."""
     moe_balance_warmup_steps: int = 2048
     """Optimizer steps over which to taper the initial offset feedback rate."""
+    moe_balance_batch_shrink: float = 0.25
+    """Fraction of batch correction retained when traffic EMA does not confirm it."""
     moe_balance_smoothing: float = 0.01
     """Uniform smoothing mass for direct traffic feedback."""
     moe_balance_max_range: float = 4.0
@@ -68,6 +70,8 @@ class ModelConfig(LayerStacksConfig):
     def __post_init__(self):
         if not math.isfinite(self.moe_balance_power) or self.moe_balance_power < 0:
             raise ValueError("MoE balancing power must be finite and nonnegative")
+        if not 0 <= self.moe_balance_batch_shrink <= 1:
+            raise ValueError("MoE batch shrink must be between zero and one")
         if not 0 < self.moe_balance_smoothing < 1:
             raise ValueError("MoE traffic smoothing must be between zero and one")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):

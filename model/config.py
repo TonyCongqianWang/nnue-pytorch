@@ -53,27 +53,17 @@ class ModelConfig(LayerStacksConfig):
     moe_centroid_commitment_cost: float = DEFAULT_CENTROID_COMMITMENT_COST
     """Centroid attraction, averaged within each expert then across all experts."""
     moe_balance_power: float = 0.0
-    """Target traffic proportional to EMA traffic rank ** (-power); zero is uniform."""
-    moe_balance_rate: float = 0.001
-    """Maximum routing-offset adjustment per optimizer step."""
-    moe_balance_warmup_rate: float = 0.01
-    """Initial offset adjustment limit, tapered linearly to moe_balance_rate."""
-    moe_balance_warmup_steps: int = 2048
-    """Optimizer steps over which to taper the initial offset feedback rate."""
-    moe_balance_batch_shrink: float = 0.25
-    """Fraction of batch correction retained when traffic EMA does not confirm it."""
-    moe_balance_smoothing: float = 0.01
-    """Uniform smoothing mass for direct traffic feedback."""
+    """Target traffic proportional to initial global-batch traffic rank ** (-power); zero is uniform."""
+    moe_balance_strength: float = 0.25
+    """Fraction of each batch's traffic gap to close toward the ranked power target."""
     moe_balance_max_range: float = 4.0
     """Maximum difference between routing offsets, in squared-distance units."""
 
     def __post_init__(self):
         if not math.isfinite(self.moe_balance_power) or self.moe_balance_power < 0:
             raise ValueError("MoE balancing power must be finite and nonnegative")
-        if not 0 <= self.moe_balance_batch_shrink <= 1:
-            raise ValueError("MoE batch shrink must be between zero and one")
-        if not 0 < self.moe_balance_smoothing < 1:
-            raise ValueError("MoE traffic smoothing must be between zero and one")
+        if not 0 <= self.moe_balance_strength <= 1:
+            raise ValueError("MoE balancing strength must be between zero and one")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
             raise ValueError(
                 "MoE table counts must be first layer 2–64 and later layers 2–256"
@@ -82,9 +72,6 @@ class ModelConfig(LayerStacksConfig):
             min(
                 self.moe_context_commitment_cost,
                 self.moe_centroid_commitment_cost,
-                self.moe_balance_rate,
-                self.moe_balance_warmup_rate,
-                self.moe_balance_warmup_steps,
                 self.moe_balance_max_range,
                 self.moe_mix_interval,
                 self.moe_fc0_weight_diversity_cost,

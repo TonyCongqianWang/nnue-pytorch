@@ -824,7 +824,7 @@ class MoEDeadExpertReseeder(Callback):
                         f"n={len(indices)} active={int((counts > 0).sum())}/{len(codebook)} "
                         f"effective={float(effective):.3f} top={float(share.max()):.6g} "
                         f"offset_range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:g} "
-                        f"rate={float(router.feedback_rate(name)):.6g} momentum={float(router.traffic_momentum(name)):.6g} "
+                        f"iterations={router.balance_iterations} strength={router.balance_strength:g} momentum={float(router.traffic_momentum(name)):.6g} "
                         f"context_centered_RMS={float((context - context.mean(0)).square().mean().sqrt()):.6g} "
                         f"selected_cos={float(torch.nn.functional.cosine_similarity(context, codebook[assignments]).mean()):.6g}",
                         flush=True,
@@ -1026,17 +1026,24 @@ class MoEDeadExpertReseeder(Callback):
             print(f"[Routing geometry {label}] {geometry}", flush=True)
             target = getattr(router, f"balance_rank_target_{name}")
             adjustment = getattr(router, f"offset_adjustment_{name}")
+            provisional = getattr(router, f"provisional_traffic_{name}")
+            actual = getattr(router, f"batch_traffic_{name}")
+            requested = getattr(router, f"requested_traffic_{name}")
+            rank_mask = provisional[:, None] > provisional[None, :]
+            reversal = (
+                (actual[None, :] - actual[:, None]).clamp_min(0) * rank_mask
+            ).max()
             print(
-                f"[Routing controller {label}] power={router.balance_power:.6g} "
-                f"target_top={100 * float(target[0]):.4f}% target_bottom={100 * float(target[-1]):.4f}% "
-                f"smoothing={router.balance_smoothing:.6g} ema_decay={router.ema_decay:.6g} "
-                f"effective_momentum={float(router.traffic_momentum(name)):.6g} rate={float(router.feedback_rate(name)):.6g} "
+                f"[Routing quantile solver {label}] iterations={router.balance_iterations} strength={router.balance_strength:g} "
+                f"power={router.balance_power:g} ema_decay={router.ema_decay:g} "
+                f"effective_momentum={float(router.traffic_momentum(name)):.6g} "
+                f"power_target_top/bottom={100 * float(target[0]):.4f}%/{100 * float(target[-1]):.4f}% "
                 f"offset_min/max={float(offsets.min()):.6g}/{float(offsets.max()):.6g} "
-                f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:.6g} "
-                f"at_range_limit={bool(offsets.max() - offsets.min() >= 0.999 * router.balance_max_range)} "
+                f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:g} "
                 f"max_adjustment={float(adjustment.abs().max()):.6g} "
-                f"batch_top={float(getattr(router, f'batch_traffic_{name}').max()):.6g} "
-                f"trust_min/max={float(getattr(router, f'balance_trust_{name}').min()):.4g}/{float(getattr(router, f'balance_trust_{name}').max()):.4g}",
+                f"batch_top_before/after={float(provisional.max()):.6g}/{float(actual.max()):.6g} "
+                f"target_L1_before/after={float((provisional - requested).abs().sum()):.6g}/{float((actual - requested).abs().sum()):.6g} "
+                f"max_rank_reversal_pp={100 * float(reversal):.6g}",
                 flush=True,
             )
             for title, values in (

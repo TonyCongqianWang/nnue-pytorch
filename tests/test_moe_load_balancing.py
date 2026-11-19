@@ -40,34 +40,6 @@ def test_commitment_reductions_and_stop_gradients():
     torch.testing.assert_close(centroid, expanded[1])
 
 
-def test_direct_feedback_is_bounded_and_needs_no_softmax(monkeypatch):
-    router = small_router(balance_rate=0.1, balance_max_range=0.2)
-    counts = torch.tensor([100.0, 0.0, 0.0, 0.0])
-    before = router.routing_offset_tail.clone()
-    router.update_traffic("tail", counts)
-    assert router.routing_offset_tail[0] < before[0]
-    assert (router.routing_offset_tail[1:] > before[1:]).all()
-    assert (router.routing_offset_tail - before).abs().max() <= 0.100001
-    # Inspect the range projection directly, without a training loop.
-    router.routing_offset_tail.copy_(torch.tensor([-0.1, 0.1, 0.0, 0.0]))
-    router.update_traffic("tail", counts)
-    assert (
-        router.routing_offset_tail.max() - router.routing_offset_tail.min() <= 0.200001
-    )
-    monkeypatch.setattr(
-        torch.nn.functional,
-        "softmax",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("No balancing softmax")),
-    )
-    *_, total, encoder, centroid = router(torch.arange(4), torch.arange(4))
-    torch.testing.assert_close(total, encoder + centroid)
-    torch.testing.assert_close(total, router.loss_component_sum.sum())
-    assert router.loss_component_names == (
-        "stack_context_commitment",
-        "stack_centroid_commitment",
-    )
-
-
 def test_power_target_and_controller_state_roundtrip():
     router = MoERouter(
         64,
@@ -79,7 +51,7 @@ def test_power_target_and_controller_state_roundtrip():
         balance_power=0.4658379531227075,
     )
     traffic = torch.arange(64, 0, -1.0)
-    target = router.balance_target("tail", traffic)
+    target = router.balance_rank_target_tail
     torch.testing.assert_close(target[0], torch.tensor(4 / 64))
     torch.testing.assert_close(target.sum(), torch.tensor(1.0))
     router.update_traffic("tail", traffic)
@@ -200,7 +172,7 @@ def test_geometric_split_rejects_identical_contexts_without_fake_traffic():
 
 def test_small_compiled_router_forward_and_backward_without_optimizer():
     router = small_router()
-    compiled = torch.compile(router, backend="eager", fullgraph=True)
+    compiled = torch.compile(router, backend="eager")
     *_, loss, _, _ = compiled(torch.arange(4), torch.arange(4))
     grads = torch.autograd.grad(loss, (router.adapter_down, router.codebooks["tail"]))
     assert all(g.isfinite().all() and g.abs().sum() > 0 for g in grads)
@@ -376,13 +348,10 @@ def test_cold_start_does_not_credit_fictitious_uniform_traffic():
     counts[33] = 131072
     router.update_traffic("tail", counts)
     torch.testing.assert_close(router.ema_traffic_tail, counts / counts.sum())
-    assert router.routing_offset_tail[33] < 0
-    assert (router.routing_offset_tail[torch.arange(64) != 33] > 0).all()
     assert router.traffic_momentum("tail") == 0
-    torch.testing.assert_close(router.feedback_rate("tail"), torch.tensor(0.01))
 
 
-def test_momentum_and_feedback_warmup_match_their_definitions():
+def test_bias_corrected_traffic_momentum_matches_its_definition():
     router = small_router()
     numerator = torch.zeros(4)
     for step, counts in enumerate(
@@ -399,14 +368,10 @@ def test_momentum_and_feedback_warmup_match_their_definitions():
             router.ema_traffic_tail, numerator / (1 - 0.99**step)
         )
     router.balance_steps_tail.fill_(2049)
-    torch.testing.assert_close(router.feedback_rate("tail"), torch.tensor(0.001))
     torch.testing.assert_close(router.traffic_momentum("tail"), torch.tensor(0.99))
     other = small_router()
     other.load_state_dict(router.state_dict())
     torch.testing.assert_close(other.balance_steps_tail, router.balance_steps_tail)
-    torch.testing.assert_close(
-        other.feedback_rate("tail"), router.feedback_rate("tail")
-    )
 
 
 def test_narrow_cell_split_can_compete_with_a_nearby_expert():
@@ -477,28 +442,6 @@ def test_early_diagnostics_leave_learning_state_untouched(capsys):
     assert not model.router.validation_context_samples
 
 
-def test_batch_feedback_uses_current_error_and_shrinks_unconfirmed_changes():
-    def feedback(history):
-        router = small_router(balance_warmup_steps=0)
-        router.ema_traffic_tail.copy_(history)
-        # Hold history fixed to isolate the current-batch response.
-        router.traffic_momentum = lambda name: torch.tensor(1.0)
-        router.update_traffic("tail", torch.tensor([100.0, 0.0, 0.0, 0.0]))
-        return router
-
-    confirmed = feedback(torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    unconfirmed = feedback(torch.full((4,), 0.25))
-    torch.testing.assert_close(
-        unconfirmed.routing_offset_tail, 0.25 * confirmed.routing_offset_tail
-    )
-    torch.testing.assert_close(unconfirmed.balance_trust_tail, torch.full((4,), 0.25))
-    torch.testing.assert_close(confirmed.balance_trust_tail, torch.ones(4))
-    assert unconfirmed.routing_offset_tail[0] < 0
-    # A balanced batch needs no correction even if history is still imbalanced.
-    confirmed.update_traffic("tail", torch.ones(4))
-    torch.testing.assert_close(confirmed.offset_adjustment_tail, torch.zeros(4))
-
-
 def test_projection_init_scale_and_router_optimizer_group():
     import math
 
@@ -543,3 +486,132 @@ def test_projection_init_scale_and_router_optimizer_group():
         next(g for g in groups if any(p is dense for p in g["params"]))["weight_decay"]
         == 0.001
     )
+
+
+def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
+    from model.modules.quantile_routing import ITERATIONS, solve_biases
+
+    torch.manual_seed(31)
+    scores = torch.randn(2048, 8) * 0.3 + torch.linspace(0.5, -0.5, 8)
+    ranked = torch.arange(1, 9).float().pow(-0.4658379531227075)
+    ranked /= ranked.sum()
+    result = solve_biases(scores, torch.zeros(8), ranked, 0.25, 4.0)
+    biases, after, before, target = result
+    assert ITERATIONS == 4
+    initial = before / before.sum()
+    order = before.argsort(descending=True, stable=True)
+    torch.testing.assert_close(target[order], 0.75 * initial[order] + 0.25 * ranked)
+    assert (after / after.sum() - target).abs().sum() < (initial - target).abs().sum()
+    assert biases.max() - biases.min() <= 4.000001
+    assert after.sum() == len(scores)
+    untouched = solve_biases(scores, torch.zeros(8), ranked, 0.0, 4.0)
+    torch.testing.assert_close(untouched[0], torch.zeros(8))
+    torch.testing.assert_close(untouched[1], untouched[2])
+    # All iterations are tensor operations, suitable for one root-GPU graph.
+    compiled = torch.compile(solve_biases, backend="eager", fullgraph=True)
+    torch.testing.assert_close(
+        compiled(scores, torch.zeros(8), ranked, 0.25, 4.0), result
+    )
+
+
+def test_quantile_route_records_final_counts_and_uses_corrected_assignments(
+    monkeypatch,
+):
+    router = small_router()
+    monkeypatch.setattr(
+        torch.nn.functional,
+        "softmax",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("No routing softmax")),
+    )
+    ids = torch.arange(64) % 4
+    fc0, tail, total, context_loss, centroid_loss = router(ids, ids)
+    counts = torch.bincount(tail, minlength=4).float()
+    torch.testing.assert_close(router.batch_traffic_tail, counts / counts.sum())
+    torch.testing.assert_close(router.ema_traffic_tail, counts / counts.sum())
+    torch.testing.assert_close(fc0, tail)
+    torch.testing.assert_close(total, context_loss + centroid_loss)
+    torch.testing.assert_close(total, router.loss_component_sum.sum())
+    assert router.balance_steps_tail == 1
+    assert router.requested_traffic_tail.sum().isclose(torch.tensor(1.0))
+
+
+def test_refined_quantiles_resolve_clustered_columns():
+    from model.modules.quantile_routing import column_quantiles
+
+    torch.manual_seed(8)
+    values = torch.randn(2048, 4) * 1e-4 + torch.tensor([0.0, 1.0, -0.2, 2.0])
+    values[:2] += torch.tensor([0.01, 0.05, 0.03, 0.02])
+    fractions = torch.tensor([0.1, 0.3, 0.8, 0.99])
+    expected = torch.stack(
+        [torch.quantile(values[:, i], fractions[i]) for i in range(4)]
+    )
+    actual = column_quantiles(values, fractions)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=4e-6)
+
+
+def test_gather_solver_runs_only_on_root_and_broadcasts_global_result(monkeypatch):
+    from model.modules import quantile_routing as module
+
+    torch.manual_seed(4)
+    parts = [torch.randn(16, 4), torch.randn(16, 4)]
+    rank = [0]
+    calls = []
+    shared = {}
+    original = module.solve_biases
+
+    def solve(scores, *args):
+        assert (
+            rank[0] == 0 and scores.shape == (32, 4) and scores.dtype == torch.float32
+        )
+        calls.append("solve")
+        return original(scores, *args)
+
+    def gather(scores, gather_list, dst):
+        assert dst == 0
+        calls.append(("gather", rank[0]))
+        if rank[0] == 0:
+            for output, part in zip(gather_list, parts):
+                output.copy_(part)
+        else:
+            assert gather_list is None
+
+    def broadcast(result, src):
+        assert src == 0
+        calls.append(("broadcast", rank[0]))
+        if rank[0] == 0:
+            shared["result"] = result.clone()
+        else:
+            result.copy_(shared["result"])
+
+    monkeypatch.setattr(module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(module.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(module.dist, "get_rank", lambda: rank[0])
+    monkeypatch.setattr(module.dist, "gather", gather)
+    monkeypatch.setattr(module.dist, "broadcast", broadcast)
+    monkeypatch.setattr(module, "solve_biases", solve)
+    target = torch.full((4,), 0.25)
+    root, world = module.gather_and_solve(parts[0], torch.zeros(4), target, 0.25, 4.0)
+    rank[0] = 1
+    other, other_world = module.gather_and_solve(
+        parts[1], torch.zeros(4), target, 0.25, 4.0
+    )
+    assert world == other_world == 2
+    torch.testing.assert_close(root, other)
+    assert calls == [
+        ("gather", 0),
+        "solve",
+        ("broadcast", 0),
+        ("gather", 1),
+        ("broadcast", 1),
+    ]
+
+
+def test_constant_margin_quantiles_remain_finite():
+    from model.modules.quantile_routing import column_quantiles, solve_biases
+
+    values = torch.tensor([0.2, -0.1, 0.0, 2.0]).repeat(16, 1)
+    quantiles = column_quantiles(values, torch.tensor([0.1, 0.5, 0.9, 1.0]))
+    torch.testing.assert_close(quantiles, values[0], rtol=0, atol=1e-12)
+    result = solve_biases(values, torch.zeros(4), torch.full((4,), 0.25), 0.25, 4.0)
+    assert result.isfinite().all() and result[1].sum() == 16

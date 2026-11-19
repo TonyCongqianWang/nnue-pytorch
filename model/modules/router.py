@@ -6,6 +6,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
+from .quantile_routing import ITERATIONS, gather_and_solve
+
 
 @contextmanager
 def ieee_matmul_precision():
@@ -199,11 +201,7 @@ class MoERouter(nn.Module):
         context_commitment_cost=DEFAULT_CONTEXT_COMMITMENT_COST,
         centroid_commitment_cost=DEFAULT_CENTROID_COMMITMENT_COST,
         balance_power=0.0,
-        balance_rate=0.001,
-        balance_warmup_rate=0.01,
-        balance_warmup_steps=2048,
-        balance_batch_shrink=0.25,
-        balance_smoothing=0.01,
+        balance_strength=0.25,
         balance_max_range=4.0,
         reseed_dead_experts=True,
         ema_decay=0.99,
@@ -236,11 +234,8 @@ class MoERouter(nn.Module):
         self.context_commitment_cost = context_commitment_cost
         self.centroid_commitment_cost = centroid_commitment_cost
         self.balance_power = balance_power
-        self.balance_rate = balance_rate
-        self.balance_warmup_rate = balance_warmup_rate
-        self.balance_warmup_steps = balance_warmup_steps
-        self.balance_batch_shrink = balance_batch_shrink
-        self.balance_smoothing = balance_smoothing
+        self.balance_iterations = ITERATIONS
+        self.balance_strength = balance_strength
         self.balance_max_range = balance_max_range
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
@@ -294,7 +289,8 @@ class MoERouter(nn.Module):
             )
             self.register_buffer(f"routing_offset_{name}", torch.zeros(count))
             self.register_buffer(f"batch_traffic_{name}", torch.zeros(count))
-            self.register_buffer(f"balance_trust_{name}", torch.ones(count))
+            self.register_buffer(f"provisional_traffic_{name}", torch.zeros(count))
+            self.register_buffer(f"requested_traffic_{name}", torch.zeros(count))
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
             )
@@ -418,52 +414,15 @@ class MoERouter(nn.Module):
             / (1 - self.ema_decay**step).clamp_min(1e-12)
         )
 
-    def feedback_rate(self, name):
-        step = getattr(self, f"balance_steps_{name}")
-        if not self.balance_warmup_steps:
-            return step.new_tensor(self.balance_rate, dtype=torch.float32)
-        fraction = ((step - 1) / self.balance_warmup_steps).clamp(0, 1)
-        return self.balance_warmup_rate + fraction * (
-            self.balance_rate - self.balance_warmup_rate
-        )
-
     @torch.no_grad()
     def update_traffic(self, name, counts):
+        """Record actual corrected global assignments, independently of the solver."""
         getattr(self, f"balance_steps_{name}").add_(1)
-        traffic = getattr(self, f"ema_traffic_{name}")
         current = counts / counts.sum().clamp_min(1)
         getattr(self, f"batch_traffic_{name}").copy_(current)
-        traffic.lerp_(current, 1 - self.traffic_momentum(name))
-        rate = self.feedback_rate(name)
-        offsets = getattr(self, f"routing_offset_{name}")
-        # A common offset shift does not change assignments or consume the rate budget.
-        offsets.sub_(offsets.mean())
-        before = offsets.clone()
-        target = self.balance_target(name, traffic)
-
-        def smooth(fraction):
-            return (
-                1 - self.balance_smoothing
-            ) * fraction + self.balance_smoothing / len(fraction)
-
-        target_log = smooth(target).log()
-        batch_signal = (target_log - smooth(current).log()).clamp(-1, 1)
-        ema_signal = (target_log - smooth(traffic).log()).clamp(-1, 1)
-        # History controls confidence, never the direction of the batch signal.
-        trust = self.balance_batch_shrink + (1 - self.balance_batch_shrink) * (
-            batch_signal * ema_signal
-        ).clamp_min(0)
-        getattr(self, f"balance_trust_{name}").copy_(trust)
-        signal = batch_signal - batch_signal.mean()
-        signal = signal / signal.abs().max().clamp_min(1)
-        offsets.add_(rate * trust * signal)
-        offsets.sub_(offsets.mean())
-        span = offsets.max() - offsets.min()
-        offsets.mul_((self.balance_max_range / span.clamp_min(1e-12)).clamp(max=1))
-        delta = offsets - before
-        delta.mul_((rate / delta.abs().max().clamp_min(1e-12)).clamp(max=1))
-        offsets.copy_(before + delta)
-        getattr(self, f"offset_adjustment_{name}").copy_(delta)
+        getattr(self, f"ema_traffic_{name}").lerp_(
+            current, 1 - self.traffic_momentum(name)
+        )
         getattr(self, f"reseed_observed_{name}").add_(counts)
 
     @torch.no_grad()
@@ -489,16 +448,6 @@ class MoERouter(nn.Module):
         if biased:
             distances = distances - getattr(self, f"routing_offset_{name}")
         return distances
-
-    @torch.no_grad()
-    def balance_target(self, name, traffic):
-        ranked = getattr(self, f"balance_rank_target_{name}")
-        if self.balance_power == 0:
-            return ranked
-        order = torch.argsort(traffic, descending=True, stable=True)
-        target = torch.empty_like(ranked)
-        target[order] = ranked
-        return target
 
     @torch.enable_grad()
     def gradient_diagnostics(self, name, counts, *, model=None, optimizer=None):
@@ -667,17 +616,36 @@ class MoERouter(nn.Module):
 
     def quantize(self, z, codebook, name, *, top_k=1, update=True):
         with ieee_matmul_precision():
-            distances = self.distances(z, codebook, name)
-            indices = distances.argmin(-1)
+            # Dispatch has no backward path. Commitment below still trains both sides.
+            scores = -self.distances(z, codebook, name, biased=False).detach()
+            offsets = getattr(self, f"routing_offset_{name}")
+            if update:
+                result, world = gather_and_solve(
+                    scores,
+                    offsets,
+                    getattr(self, f"balance_rank_target_{name}"),
+                    self.balance_strength,
+                    self.balance_max_range,
+                )
+                new_offsets, counts, before, target = result.unbind(0)
+                getattr(self, f"offset_adjustment_{name}").copy_(new_offsets - offsets)
+                offsets.copy_(new_offsets)
+                getattr(self, f"provisional_traffic_{name}").copy_(
+                    before / before.sum().clamp_min(1)
+                )
+                getattr(self, f"requested_traffic_{name}").copy_(target)
+            else:
+                world = 1
+            biased = scores + offsets
+            indices = biased.argmax(-1)
+            if not update:
+                counts, _ = self.assignment_counts(indices, len(codebook))
             if top_k > 1:
-                alternatives = distances.scatter(1, indices[:, None], float("inf"))
-                ranked = torch.topk(alternatives, top_k - 1, largest=False).indices
+                alternatives = biased.scatter(1, indices[:, None], -float("inf"))
+                ranked = torch.topk(alternatives, top_k - 1).indices
                 routed = torch.cat((indices[:, None], ranked), dim=1)
             else:
                 routed = indices
-            counts, world = self.assignment_counts(
-                indices, len(codebook), synchronize=update
-            )
             context_loss, centroid_loss = self.commitment_losses(
                 z, codebook, indices, counts, world
             )

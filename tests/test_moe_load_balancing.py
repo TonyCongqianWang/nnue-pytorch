@@ -4,6 +4,7 @@ import torch
 from model.modules.router import (
     MOE_BANKS,
     MoERouter,
+    codebook_diversity_loss,
 )
 
 
@@ -279,6 +280,18 @@ def test_rank_power_target_attracts_top_expert_and_resists_collapse():
         assert gradient[missing] < 0
 
 
+def test_codebook_cosine_diversity_penalizes_a_shared_direction():
+    distinct = torch.eye(4)
+    clustered = torch.nn.functional.normalize(
+        torch.cat((0.01 * distinct, torch.ones(4, 1)), dim=1), dim=1
+    ).requires_grad_()
+    torch.testing.assert_close(codebook_diversity_loss(distinct), torch.zeros(()))
+    loss = codebook_diversity_loss(clustered)
+    assert loss > 0.99
+    (gradient,) = torch.autograd.grad(loss, clustered)
+    assert gradient.isfinite().all() and gradient.abs().sum() > 0
+
+
 def test_shared_codebook_is_the_adapter_for_every_layer():
     from model.config import ModelConfig
     from model.modules.layer_stacks import LayerStacks
@@ -312,7 +325,7 @@ def test_shared_codebook_is_the_adapter_for_every_layer():
             torch.nn.functional.linear(codebook[0], layer.bias_adapter),
         )
     _, loss = stacks.training_parameters(codebook, 0.008, (0, 0))
-    torch.testing.assert_close(loss, 0.008 * stacks.l1.centered_diversity(codebook[0]))
+    torch.testing.assert_close(loss, 0.008 * codebook_diversity_loss(codebook[0]))
     (gradient,) = torch.autograd.grad(loss, router.codebooks["tail"])
     assert gradient.abs().sum() > 0 and gradient.isfinite().all()
     indices = torch.arange(4)

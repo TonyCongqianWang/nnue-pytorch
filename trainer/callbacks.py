@@ -1011,7 +1011,7 @@ class MoEDeadExpertReseeder(Callback):
     @staticmethod
     @torch.no_grad()
     def _log_expert_diversity(trainer):
-        from model.modules.router import ieee_matmul_precision
+        from model.modules.router import codebook_diversity_loss, ieee_matmul_precision
 
         from .engine import _unwrap_module
 
@@ -1030,10 +1030,13 @@ class MoEDeadExpertReseeder(Callback):
                 normalized = torch.nn.functional.normalize(centered, dim=1)
                 cosine = normalized @ normalized.T
                 cosine.fill_diagonal_(-torch.inf)
-                loss = cost * stacks.l1.centered_diversity(vectors)
+                raw_cosine = vectors @ vectors.T
+                raw_cosine.fill_diagonal_(-torch.inf)
+                loss = cost * codebook_diversity_loss(vectors)
                 print(
                     f"[Adapter diversity {model.router.bank_label(bank)}] "
                     f"dimension={vectors.shape[1]} weighted_loss={float(loss):.6g} "
+                    f"max_cos={float(raw_cosine.max()):.5f} "
                     f"centered_RMS={float(centered.square().mean().sqrt()):.6g} "
                     f"centered_energy_fraction={float(centered.square().sum() / vectors.square().sum().clamp_min(1e-30)):.6g} "
                     f"centered_max_cos={float(cosine.max()):.5f}",

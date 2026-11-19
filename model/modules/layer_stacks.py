@@ -6,6 +6,7 @@ from .router import (
     CODEBOOK_DIM,
     FC0_CODEBOOK_DIM,
     NUM_FC0_EXPERTS,
+    codebook_diversity_loss,
 )
 
 
@@ -63,12 +64,12 @@ class LayerStacks(nn.Module):
     def training_parameters(self, codebook, adapter_cost, weight_costs):
         parameters, loss = [], 0.0
         # Shared routing and weight generation use the exact same adapter table.
-        # Compute its diversity Gram once, independently of the weight expansions.
+        # Penalize cosine similarity once, independently of the weight expansions.
         vectors = (codebook[0],) if self.shared else codebook
         if adapter_cost:
             loss = (
                 adapter_cost
-                * sum(MoeLinear.centered_diversity(h) for h in vectors)
+                * sum(codebook_diversity_loss(h) for h in vectors)
                 / len(vectors)
             )
         for layers, vectors, weight_cost in zip(

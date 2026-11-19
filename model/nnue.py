@@ -268,6 +268,8 @@ class NNUE(nn.Module):
             self.loss_metrics[name].reset()
         self.model.router.loss_component_sum.zero_()
         self.model.router.loss_component_batches.zero_()
+        self.model.layer_stacks.regularization_sum.zero_()
+        self.model.layer_stacks.regularization_batches.zero_()
 
     def on_validation_epoch_start(self):
         self.optimizer_wrapper.on_validation_epoch_start(self)
@@ -360,9 +362,13 @@ class NNUE(nn.Module):
 
     def train_step(self, batch, current_epoch, global_step):
         _ = current_epoch
-        total_loss, sf_loss, moe_loss, commit_loss, balance_loss = self.compute_loss(
-            batch, global_step, return_details=True
-        )
+        (
+            total_loss,
+            sf_loss,
+            moe_loss,
+            context_commitment_loss,
+            centroid_commitment_loss,
+        ) = self.compute_loss(batch, global_step, return_details=True)
         self.loss_metrics["train_loss_epoch"].update(total_loss.detach())
         self.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
         self.loss_metrics["train_moe_loss_epoch"].update(moe_loss.detach())
@@ -371,8 +377,8 @@ class NNUE(nn.Module):
             "train_loss": total_loss.detach(),
             "sf_loss": sf_loss.detach(),
             "moe_loss": moe_loss.detach(),
-            "commit_loss": commit_loss.detach(),
-            "balance_loss": balance_loss.detach(),
+            "context_commitment_loss": context_commitment_loss.detach(),
+            "centroid_commitment_loss": centroid_commitment_loss.detach(),
         }
 
     @torch.no_grad()
@@ -469,19 +475,27 @@ class NNUE(nn.Module):
             if self.training and getattr(self.model, "moe_loss", None) is not None
             else torch.tensor(0.0, device=sf_loss.device)
         )
-        commit_loss = (
-            self.model.commit_loss
-            if self.training and getattr(self.model, "commit_loss", None) is not None
+        context_commitment_loss = (
+            self.model.context_commitment_loss
+            if self.training
+            and getattr(self.model, "context_commitment_loss", None) is not None
             else torch.tensor(0.0, device=sf_loss.device)
         )
-        balance_loss = (
-            self.model.balance_loss
-            if self.training and getattr(self.model, "balance_loss", None) is not None
+        centroid_commitment_loss = (
+            self.model.centroid_commitment_loss
+            if self.training
+            and getattr(self.model, "centroid_commitment_loss", None) is not None
             else torch.tensor(0.0, device=sf_loss.device)
         )
 
         total_loss = sf_loss + moe_loss
 
         if return_details:
-            return total_loss, sf_loss, moe_loss, commit_loss, balance_loss
+            return (
+                total_loss,
+                sf_loss,
+                moe_loss,
+                context_commitment_loss,
+                centroid_commitment_loss,
+            )
         return total_loss

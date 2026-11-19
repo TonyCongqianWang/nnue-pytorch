@@ -2,6 +2,7 @@ import math
 from contextlib import contextmanager
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
@@ -43,14 +44,15 @@ CONTEXT_DIM = 2048
 CODEBOOK_DIM = 64
 ROUTER_HASH = 0x4D313200
 SHARED_ROUTER_HASH = 0x4D313400
-DEFAULT_COMMITMENT_COST = 0.005 / 2048
+DEFAULT_CONTEXT_COMMITMENT_COST = 0.0002
+DEFAULT_CENTROID_COMMITMENT_COST = 0.0001
 DEFAULT_CODEBOOK_TARGET_NORM = 1.0
 DEFAULT_MIN_RELATIVE_UTILIZATION = 0.064
 MOE_BANKS = ("fc0", "tail")
 MOE_LOSS_COMPONENTS = tuple(
     f"{bank}_{term}"
     for bank in MOE_BANKS
-    for term in ("commitment", "balance", "diversity")
+    for term in ("context_commitment", "centroid_commitment")
 )
 
 
@@ -194,17 +196,14 @@ class MoERouter(nn.Module):
         dim=CODEBOOK_DIM,
         context_dim=None,
         material_states=None,
-        commitment_cost=DEFAULT_COMMITMENT_COST,
-        commitment_context_ratio=0.25,
+        context_commitment_cost=DEFAULT_CONTEXT_COMMITMENT_COST,
+        centroid_commitment_cost=DEFAULT_CENTROID_COMMITMENT_COST,
         balance_power=0.0,
-        fc0_balance_kl_cost=0.001,
-        tail_balance_kl_cost=0.001,
-        fc0_balance_kl_smoothing=0.05,
-        tail_balance_kl_smoothing=0.05,
-        temperature=0.2,
-        diversity_cost=0.01,
+        balance_rate=0.0001,
+        balance_smoothing=0.01,
+        balance_max_range=0.5,
         reseed_dead_experts=True,
-        ema_decay=0.998,
+        ema_decay=0.99,
         codebook_target_norm=1.0,
         shared=False,
     ):
@@ -231,18 +230,12 @@ class MoERouter(nn.Module):
             or (NUM_FC0_MATERIAL_STATES if shared else NUM_MATERIAL_STATES),
         }
         self.num_contexts = self.material_states["tail"] ** 2 * TAIL_GEOMETRY_STATES
-        self.commitment_cost = commitment_cost
-        self.commitment_context_ratio = commitment_context_ratio
+        self.context_commitment_cost = context_commitment_cost
+        self.centroid_commitment_cost = centroid_commitment_cost
         self.balance_power = balance_power
-        self.balance_kl_costs = {
-            "fc0": fc0_balance_kl_cost,
-            "tail": tail_balance_kl_cost,
-        }
-        self.balance_kl_smoothing = {
-            "fc0": fc0_balance_kl_smoothing,
-            "tail": tail_balance_kl_smoothing,
-        }
-        self.temperature, self.diversity_cost = temperature, diversity_cost
+        self.balance_rate = balance_rate
+        self.balance_smoothing = balance_smoothing
+        self.balance_max_range = balance_max_range
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
         context_dim = (context_dim or dim) if shared else dim
@@ -290,15 +283,26 @@ class MoERouter(nn.Module):
                 ranked_target / ranked_target.sum(),
                 persistent=False,
             )
-            self.register_buffer(
-                f"ema_traffic_{name}", torch.full((count,), 1 / count), persistent=False
-            )
-            self.register_buffer(
-                f"ema_soft_{name}", torch.full((count,), 1 / count), persistent=False
-            )
+            self.register_buffer(f"ema_traffic_{name}", torch.full((count,), 1 / count))
+            self.register_buffer(f"routing_offset_{name}", torch.zeros(count))
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
             )
+            self.register_buffer(
+                f"validation_unbiased_{name}", torch.zeros(count, dtype=torch.int64)
+            )
+            self.register_buffer(
+                f"offset_adjustment_{name}", torch.zeros(count), persistent=False
+            )
+            self.register_buffer(
+                f"recent_contexts_{name}",
+                torch.zeros(2048, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"reseed_observed_{name}", torch.zeros(count), persistent=False
+            )
+
             self.register_buffer(
                 f"validation_heavy_{name}",
                 torch.zeros(2, count, len(HEAVY_CATEGORIES), dtype=torch.int64),
@@ -338,6 +342,20 @@ class MoERouter(nn.Module):
         self.lut_margin_samples = [0, 0]
         self.last_reseed_details, self.last_reseed_parents = {}, {}
         self.validation_context_samples = {}
+        self.recent_context_sizes = {name: 0 for name in self.active_banks}
+        self.recent_context_cursors = {name: 0 for name in self.active_banks}
+        self.reseed_history = []
+        self.routing_diagnostics = {}
+
+    def get_extra_state(self):
+        return {
+            "routing_diagnostics": self.routing_diagnostics,
+            "reseed_history": self.reseed_history,
+        }
+
+    def set_extra_state(self, state):
+        self.routing_diagnostics = state["routing_diagnostics"]
+        self.reseed_history = state["reseed_history"]
 
     @property
     def shared_routing(self):
@@ -355,15 +373,79 @@ class MoERouter(nn.Module):
         return tuple(
             f"{self.bank_label(bank)}_{term}"
             for bank in self.active_banks
-            for term in ("commitment", "balance", "diversity")
+            for term in ("context_commitment", "centroid_commitment")
         )
 
-    def commitment_loss(self, context, selected):
-        context_error = (context - selected.detach()).square().sum(-1).mean()
-        codebook_error = (selected - context.detach()).square().sum(-1).mean()
-        return self.commitment_cost * (
-            self.commitment_context_ratio * context_error + codebook_error
+    @staticmethod
+    def assignment_counts(indices, count, synchronize=False):
+        counts = torch.zeros(count, device=indices.device).scatter_add_(
+            0, indices, torch.ones_like(indices, dtype=torch.float32)
         )
+        world = 1
+        if synchronize and dist.is_available() and dist.is_initialized():
+            dist.all_reduce(counts)
+            world = dist.get_world_size()
+        return counts, world
+
+    def commitment_losses(self, context, codebook, indices, counts=None, world=1):
+        selected = codebook[indices]
+        if counts is None:
+            counts, _ = self.assignment_counts(indices, len(codebook))
+        context_error = (context - selected.detach()).square().sum(-1).mean()
+        centroid_error = (selected - context.detach()).square().sum(-1)
+        centroid_error = (centroid_error / counts[indices].clamp_min(1)).sum()
+        return (
+            self.context_commitment_cost * context_error,
+            self.centroid_commitment_cost * world / len(codebook) * centroid_error,
+        )
+
+    @torch.no_grad()
+    def update_traffic(self, name, counts):
+        traffic = getattr(self, f"ema_traffic_{name}")
+        traffic.lerp_(counts / counts.sum().clamp_min(1), 1 - self.ema_decay)
+        offsets = getattr(self, f"routing_offset_{name}")
+        # A common offset shift does not change assignments or consume the rate budget.
+        offsets.sub_(offsets.mean())
+        before = offsets.clone()
+        target = self.balance_target(name, traffic)
+        observed = (
+            1 - self.balance_smoothing
+        ) * traffic + self.balance_smoothing / len(traffic)
+        offsets.add_(self.balance_rate * (target.log() - observed.log()).clamp(-1, 1))
+        offsets.sub_(offsets.mean())
+        span = offsets.max() - offsets.min()
+        offsets.mul_((self.balance_max_range / span.clamp_min(1e-12)).clamp(max=1))
+        delta = offsets - before
+        delta.mul_(
+            (self.balance_rate / delta.abs().max().clamp_min(1e-12)).clamp(max=1)
+        )
+        offsets.copy_(before + delta)
+        getattr(self, f"offset_adjustment_{name}").copy_(delta)
+        getattr(self, f"reseed_observed_{name}").add_(counts)
+
+    @torch.no_grad()
+    def remember_contexts(self, name, contexts):
+        """A small, frequency-weighted ring sample, kept only on rank zero."""
+        table = getattr(self, f"recent_contexts_{name}")
+        n = min(32, len(contexts))
+        sample = contexts[torch.randint(len(contexts), (n,), device=contexts.device)]
+        cursor = self.recent_context_cursors[name]
+        positions = (torch.arange(n, device=contexts.device) + cursor) % len(table)
+        table[positions] = sample
+        self.recent_context_cursors[name] = (cursor + n) % len(table)
+        self.recent_context_sizes[name] = min(
+            len(table), self.recent_context_sizes[name] + n
+        )
+
+    def distances(self, context, codebook, name, *, biased=True):
+        distances = (
+            context.square().sum(-1, keepdim=True)
+            + codebook.square().sum(-1)[None]
+            - 2 * context @ codebook.T
+        )
+        if biased:
+            distances = distances - getattr(self, f"routing_offset_{name}")
+        return distances
 
     @torch.no_grad()
     def balance_target(self, name, traffic):
@@ -375,71 +457,113 @@ class MoERouter(nn.Module):
         target[order] = ranked
         return target
 
-    @staticmethod
-    def traffic_balance_loss(soft_fraction, hard_fraction, smoothing, target=None):
-        traffic = hard_fraction.detach() + (soft_fraction - soft_fraction.detach())
-        if target is None:
-            target = torch.full_like(traffic, 1.0 / len(traffic))
-        target = target.detach()
-        smoothed = (1 - smoothing) * traffic + smoothing / len(traffic)
-        return (target * (target.log() - smoothed.log())).sum()
-
     @torch.enable_grad()
-    def gradient_diagnostics(self, name, counts):
-        """One bounded validation sample; no optimizer or accumulated .grad updates."""
+    def gradient_diagnostics(self, name, counts, *, model=None, optimizer=None):
+        """Bounded validation-only diagnostics; never populate parameter .grad."""
         sample = self.validation_context_samples.get(name)
-        if sample is None or not counts.sum():
+        if sample is None:
             return None
         with torch.inference_mode(False), ieee_matmul_precision():
             context = self.get_context_vector(sample.clone(), name)
             codebook = self.normalized_codebook(name)
-            distances = (
-                context.square().sum(-1, keepdim=True)
-                + codebook.square().sum(-1)[None]
-                - 2 * context @ codebook.T
-            )
-            selected = codebook[distances.argmin(-1)]
-            commitment = self.commitment_loss(context, selected)
-            hard = counts.detach().to(context.device, context.dtype)
-            hard = hard / hard.sum()
-            soft = F.softmax(-distances / max(self.temperature, 1e-4), -1).mean(0)
-            balance = self.balance_kl_costs[name] * self.traffic_balance_loss(
-                soft,
-                hard,
-                self.balance_kl_smoothing[name],
-                self.balance_target(name, getattr(self, f"ema_traffic_{name}")),
+            indices = self.distances(context, codebook, name).argmin(-1)
+            context_loss, centroid_loss = self.commitment_losses(
+                context, codebook, indices
             )
             parameters = list(self.encoders[name].parameters())
+            groups = ["embedding"] * len(parameters)
             if name == "tail":
                 parameters.extend((self.king.weight, self.wings.weight))
+                groups.extend(("embedding", "embedding"))
             if self.shared_routing:
                 parameters.append(self.adapter_down)
+                groups.append("projection")
             parameters.append(self.codebooks[name])
-            scale = 1.0 / len(self.active_banks)
-            gradients = []
-            for objective in (commitment, balance):
-                gs = torch.autograd.grad(
-                    scale * objective, parameters, retain_graph=True
+            groups.append("codebook")
+            scale = 1 / len(self.active_banks)
+            objectives = {
+                "context": context_loss * scale,
+                "centroid": centroid_loss * scale,
+            }
+            if model is not None:
+                objectives["cosine"] = (
+                    model.adapter_diversity_cost
+                    * scale
+                    * codebook_diversity_loss(codebook)
                 )
-                gradients.append(
+                gram = codebook.new_zeros(())
+                for layer, bank, weight_cost in zip(
+                    model.layer_stacks.dense_layers(),
+                    ("tail" if self.shared_routing else "fc0", "tail", "tail"),
                     (
-                        torch.stack([g.square().sum() for g in gs[:-1]]).sum().sqrt(),
-                        gs[-1].norm(),
-                    )
-                )
-            return {
+                        model.weight_diversity_costs[0],
+                        model.weight_diversity_costs[1] / 2,
+                        model.weight_diversity_costs[1] / 2,
+                    ),
+                ):
+                    if bank == name and weight_cost:
+                        weight, _ = layer.get_all_weights_and_biases(codebook)
+                        gram = gram + weight_cost * layer.centered_diversity(
+                            weight.reshape(layer.count, -1)
+                        )
+                if gram.requires_grad:
+                    objectives["weight_gram"] = gram
+            report = {
                 "sample_n": len(sample),
                 "distance_l2": float(
-                    (context - selected).square().sum(-1).mean().detach()
+                    (context - codebook[indices]).square().sum(-1).mean().detach()
                 ),
                 "selected_cos": float(
-                    F.cosine_similarity(context, selected).mean().detach()
+                    F.cosine_similarity(context, codebook[indices]).mean().detach()
                 ),
-                "commitment_encoder_grad": float(gradients[0][0]),
-                "commitment_codebook_grad": float(gradients[0][1]),
-                "balance_encoder_grad": float(gradients[1][0]),
-                "balance_codebook_grad": float(gradients[1][1]),
+                "context_centered_RMS": float(
+                    (context - context.mean(0)).square().mean().sqrt().detach()
+                ),
             }
+            for label, objective in objectives.items():
+                gradients = torch.autograd.grad(
+                    objective, parameters, retain_graph=True, allow_unused=True
+                )
+                for group in set(groups):
+                    gs = [
+                        g
+                        for g, key in zip(gradients, groups)
+                        if key == group and g is not None
+                    ]
+                    if gs:
+                        energy = sum(g.square().sum() for g in gs)
+                        report[f"{label}_{group}_norm"] = float(energy.sqrt())
+                        report[f"{label}_{group}_RMS"] = float(
+                            (energy / sum(g.numel() for g in gs)).sqrt()
+                        )
+            if optimizer is not None:
+                for group in set(groups):
+                    scales, epsilons = [], []
+                    for parameter, key in zip(parameters, groups):
+                        if key != group:
+                            continue
+                        state = optimizer.state.get(parameter, {})
+                        if "exp_avg_sq" not in state:
+                            continue
+                        config = next(
+                            g
+                            for g in optimizer.param_groups
+                            if any(p is parameter for p in g["params"])
+                        )
+                        step = state["step"]
+                        rms = (
+                            state["exp_avg_sq"] / (1 - config["betas"][1] ** step)
+                        ).sqrt()
+                        scales.append(rms.flatten())
+                        epsilons.append(torch.full_like(rms.flatten(), config["eps"]))
+                    if scales:
+                        rms, eps = torch.cat(scales), torch.cat(epsilons)
+                        report[f"adam_{group}_RMS"] = float(rms.square().mean().sqrt())
+                        report[f"adam_{group}_below_epsilon"] = float(
+                            (rms < eps).float().mean()
+                        )
+            self.routing_diagnostics[name] = report
+            return report
 
     def normalized_codebook(self, name):
         source = "tail" if self.shared_routing else name
@@ -462,7 +586,7 @@ class MoERouter(nn.Module):
                 name,
                 self.codebooks[name],
                 getattr(self, f"ema_traffic_{name}"),
-                getattr(self, f"ema_soft_{name}"),
+                getattr(self, f"routing_offset_{name}"),
                 normalized,
             )
 
@@ -490,131 +614,161 @@ class MoERouter(nn.Module):
                 )
         return normalized
 
-    def quantize(
-        self,
-        z: torch.Tensor,
-        codebook: torch.Tensor,
-        num_experts: int,
-        temperature: float | None = None,
-        traffic_ema: torch.Tensor | None = None,
-        soft_ema: torch.Tensor | None = None,
-        *,
-        top_k: int = 1,
-        smoothing: float = 0.05,
-        balance_target=None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def quantize(self, z, codebook, name, *, top_k=1, update=True):
         with ieee_matmul_precision():
-            z_sq = torch.sum(z**2, dim=-1, keepdim=True)
-            c_sq = torch.sum(codebook**2, dim=-1).unsqueeze(0)
-            dot = torch.matmul(z, codebook.t())
-            distances = z_sq + c_sq - 2.0 * dot
-
-            indices = torch.argmin(distances, dim=-1)
+            distances = self.distances(z, codebook, name)
+            indices = distances.argmin(-1)
             if top_k > 1:
                 alternatives = distances.scatter(1, indices[:, None], float("inf"))
                 ranked = torch.topk(alternatives, top_k - 1, largest=False).indices
                 routed = torch.cat((indices[:, None], ranked), dim=1)
             else:
                 routed = indices
-            z_q = F.embedding(indices, codebook)
-
-            # Mean over positions, summing coordinates makes the coefficient
-            # independent of the router embedding dimension.
-            commit_loss = self.commitment_loss(z, z_q)
-
-            # Load balancing auxiliary loss
-            k_exp = num_experts
-            one_hot = F.one_hot(indices, num_classes=k_exp).float()
-            f = one_hot.mean(dim=0).detach()
-
-            temperature = self.temperature if temperature is None else temperature
-            scaled_neg_dist = -distances / max(temperature, 1e-4)
-            probs = F.softmax(scaled_neg_dist, dim=-1)
-            prob_mean = probs.mean(dim=0)
-
-            # The forward value measures hard wins; soft probabilities supply
-            # the gradient. Mix in uniform traffic to bound the slope at zero.
-            balance_loss = self.traffic_balance_loss(
-                prob_mean, f, smoothing, balance_target
+            counts, world = self.assignment_counts(
+                indices, len(codebook), synchronize=update
             )
-            if traffic_ema is not None and soft_ema is not None:
-                with torch.no_grad():
-                    traffic_ema.lerp_(f, 1.0 - self.ema_decay)
-                    soft_ema.lerp_(prob_mean.detach(), 1.0 - self.ema_decay)
-
-            # Straight-Through Estimator
-            z_q_ste = z + (z_q - z).detach()
-
-            return routed, z_q_ste, commit_loss, balance_loss
+            context_loss, centroid_loss = self.commitment_losses(
+                z, codebook, indices, counts, world
+            )
+            if update:
+                self.update_traffic(name, counts)
+            return routed, context_loss, centroid_loss
 
     @torch.no_grad()
     def reseed_dead_experts_from_traffic(
-        self,
-        temperature: float = 0.5,
-        perturbation_scale: float = 0.02,
-        min_relative_utilization: float = DEFAULT_MIN_RELATIVE_UTILIZATION,
-    ) -> tuple[list[int], list[int]]:
-        """Split active cells only after sustained low hard-traffic EMA.
-
-        No context enumeration or LUT construction is needed. A temporarily
-        empty Voronoi cell must not bypass the traffic EMA's grace period.
-        """
-        self.last_reseed_parents = {}
-        self.last_reseed_details = {}
-        reseeded = []
-        for name, codebook, traffic, _, _ in self.banks():
-            count = traffic.numel()
-            floor = min_relative_utilization / count
-            dead = torch.nonzero(traffic < floor, as_tuple=True)[0]
-            self.last_reseed_details[name] = {
-                idx: {"traffic": value, "floor": floor}
-                for idx, value in zip(dead.tolist(), traffic[dead].cpu().tolist())
-            }
-            parents = {}
-            modified = set()
-            if dead.numel():
-                # Prefer busy cells; fall back to any healthy cell. Never use
-                # a dead child as a donor if all traffic estimates are zero.
-                active = torch.nonzero(
-                    (traffic >= 1.0 / count - 1e-5)
-                    & (traffic >= floor)
-                    & (traffic > 0),
-                    as_tuple=True,
-                )[0]
-                if not active.numel():
-                    active = torch.nonzero(
-                        (traffic >= floor) & (traffic > 0), as_tuple=True
-                    )[0]
-                if active.numel():
-                    logits = traffic[active].clamp_min(1e-8).log() / max(
-                        temperature, 1e-4
+        self, temperature=0.5, min_relative_utilization=DEFAULT_MIN_RELATIVE_UTILIZATION
+    ):
+        """Fit proposed splits to a bounded context sample and verify their traffic."""
+        self.last_reseed_parents, self.last_reseed_details = {}, {}
+        modified_banks = []
+        with ieee_matmul_precision():
+            for name, raw, traffic, offsets, codebook in self.banks():
+                floor = min_relative_utilization / len(raw)
+                dead = (traffic < floor).nonzero().flatten().tolist()
+                parents, details, modified = {}, {}, set()
+                rejected = {"insufficient_sample": 0, "no_spread": 0, "empty_split": 0}
+                size = self.recent_context_sizes[name]
+                if dead and size:
+                    contexts = self.get_context_vector(
+                        getattr(self, f"recent_contexts_{name}")[:size], name
                     )
-                    probabilities = F.softmax(logits, dim=0)
-                    for child in dead.tolist():
-                        donor_pos = torch.multinomial(probabilities, 1).item()
-                        donor = active[donor_pos].item()
-                        direction = torch.randn_like(codebook[child])
-                        offset = (
-                            direction
-                            / direction.norm().clamp_min(1e-8)
-                            * perturbation_scale
+                    assignments = self.distances(contexts, codebook, name).argmin(-1)
+                    for child in dead:
+                        candidates = (
+                            (traffic >= max(floor, 1 / len(raw))).nonzero().flatten()
                         )
-                        original = codebook[donor].clone()
-                        codebook[child].copy_(original + offset)
-                        codebook[donor].copy_(original - offset)
-                        traffic[donor] *= 0.5
-                        traffic[child] = traffic[donor]
-                        probabilities[donor_pos] *= 0.5
-                        probabilities /= probabilities.sum().clamp_min(1e-8)
+                        available = torch.zeros(
+                            len(raw), device=raw.device
+                        ).scatter_add_(
+                            0,
+                            assignments,
+                            torch.ones_like(assignments, dtype=torch.float32),
+                        )
+                        # A new child must establish traffic before becoming a donor.
+                        if parents:
+                            available[list(parents)] = 0
+                        candidates = candidates[available[candidates] >= 8]
+                        if not len(candidates):
+                            rejected["insufficient_sample"] += 1
+                            continue
+                        logits = traffic[candidates].clamp_min(1e-12).log() / max(
+                            temperature, 1e-4
+                        )
+                        donor = int(candidates[torch.multinomial(logits.softmax(0), 1)])
+                        mask = (assignments == donor) | (assignments == child)
+                        points = contexts[mask]
+                        centered = points - points.mean(0)
+                        direction = centered[centered.square().sum(-1).argmax()]
+                        for _ in range(2):
+                            direction = centered.T @ (
+                                centered @ F.normalize(direction, dim=0)
+                            )
+                        if direction.norm() < 1e-8:
+                            rejected["no_spread"] += 1
+                            continue
+                        projection = centered @ F.normalize(direction, dim=0)
+                        side = projection > projection.median()
+                        if not side.any() or side.all():
+                            rejected["no_spread"] += 1
+                            continue
+                        centers = F.normalize(
+                            torch.stack((points[~side].mean(0), points[side].mean(0))),
+                            dim=1,
+                        )
+                        midpoint = F.normalize(centers.sum(0), dim=0)
+                        axis = F.normalize(centers[1] - centers[0], dim=0)
+                        angle = (
+                            torch.acos((centers[0] * centers[1]).sum().clamp(-1, 1)) / 2
+                        ).clamp(0.05, 0.25)
+                        proposed = torch.stack(
+                            (
+                                midpoint * angle.cos() - axis * angle.sin(),
+                                midpoint * angle.cos() + axis * angle.sin(),
+                            )
+                        )
+                        pair = torch.tensor([donor, child], device=raw.device)
+                        old_raw, old_offsets = raw[pair].clone(), offsets[pair].clone()
+                        raw[pair] = proposed * raw[donor].norm().clamp_min(1e-6)
+                        offsets[child] = offsets[donor]
+                        cb = self.normalized_codebook(name)
+                        trial = self.distances(contexts, cb, name)
+                        winners = trial.argmin(-1)
+                        n_parent = int(((winners == donor) & mask).sum())
+                        n_child = int(((winners == child) & mask).sum())
+                        minimum = max(2, int(len(points) * 0.1))
+                        if min(
+                            n_parent, n_child
+                        ) < minimum or n_parent + n_child < 0.8 * len(points):
+                            raw[pair], offsets[pair] = old_raw, old_offsets
+                            rejected["empty_split"] += 1
+                            continue
+                        old_traffic = float(traffic[child])
+                        mass = traffic[donor] + traffic[child]
+                        share = n_child / (n_parent + n_child)
+                        traffic[child], traffic[donor] = (
+                            mass * share,
+                            mass * (1 - share),
+                        )
                         parents[child] = donor
+                        details[child] = {
+                            "traffic": old_traffic,
+                            "floor": floor,
+                            "sample_parent": n_parent,
+                            "sample_child": n_child,
+                            "child_share": share,
+                            "separation_radians": float(2 * angle),
+                        }
                         modified.update((child, donor))
-            self.last_reseed_parents[name] = parents
-            reseeded.append(sorted(modified))
-
-        if any(reseeded):
-            self.lut_valid = False
-            self.lut_margin_valid = False
-        return tuple(reseeded)
+                        assignments = winners
+                elif dead:
+                    rejected["insufficient_sample"] = len(dead)
+                self.last_reseed_parents[name], self.last_reseed_details[name] = (
+                    parents,
+                    details,
+                )
+                observed = getattr(self, f"reseed_observed_{name}")
+                previous = getattr(self, f"previous_reseed_children_{name}", [])
+                recovery = observed / observed.sum().clamp_min(1)
+                summary = {
+                    "bank": self.bank_label(name),
+                    "accepted": len(parents),
+                    "rejected": rejected,
+                    "previous_children": len(previous),
+                    "previous_zero": int((observed[previous] == 0).sum())
+                    if previous
+                    else 0,
+                    "previous_min_share": float(recovery[previous].min())
+                    if previous
+                    else 0.0,
+                }
+                self.reseed_history.append(summary)
+                self.reseed_history = self.reseed_history[-256:]
+                setattr(self, f"previous_reseed_children_{name}", list(parents))
+                observed.zero_()
+                modified_banks.append(sorted(modified))
+        if any(modified_banks):
+            self.lut_valid = self.lut_margin_valid = False
+        return tuple(modified_banks)
 
     @torch.no_grad()
     def update_lookup_table(self, chunk_size=8192):
@@ -625,14 +779,13 @@ class MoERouter(nn.Module):
                 row = MOE_BANKS.index(name)
                 table = self.fc0_lut if name == "fc0" else self.lut
                 cb = self.normalized_codebook(name)
-                cb_sq = cb.square().sum(-1)[None]
                 margins = []
                 for start in range(0, len(table), chunk_size):
                     index = torch.arange(
                         start, min(start + chunk_size, len(table)), device=table.device
                     )
                     z = self.get_context_vector(index, name)
-                    dist = z.square().sum(-1, keepdim=True) + cb_sq - 2 * z @ cb.T
+                    dist = self.distances(z, cb, name)
                     table[start : start + len(index)] = dist.argmin(-1)
                     if self.collect_lut_diagnostics:
                         near = dist[::256].topk(2, largest=False).values
@@ -706,20 +859,12 @@ class MoERouter(nn.Module):
         if self.training:
             ids, parts = [], []
             bank_scale = 1.0 / len(self.active_banks)
-            for name, _, hard, soft, cb in self.banks(codebook):
+            for name, _, _, _, cb in self.banks(codebook):
                 context = c_fc0 if name == "fc0" else c_tail
                 z = self.get_context_vector(context, name)
                 top_k = (2 if name == "fc0" else 4) if mix_experts else 1
-                index, _, commit, balance = self.quantize(
-                    z,
-                    cb,
-                    len(cb),
-                    self.temperature,
-                    hard,
-                    soft,
-                    top_k=top_k,
-                    smoothing=self.balance_kl_smoothing[name],
-                    balance_target=self.balance_target(name, hard),
+                index, context_loss, centroid_loss = self.quantize(
+                    z, cb, name, top_k=top_k
                 )
                 if mix_experts:
                     with torch.no_grad():
@@ -727,15 +872,7 @@ class MoERouter(nn.Module):
                         counts = getattr(self, f"runner_up_counts_{name}")
                         counts.scatter_add_(0, alternates, torch.ones_like(alternates))
                 ids.append(index)
-                parts.extend(
-                    [
-                        commit * bank_scale,
-                        balance * self.balance_kl_costs[name] * bank_scale,
-                        codebook_diversity_loss(cb) * self.diversity_cost * bank_scale
-                        if self.diversity_cost
-                        else commit.new_zeros(()),
-                    ]
-                )
+                parts.extend((context_loss * bank_scale, centroid_loss * bank_scale))
             parts = torch.stack(parts)
             with torch.no_grad():
                 self.loss_component_sum[-len(parts) :].add_(parts.detach())
@@ -743,7 +880,7 @@ class MoERouter(nn.Module):
             self.lut_valid = self.lut_margin_valid = False
             if self.shared_routing:
                 ids = ids * 2
-            return *ids, parts.sum(), parts[::3].sum(), parts[1::3].sum()
+            return *ids, parts.sum(), parts[::2].sum(), parts[1::2].sum()
         fc0_table, tail_table = self.get_lookup_table()
         tail = tail_table[c_tail.long()]
         ids = (tail if self.shared_routing else fc0_table[c_fc0.long()], tail)
@@ -755,6 +892,13 @@ class MoERouter(nn.Module):
                     self.validation_context_samples[name] = (
                         context[:512].detach().clone()
                     )
+            with ieee_matmul_precision():
+                for name, context in zip(self.active_banks, contexts):
+                    z = self.get_context_vector(context[:512], name)
+                    cb = self.normalized_codebook(name)
+                    unbiased = self.distances(z, cb, name, biased=False).argmin(-1)
+                    counts = getattr(self, f"validation_unbiased_{name}")
+                    counts.scatter_add_(0, unbiased, torch.ones_like(unbiased))
             for name, index in zip(self.active_banks, active_ids):
                 count = getattr(self, f"validation_counts_{name}")
                 count.scatter_add_(0, index, torch.ones_like(index, dtype=count.dtype))

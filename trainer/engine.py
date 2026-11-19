@@ -228,10 +228,14 @@ class SimpleTrainer:
                 context_them,
                 *unwrapped.forward_options(self.global_step),
             )
-            total_loss, sf_loss, moe_loss, commit_loss, balance_loss = (
-                unwrapped.compute_loss_with_scorenet(
-                    scorenet, batch, self.global_step, return_details=True
-                )
+            (
+                total_loss,
+                sf_loss,
+                moe_loss,
+                context_commitment_loss,
+                centroid_commitment_loss,
+            ) = unwrapped.compute_loss_with_scorenet(
+                scorenet, batch, self.global_step, return_details=True
             )
             unwrapped.loss_metrics["train_loss_epoch"].update(total_loss.detach())
             unwrapped.loss_metrics["train_sf_loss_epoch"].update(sf_loss.detach())
@@ -241,8 +245,8 @@ class SimpleTrainer:
                 "train_loss": total_loss.detach(),
                 "sf_loss": sf_loss.detach(),
                 "moe_loss": moe_loss.detach(),
-                "commit_loss": commit_loss.detach(),
-                "balance_loss": balance_loss.detach(),
+                "context_commitment_loss": context_commitment_loss.detach(),
+                "centroid_commitment_loss": centroid_commitment_loss.detach(),
             }
         else:
             outputs = self.model.train_step(batch, self.current_epoch, self.global_step)
@@ -458,10 +462,19 @@ class SimpleTrainer:
             key = f"train_moe_{name}_epoch"
             epoch_metrics[key] = value
             self.callback_metrics[key] = value
-        self._log_metrics(
-            epoch_metrics,
-            step=self.global_step,
+        stacks = _unwrap_module(self.model).model.layer_stacks
+        regularization = (
+            stacks.regularization_sum / stacks.regularization_batches.clamp_min(1)
         )
+        if self.world_size > 1:
+            dist.all_reduce(regularization)
+            regularization /= self.world_size
+        for name, value in zip(
+            ("cosine_diversity", "weight_gram_fc0", "weight_gram_tail"), regularization
+        ):
+            key = f"train_moe_{name}_epoch"
+            self.callback_metrics[key] = epoch_metrics[key] = float(value)
+        self._log_metrics(epoch_metrics, step=self.global_step)
 
         if hasattr(self.model, "on_train_epoch_end"):
             self.model.on_train_epoch_end()

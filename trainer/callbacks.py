@@ -775,7 +775,7 @@ class MoEDeadExpertReseeder(Callback):
 
     def __init__(
         self,
-        reseed_interval: int = 1024,
+        reseed_interval: int = 256,
         temperature: float = 0.5,
         min_relative_utilization: float = 0.064,
     ):
@@ -787,6 +787,19 @@ class MoEDeadExpertReseeder(Callback):
     @torch.no_grad()
     @torch.compiler.disable
     def on_train_batch_end(self, trainer, batch=None, batch_idx=None, outputs=None):
+        from .engine import _unwrap_module
+
+        router = _unwrap_module(trainer.model).model.router
+        if batch is not None and getattr(trainer, "rank", 0) == 0:
+            first, full = batch[-2:]
+            if router.shared_routing:
+                from model.modules.router import TAIL_GEOMETRY_STATES
+
+                full = first * TAIL_GEOMETRY_STATES + full % TAIL_GEOMETRY_STATES
+            for name, contexts in zip(
+                router.active_banks, (full,) if router.shared_routing else (first, full)
+            ):
+                router.remember_contexts(name, contexts)
         if (
             self.reseed_interval > 0
             and trainer.global_step > 0
@@ -820,6 +833,8 @@ class MoEDeadExpertReseeder(Callback):
                 if (parent_tensor >= 0).any():
                     if is_ddp:
                         dist.broadcast(parameter.data, src=0)
+                        dist.broadcast(getattr(router, f"ema_traffic_{name}"), src=0)
+                        dist.broadcast(getattr(router, f"routing_offset_{name}"), src=0)
                     self._copy_optimizer_state(
                         trainer.optimizer, parameter, parent_tensor
                     )
@@ -830,6 +845,27 @@ class MoEDeadExpertReseeder(Callback):
                         f"{self._reseed_description(router, name, parents)}",
                         flush=True,
                     )
+            if rank == 0:
+                for summary in router.reseed_history[-len(router.active_banks) :]:
+                    if (
+                        summary["accepted"]
+                        or summary["previous_children"]
+                        or any(summary["rejected"].values())
+                    ):
+                        print(
+                            f"[Step {trainer.global_step}] Split diagnostics: {summary}",
+                            flush=True,
+                        )
+
+    @torch.compiler.disable
+    def on_validation_batch_start(self, trainer, batch, batch_idx):
+        if (
+            batch_idx == 0
+            and getattr(trainer, "rank", 0) == 0
+            and not getattr(trainer, "sanity_checking", False)
+            and len(batch) == 8
+        ):
+            self.diagnostic_batch = tuple(t[:128].detach().clone() for t in batch)
 
     @torch.compiler.disable
     def on_validation_epoch_start(self, trainer):
@@ -838,6 +874,7 @@ class MoEDeadExpertReseeder(Callback):
         router = _unwrap_module(trainer.model).model.router
         for name, _, _, _, _ in router.banks():
             getattr(router, f"validation_counts_{name}").zero_()
+            getattr(router, f"validation_unbiased_{name}").zero_()
             getattr(router, f"validation_heavy_{name}").zero_()
         final = getattr(trainer, "validation_is_final", False)
         router.validation_joint_counts.zero_()
@@ -865,6 +902,7 @@ class MoEDeadExpertReseeder(Callback):
             # One small collective per table, only at the final boundary.
             for name in router.active_banks:
                 dist.all_reduce(getattr(router, f"validation_counts_{name}"))
+                dist.all_reduce(getattr(router, f"validation_unbiased_{name}"))
                 dist.all_reduce(getattr(router, f"validation_heavy_{name}"))
             if not router.shared_routing:
                 dist.all_reduce(router.validation_joint_counts)
@@ -873,11 +911,11 @@ class MoEDeadExpertReseeder(Callback):
             return
         scope = "all ranks" if final else "rank-0"
         # These are training snapshots. Validation must not alter traffic EMAs.
-        for name, _, hard, soft, codebook in router.banks():
+        for name, _, hard, offsets, codebook in router.banks():
             label = router.bank_label(name)
             row = MOE_BANKS.index(name)
             hard = hard.detach().float().cpu()
-            soft = soft.detach().float().cpu()
+            offsets = offsets.detach().float().cpu()
             with ieee_matmul_precision():
                 normalized = torch.nn.functional.normalize(codebook, dim=1)
                 cosine = normalized @ normalized.T
@@ -891,11 +929,11 @@ class MoEDeadExpertReseeder(Callback):
             effective = torch.exp(-(mass * mass.clamp_min(1e-12).log()).sum()).item()
             lowest = hard.argsort()[:5].tolist()
             tail = "; ".join(
-                f"{i}:hard={hard[i]:.3g},K*hard={k * hard[i]:.3g},soft={soft[i]:.3g}"
+                f"{i}:hard={hard[i]:.3g},K*hard={k * hard[i]:.3g},offset={offsets[i]:.3g}"
                 for i in lowest
             )
             print(
-                f"[Routing {label}, rank-0 training EMA] min={hard.min():.3g} "
+                f"[Routing {label}, synchronized training EMA] min={hard.min():.3g} "
                 f"max={hard.max():.3g} effective={effective:.1f}/{k} "
                 f"below_floor={int((hard < floor).sum())} floor={floor:.3g}; lowest [{tail}]",
                 flush=True,
@@ -922,20 +960,44 @@ class MoEDeadExpertReseeder(Callback):
                 )
             print(f"[Routing geometry {label}] {geometry}", flush=True)
             target = getattr(router, f"balance_rank_target_{name}")
+            adjustment = getattr(router, f"offset_adjustment_{name}")
             print(
-                f"[Routing KL target {label}] power={router.balance_power:.6g} "
-                f"top={100 * float(target[0]):.4f}% "
-                f"bottom={100 * float(target[-1]):.4f}% "
-                f"coefficient={router.balance_kl_costs[name]:.6g} "
-                f"smoothing={router.balance_kl_smoothing[name]:.6g}",
+                f"[Routing controller {label}] power={router.balance_power:.6g} "
+                f"target_top={100 * float(target[0]):.4f}% target_bottom={100 * float(target[-1]):.4f}% "
+                f"smoothing={router.balance_smoothing:.6g} ema_decay={router.ema_decay:.6g} "
+                f"offset_min/max={float(offsets.min()):.6g}/{float(offsets.max()):.6g} "
+                f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:.6g} "
+                f"at_range_limit={bool(offsets.max() - offsets.min() >= 0.999 * router.balance_max_range)} "
+                f"max_adjustment={float(adjustment.abs().max()):.6g}",
                 flush=True,
             )
+            for title, values in (
+                ("biased", counts),
+                (
+                    "unbiased sample",
+                    getattr(router, f"validation_unbiased_{name}").cpu(),
+                ),
+            ):
+                share = values.double() / values.sum().clamp_min(1)
+                effective = (-(share * share.clamp_min(1e-30).log()).sum()).exp()
+                print(
+                    f"[Validation traffic {label}, {title}, {scope}] n={int(values.sum())} "
+                    f"effective={float(effective):.2f} zero={int((values == 0).sum())} "
+                    f"top={float(share.max()):.6g} bottom_decile={float(share.sort().values[: max(1, k // 10)].sum()):.6g} "
+                    f"below_1pct_uniform={int((k * share < 0.01).sum())} below_10pct_uniform={int((k * share < 0.1).sum())}",
+                    flush=True,
+                )
             diagnostics = router.gradient_diagnostics(
-                name, getattr(router, f"validation_counts_{name}")
+                name,
+                getattr(router, f"validation_counts_{name}"),
+                model=_unwrap_module(trainer.model).model
+                if hasattr(_unwrap_module(trainer.model).model, "layer_stacks")
+                else None,
+                optimizer=getattr(trainer, "optimizer", None),
             )
             if diagnostics is not None:
                 print(
-                    f"[Routing gradients {label}, rank-0 sample, validation hard shares] "
+                    f"[Routing gradients {label}, rank-0 sample] "
                     + ", ".join(
                         f"{key}={value:.6g}" for key, value in diagnostics.items()
                     ),
@@ -952,12 +1014,18 @@ class MoEDeadExpertReseeder(Callback):
                         flush=True,
                     )
                     runner_ups.zero_()
+        self._log_task_gradient(trainer)
         self._log_expert_diversity(trainer)
         if final:
             self._save_final_routing(trainer, router)
         terms = [
             f"{name}={trainer.callback_metrics[f'train_moe_{name}_epoch']:.3g}"
-            for name in router.loss_component_names
+            for name in (
+                *router.loss_component_names,
+                "cosine_diversity",
+                "weight_gram_fc0",
+                "weight_gram_tail",
+            )
             if f"train_moe_{name}_epoch" in trainer.callback_metrics
         ]
         if terms:
@@ -970,39 +1038,55 @@ class MoEDeadExpertReseeder(Callback):
             detail = router.last_reseed_details[name][child]
             descriptions.append(
                 f"{child}<-{parent} (low EMA; "
-                f"traffic={detail['traffic']:.3g}, floor={detail['floor']:.3g})"
+                f"traffic={detail['traffic']:.3g}, floor={detail['floor']:.3g}; "
+                f"sample={detail['sample_parent']}/{detail['sample_child']}, "
+                f"child_share={detail['child_share']:.3g}, separation={detail['separation_radians']:.3g}rad)"
             )
         return "; ".join(descriptions)
 
     def _copy_optimizer_state(self, optimizer, param, parent_tensor):
-        """Copies optimizer momentum and second moments from parent to child for reseeded experts.
-
-        The parent cell retains its momentum buffers intact.
-        """
+        """Keep Adam scaling, but discard inherited drift for both split vectors."""
         if optimizer is None:
             return
-        state = optimizer.state.get(param, None)
-        if state is None:
-            return
+        state = optimizer.state.get(param, {})
         children = torch.nonzero(parent_tensor >= 0).flatten()
-        for child_idx in children:
-            parent_idx = parent_tensor[child_idx]
-            for key in ("exp_avg", "exp_avg_sq"):
-                if key in state and state[key] is not None:
-                    state[key][child_idx].copy_(state[key][parent_idx])
+        donors = parent_tensor[children]
+        if "exp_avg_sq" in state:
+            state["exp_avg_sq"][children] = state["exp_avg_sq"][donors].clone()
+        if "exp_avg" in state:
+            state["exp_avg"].index_fill_(0, torch.cat((children, donors)).unique(), 0)
 
-    def _reset_optimizer_state(self, optimizer, param, reseeded_indices):
-        if optimizer is None:
+    @torch.enable_grad()
+    def _log_task_gradient(self, trainer):
+        """One small validation forward, with no optimizer or accumulated gradients."""
+        from .engine import _unwrap_module
+
+        if not hasattr(self, "diagnostic_batch"):
             return
-        state = optimizer.state.get(param, None)
-        if state is None:
-            return
-        idx_tensor = torch.tensor(
-            reseeded_indices, device=param.device, dtype=torch.long
-        )
-        for key in ("exp_avg", "exp_avg_sq"):
-            if key in state and state[key] is not None:
-                state[key].index_fill_(0, idx_tensor, 0.0)
+        nnue = _unwrap_module(trainer.model)
+        router = nnue.model.router
+        with torch.inference_mode(False):
+            # Bypass the compiled full-model wrapper for this different batch shape.
+            model = _unwrap_module(nnue.model)
+            batch = self.diagnostic_batch
+            score = model(
+                *batch[:4], *batch[-2:], *nnue.forward_options(trainer.global_step)
+            )
+            loss = nnue.compute_loss_with_scorenet(score, batch, trainer.global_step)
+            parameters = [router.codebooks[name] for name in router.active_banks]
+            gradients = torch.autograd.grad(loss, parameters, allow_unused=True)
+            for name, gradient in zip(router.active_banks, gradients):
+                if gradient is not None:
+                    stats = {
+                        "task_codebook_norm": float(gradient.norm()),
+                        "task_codebook_RMS": float(gradient.square().mean().sqrt()),
+                    }
+                    router.routing_diagnostics.setdefault(name, {}).update(stats)
+                    print(
+                        f"[Task gradients {router.bank_label(name)}, n={len(batch[0])}] {stats}",
+                        flush=True,
+                    )
+        del self.diagnostic_batch
 
     def on_train_start(self, trainer):
         if trainer.rank == 0:

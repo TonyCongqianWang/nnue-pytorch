@@ -55,7 +55,12 @@ def write_export_diagnostics(model, path):
     if layers.l1.is_coalesced:
         raise ValueError("Export diagnostics require an uncoalesced checkpoint")
 
-    report = {"projections": {}, "routers": {}, "generators": {}}
+    report = {
+        "projections": {},
+        "routers": {},
+        "generators": {},
+        "recent_splits": router.reseed_history,
+    }
     names = ("FC0", "FC1", "readout")
     print("[Export diagnostics] Weight expansions centered along the adapter axis")
     if router.shared_routing:
@@ -91,8 +96,20 @@ def write_export_diagnostics(model, path):
             "balance_rank_targets": getattr(router, f"balance_rank_target_{bank}")
             .cpu()
             .tolist(),
-            "commitment_cost": router.commitment_cost,
-            "commitment_context_ratio": router.commitment_context_ratio,
+            "context_commitment_cost": router.context_commitment_cost,
+            "centroid_commitment_cost": router.centroid_commitment_cost,
+            "routing_offsets": getattr(router, f"routing_offset_{bank}").cpu().tolist(),
+            "traffic_ema": getattr(router, f"ema_traffic_{bank}").cpu().tolist(),
+            "unbiased_sample_counts": getattr(router, f"validation_unbiased_{bank}")
+            .cpu()
+            .tolist(),
+            "controller": {
+                "rate": router.balance_rate,
+                "smoothing": router.balance_smoothing,
+                "max_range": router.balance_max_range,
+                "ema_decay": router.ema_decay,
+            },
+            "gradient_diagnostics": router.routing_diagnostics.get(bank, {}),
             "zero": zero,
             "heavy_categories": HEAVY_CATEGORIES,
             "heavy_counts_stm_opp": getattr(router, f"validation_heavy_{bank}")

@@ -26,6 +26,10 @@ class LayerStacks(nn.Module):
         if config.L2 < 4 or config.L2 % 2 or config.L3 != config.L2:
             raise ValueError("MoE8 requires equal even hidden widths, at least four")
         self.count, self.quantization = count, quantization
+        self.register_buffer("regularization_sum", torch.zeros(3), persistent=False)
+        self.register_buffer(
+            "regularization_batches", torch.zeros(()), persistent=False
+        )
         direct = getattr(config, "moe_fc0_direct", False)
         self.shared = shared = getattr(config, "moe_shared_router", False)
         self.l1 = MoeLinear(
@@ -63,6 +67,7 @@ class LayerStacks(nn.Module):
 
     def training_parameters(self, codebook, adapter_cost, weight_costs):
         parameters, loss = [], 0.0
+        terms = [codebook[0].new_zeros(()) for _ in range(3)]
         # Shared routing and weight generation use the exact same adapter table.
         # Penalize cosine similarity once, independently of the weight expansions.
         vectors = (codebook[0],) if self.shared else codebook
@@ -72,8 +77,9 @@ class LayerStacks(nn.Module):
                 * sum(codebook_diversity_loss(h) for h in vectors)
                 / len(vectors)
             )
-        for layers, vectors, weight_cost in zip(
-            ((self.l1,), (self.l2, self.output)), codebook, weight_costs
+        terms[0] = loss if adapter_cost else terms[0]
+        for bank_index, (layers, vectors, weight_cost) in enumerate(
+            zip(((self.l1,), (self.l2, self.output)), codebook, weight_costs)
         ):
             for layer in layers:
                 if not (adapter_cost or weight_cost):
@@ -83,9 +89,14 @@ class LayerStacks(nn.Module):
                 parameters.append(params)
                 if weight_cost:
                     matrix = params[0].reshape(layer.count, -1)
-                    loss = loss + (
+                    weight_loss = (
                         weight_cost / len(layers)
                     ) * layer.centered_diversity(matrix)
+                    terms[bank_index + 1] = terms[bank_index + 1] + weight_loss
+                    loss = loss + weight_loss
+        with torch.no_grad():
+            self.regularization_sum.add_(torch.stack(terms).detach())
+            self.regularization_batches.add_(1)
         return tuple(parameters), loss
 
     def forward(

@@ -99,6 +99,6 @@ def test_nonzero_rank_joins_final_count_collectives(monkeypatch):
 
     monkeypatch.setattr("trainer.callbacks.dist.all_reduce", reduce)
     callback.on_validation_epoch_end(trainer)
-    assert len(calls) == 5
+    assert len(calls) == 7
     assert int(r.validation_counts_fc0[0]) == 40_000_002
     assert not r.collect_lut_diagnostics and not r.collect_joint_diagnostics

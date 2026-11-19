@@ -46,14 +46,11 @@ class NNUEModel(nn.Module):
             fc0_dim=config.moe_fc0_codebook_dim,
             dim=config.moe_tail_codebook_dim,
             context_dim=config.moe_context_dim,
-            fc0_balance_kl_cost=config.moe_fc0_balance_kl_cost,
-            tail_balance_kl_cost=config.moe_tail_balance_kl_cost,
-            fc0_balance_kl_smoothing=config.moe_fc0_balance_kl_smoothing,
-            tail_balance_kl_smoothing=config.moe_tail_balance_kl_smoothing,
-            commitment_cost=config.moe_commitment_cost,
-            commitment_context_ratio=config.moe_commitment_context_ratio,
-            diversity_cost=config.moe_weight_diversity_cost,
-            temperature=config.moe_weight_temperature,
+            context_commitment_cost=config.moe_context_commitment_cost,
+            centroid_commitment_cost=config.moe_centroid_commitment_cost,
+            balance_rate=config.moe_balance_rate,
+            balance_smoothing=config.moe_balance_smoothing,
+            balance_max_range=config.moe_balance_max_range,
             balance_power=config.moe_balance_power,
         )
         self.layer_stacks = LayerStacks(
@@ -68,7 +65,7 @@ class NNUEModel(nn.Module):
             self.layer_stacks.l1.zero_expert_mean_at_init(
                 self.router.normalized_codebook("fc0")
             )
-        self.commit_loss: torch.Tensor | None = None
+        self.context_commitment_loss: torch.Tensor | None = None
 
         self.weight_clipping = self.quantization.generate_weight_clipping_config(self)
 
@@ -158,8 +155,8 @@ class NNUEModel(nn.Module):
             e1_w,
             e2_w,
             moe_loss,
-            commit_loss,
-            balance_loss,
+            context_commitment_loss,
+            centroid_commitment_loss,
         ) = self.router(
             c_us,
             c_them,
@@ -178,8 +175,8 @@ class NNUEModel(nn.Module):
             )
             moe_loss = moe_loss + diversity
         self.moe_loss = moe_loss
-        self.commit_loss = commit_loss
-        self.balance_loss = balance_loss
+        self.context_commitment_loss = context_commitment_loss
+        self.centroid_commitment_loss = centroid_commitment_loss
 
         l0_ = self.forward_ft(
             us,

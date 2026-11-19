@@ -9,7 +9,8 @@ from .modules import FeatureConfig, LayerStacksConfig
 from .modules.router import (
     CODEBOOK_DIM,
     CONTEXT_DIM,
-    DEFAULT_COMMITMENT_COST,
+    DEFAULT_CENTROID_COMMITMENT_COST,
+    DEFAULT_CONTEXT_COMMITMENT_COST,
     FC0_CODEBOOK_DIM,
     NUM_FC0_EXPERTS,
     NUM_WEIGHT_EXPERTS,
@@ -39,7 +40,7 @@ class ModelConfig(LayerStacksConfig):
     moe_fc0_direct: bool = False
     """Train direct expert weights and biases for FC0, or for the whole stack with shared routing."""
     moe_adapter_diversity_cost: float = 0.0
-    """Penalty on concentration of centered shared adapter/codebook variance."""
+    """Mean squared cosine similarity between distinct normalized adapter/codebook vectors."""
     moe_fc0_weight_diversity_cost: float = 0.0
     """Additional penalty on centered generated FC0 weights before clipping and QAT."""
     moe_tail_weight_diversity_cost: float = 0.0
@@ -47,49 +48,34 @@ class ModelConfig(LayerStacksConfig):
     moe_fc0_zero_mean_init: bool = False
     """Start generated FC0 weights at zero expert mean."""
 
-    moe_fc0_balance_kl_cost: float = 0.0005
-    """FC0 coefficient for KL from uniform to smoothed hard top-1 traffic."""
-    moe_tail_balance_kl_cost: float = 0.001
-    """Tail coefficient for KL from uniform to smoothed hard top-1 traffic."""
-    moe_fc0_balance_kl_smoothing: float = 0.05
-    """Uniform smoothing mass for FC0 hard-traffic KL."""
-    moe_tail_balance_kl_smoothing: float = 0.05
-    """Uniform smoothing mass for tail hard-traffic KL."""
-
-    moe_commitment_cost: float = DEFAULT_COMMITMENT_COST
-    """Coefficient for mean per-position squared L2 commitment distance."""
-    moe_commitment_context_ratio: float = 0.25
-    """Context-to-codebook attraction relative to codebook-to-context attraction."""
-
-    moe_weight_diversity_cost: float = 0.0
-    """Weight-router codebook diversity coefficient."""
+    moe_context_commitment_cost: float = DEFAULT_CONTEXT_COMMITMENT_COST
+    """Context attraction, averaged over positions using summed squared L2 distance."""
+    moe_centroid_commitment_cost: float = DEFAULT_CENTROID_COMMITMENT_COST
+    """Centroid attraction, averaged within each expert then across all experts."""
     moe_balance_power: float = 0.0
-    """Target hard traffic proportional to EMA traffic rank ** (-power); zero is uniform."""
-    moe_weight_temperature: float = 0.2
-    """Weight-router balancing softmax temperature."""
+    """Target traffic proportional to EMA traffic rank ** (-power); zero is uniform."""
+    moe_balance_rate: float = 0.0001
+    """Maximum routing-offset adjustment per optimizer step."""
+    moe_balance_smoothing: float = 0.01
+    """Uniform smoothing mass for direct traffic feedback."""
+    moe_balance_max_range: float = 0.5
+    """Maximum difference between routing offsets, in squared-distance units."""
 
     def __post_init__(self):
         if not math.isfinite(self.moe_balance_power) or self.moe_balance_power < 0:
             raise ValueError("MoE balancing power must be finite and nonnegative")
-        if not all(
-            0 < value < 1
-            for value in (
-                self.moe_fc0_balance_kl_smoothing,
-                self.moe_tail_balance_kl_smoothing,
-            )
-        ):
-            raise ValueError("MoE KL smoothing must be between zero and one")
+        if not 0 < self.moe_balance_smoothing < 1:
+            raise ValueError("MoE traffic smoothing must be between zero and one")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
             raise ValueError(
                 "MoE table counts must be first layer 2–64 and later layers 2–256"
             )
         if (
             min(
-                self.moe_commitment_cost,
-                self.moe_commitment_context_ratio,
-                self.moe_weight_diversity_cost,
-                self.moe_fc0_balance_kl_cost,
-                self.moe_tail_balance_kl_cost,
+                self.moe_context_commitment_cost,
+                self.moe_centroid_commitment_cost,
+                self.moe_balance_rate,
+                self.moe_balance_max_range,
                 self.moe_mix_interval,
                 self.moe_fc0_weight_diversity_cost,
                 self.moe_tail_weight_diversity_cost,

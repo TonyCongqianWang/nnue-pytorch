@@ -60,6 +60,8 @@ class ModelConfig(LayerStacksConfig):
     """Maximum correction strength for experts with persistently low EMA traffic."""
     moe_balance_ema_smoothing: float = 0.01
     """Uniform smoothing of EMA traffic when calculating KL-gradient recovery weights."""
+    moe_offset_ema_decay: float = 0.9
+    """Decay of running routing offsets used exclusively for validation and export."""
     moe_balance_max_range: float = 4.0
     """Maximum difference between routing offsets, in squared-distance units."""
 
@@ -70,6 +72,8 @@ class ModelConfig(LayerStacksConfig):
             raise ValueError(
                 "MoE balancing strengths must satisfy 0 <= baseline <= maximum <= 1"
             )
+        if not 0 <= self.moe_offset_ema_decay < 1:
+            raise ValueError("MoE offset EMA decay must be in [0, 1)")
         if not 0 < self.moe_balance_ema_smoothing <= 1:
             raise ValueError("MoE balancing EMA smoothing must be in (0, 1]")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):

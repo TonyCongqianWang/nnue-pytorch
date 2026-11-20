@@ -98,7 +98,10 @@ def write_export_diagnostics(model, path):
             .tolist(),
             "context_commitment_cost": router.context_commitment_cost,
             "centroid_commitment_cost": router.centroid_commitment_cost,
-            "routing_offsets": getattr(router, f"routing_offset_{bank}").cpu().tolist(),
+            "routing_offsets": getattr(router, f"running_offset_{bank}").cpu().tolist(),
+            "training_routing_offsets": getattr(router, f"routing_offset_{bank}")
+            .cpu()
+            .tolist(),
             "traffic_ema": getattr(router, f"ema_traffic_{bank}").cpu().tolist(),
             "unbiased_sample_counts": getattr(router, f"validation_unbiased_{bank}")
             .cpu()
@@ -127,6 +130,7 @@ def write_export_diagnostics(model, path):
                 "effective_momentum": float(router.traffic_momentum(bank)),
                 "max_range": router.balance_max_range,
                 "ema_decay": router.ema_decay,
+                "offset_ema_decay": router.offset_ema_decay,
             },
             "gradient_diagnostics": router.routing_diagnostics.get(bank, {}),
             "zero": zero,

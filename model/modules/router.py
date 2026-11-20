@@ -205,6 +205,7 @@ class MoERouter(nn.Module):
         balance_max_strength=0.75,
         balance_ema_smoothing=0.01,
         balance_max_range=4.0,
+        offset_ema_decay=0.9,
         reseed_dead_experts=True,
         ema_decay=0.99,
         codebook_target_norm=1.0,
@@ -241,6 +242,7 @@ class MoERouter(nn.Module):
         self.balance_max_strength = balance_max_strength
         self.balance_ema_smoothing = balance_ema_smoothing
         self.balance_max_range = balance_max_range
+        self.offset_ema_decay = offset_ema_decay
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
         context_dim = (context_dim or dim) if shared else dim
@@ -292,6 +294,7 @@ class MoERouter(nn.Module):
                 f"balance_steps_{name}", torch.zeros((), dtype=torch.int64)
             )
             self.register_buffer(f"routing_offset_{name}", torch.zeros(count))
+            self.register_buffer(f"running_offset_{name}", torch.zeros(count))
             self.register_buffer(f"batch_traffic_{name}", torch.zeros(count))
             self.register_buffer(f"provisional_traffic_{name}", torch.zeros(count))
             self.register_buffer(f"requested_traffic_{name}", torch.zeros(count))
@@ -447,14 +450,15 @@ class MoERouter(nn.Module):
             len(table), self.recent_context_sizes[name] + n
         )
 
-    def distances(self, context, codebook, name, *, biased=True):
+    def distances(self, context, codebook, name, *, biased=True, inference=False):
         distances = (
             context.square().sum(-1, keepdim=True)
             + codebook.square().sum(-1)[None]
             - 2 * context @ codebook.T
         )
         if biased:
-            distances = distances - getattr(self, f"routing_offset_{name}")
+            prefix = "running_offset" if inference else "routing_offset"
+            distances = distances - getattr(self, f"{prefix}_{name}")
         return distances
 
     @torch.enable_grad()
@@ -466,7 +470,7 @@ class MoERouter(nn.Module):
         with torch.inference_mode(False), ieee_matmul_precision():
             context = self.get_context_vector(sample.clone(), name)
             codebook = self.normalized_codebook(name)
-            indices = self.distances(context, codebook, name).argmin(-1)
+            indices = self.distances(context, codebook, name, inference=True).argmin(-1)
             context_loss, centroid_loss = self.commitment_losses(
                 context, codebook, indices
             )
@@ -645,6 +649,10 @@ class MoERouter(nn.Module):
                 getattr(self, f"balance_normalization_{name}").copy_(normalization[0])
                 getattr(self, f"offset_adjustment_{name}").copy_(new_offsets - offsets)
                 offsets.copy_(new_offsets)
+                # BatchNorm-style running mean: zero initialization, no bias correction.
+                getattr(self, f"running_offset_{name}").lerp_(
+                    new_offsets, 1 - self.offset_ema_decay
+                )
                 getattr(self, f"provisional_traffic_{name}").copy_(
                     before / before.sum().clamp_min(1)
                 )
@@ -775,6 +783,7 @@ class MoERouter(nn.Module):
                             "child_share": share,
                             "separation_radians": float(2 * angle),
                         }
+                        getattr(self, f"running_offset_{name}")[pair] = offsets[pair]
                         modified.update((child, donor))
                         assignments = winners
                 elif dead:
@@ -822,7 +831,7 @@ class MoERouter(nn.Module):
                         start, min(start + chunk_size, len(table)), device=table.device
                     )
                     z = self.get_context_vector(index, name)
-                    dist = self.distances(z, cb, name)
+                    dist = self.distances(z, cb, name, inference=True)
                     table[start : start + len(index)] = dist.argmin(-1)
                     if self.collect_lut_diagnostics:
                         near = dist[::256].topk(2, largest=False).values

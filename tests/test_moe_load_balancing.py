@@ -55,6 +55,7 @@ def test_power_target_and_controller_state_roundtrip():
     torch.testing.assert_close(target[0], torch.tensor(4 / 64))
     torch.testing.assert_close(target.sum(), torch.tensor(1.0))
     router.update_traffic("tail", traffic)
+    router.running_offset_tail.copy_(torch.linspace(-0.3, 0.3, 64))
     router.routing_diagnostics["tail"] = {"context_RMS": 0.001}
     other = MoERouter(
         64,
@@ -67,26 +68,37 @@ def test_power_target_and_controller_state_roundtrip():
     )
     other.load_state_dict(router.state_dict())
     torch.testing.assert_close(other.routing_offset_tail, router.routing_offset_tail)
+    torch.testing.assert_close(other.running_offset_tail, router.running_offset_tail)
     torch.testing.assert_close(other.ema_traffic_tail, router.ema_traffic_tail)
     assert other.routing_diagnostics == router.routing_diagnostics
 
 
 def test_frozen_offsets_match_lut_and_unbiased_validation():
     router = small_router()
-    router.routing_offset_tail.copy_(torch.tensor([0.3, -0.1, -0.1, -0.1]))
+    router.routing_offset_tail.copy_(torch.tensor([10.0, 0.0, 0.0, 0.0]))
+    router.running_offset_tail.copy_(torch.tensor([0.0, 10.0, 0.0, 0.0]))
     router.eval()
     router.collect_lut_diagnostics = True
     contexts = torch.tensor([0, 1, 41, 159])
     before = router.routing_offset_tail.clone()
     ema = router.ema_traffic_tail.clone()
+    running = router.running_offset_tail.clone()
     router.get_lookup_table()
     expected = router.distances(
-        router.get_context_vector(contexts), router.codebook[0], "tail"
+        router.get_context_vector(contexts), router.codebook[0], "tail", inference=True
     ).argmin(-1)
     first = contexts // 40
     full = contexts % 40
     fc0, tail, *_ = router(first, full)
     torch.testing.assert_close(tail, expected)
+    assert (tail == 1).all()
+    assert (
+        router.distances(
+            router.get_context_vector(contexts), router.codebook[0], "tail"
+        ).argmin(-1)
+        == 0
+    ).all()
+    torch.testing.assert_close(router.running_offset_tail, running)
     torch.testing.assert_close(fc0, tail)
     assert router.validation_counts_tail.sum() == 4
     assert router.validation_unbiased_tail.sum() == 4
@@ -130,6 +142,9 @@ def test_geometric_splits_conserve_measured_mass_and_reset_drift(shared):
     from trainer.callbacks import MoEDeadExpertReseeder
 
     router = split_router(shared=shared)
+    for name in router.active_banks:
+        getattr(router, f"routing_offset_{name}").fill_(0.3)
+        getattr(router, f"running_offset_{name}").fill_(-0.7)
     state = {}
     for _, raw, *_ in router.banks():
         state[raw] = {
@@ -147,6 +162,10 @@ def test_geometric_splits_conserve_measured_mass_and_reset_drift(shared):
     MoEDeadExpertReseeder().on_train_batch_end(trainer)
     for name, raw, traffic, *_ in router.banks():
         assert router.last_reseed_parents[name] == {1: 0}
+        torch.testing.assert_close(
+            getattr(router, f"running_offset_{name}"),
+            getattr(router, f"routing_offset_{name}"),
+        )
         detail = router.last_reseed_details[name][1]
         ratio = detail["sample_child"] / (
             detail["sample_child"] + detail["sample_parent"]
@@ -681,3 +700,19 @@ def test_ema_recovery_weights_and_global_normalization():
     assert recovered_alpha[-1] > 0.74
     # No backward path is used by the actual routing controller.
     assert not target.requires_grad
+
+
+def test_running_offsets_use_batchnorm_style_mean_without_bias_correction():
+    router = small_router(offset_ema_decay=0.9)
+    assert router.running_offset_tail.count_nonzero() == 0
+    with torch.no_grad():
+        codebook = router.codebook[0]
+        z = torch.nn.functional.normalize(torch.randn(64, 8), dim=1)
+        router.quantize(z, codebook, "tail")
+        first = router.routing_offset_tail.clone()
+        torch.testing.assert_close(router.running_offset_tail, 0.1 * first)
+        router.quantize(z.flip(0), codebook, "tail")
+        second = router.routing_offset_tail.clone()
+        torch.testing.assert_close(
+            router.running_offset_tail, 0.9 * 0.1 * first + 0.1 * second
+        )

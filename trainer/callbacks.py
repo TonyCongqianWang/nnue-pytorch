@@ -900,6 +900,7 @@ class MoEDeadExpertReseeder(Callback):
                         dist.broadcast(parameter.data, src=0)
                         dist.broadcast(getattr(router, f"ema_traffic_{name}"), src=0)
                         dist.broadcast(getattr(router, f"routing_offset_{name}"), src=0)
+                        dist.broadcast(getattr(router, f"running_offset_{name}"), src=0)
                     self._copy_optimizer_state(
                         trainer.optimizer, parameter, parent_tensor
                     )
@@ -1012,6 +1013,13 @@ class MoEDeadExpertReseeder(Callback):
                 f"[Validation routing {label}, {scope}] active={int((counts > 0).sum())}/{k} "
                 f"effective={observed_effective:.1f} min={observed.min():.3g} max={observed.max():.3g} "
                 f"n={int(counts.sum())} min_count={int(counts.min())}",
+                flush=True,
+            )
+            running = getattr(router, f"running_offset_{name}").detach().cpu()
+            print(
+                f"[Inference offsets {label}] decay={router.offset_ema_decay:g} "
+                f"min/max={float(running.min()):.6g}/{float(running.max()):.6g} "
+                f"max_difference_from_batch={float((running - offsets).abs().max()):.6g}",
                 flush=True,
             )
             geometry = f"codebook_max_cos={max_cosine:.5f} pair={pair}"

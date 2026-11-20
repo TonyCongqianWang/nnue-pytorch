@@ -52,6 +52,7 @@ class NNUEModel(nn.Module):
             balance_max_strength=config.moe_balance_max_strength,
             balance_ema_smoothing=config.moe_balance_ema_smoothing,
             balance_max_range=config.moe_balance_max_range,
+            offset_ema_decay=config.moe_offset_ema_decay,
             balance_power=config.moe_balance_power,
         )
         self.layer_stacks = LayerStacks(

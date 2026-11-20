@@ -106,6 +106,14 @@ def write_export_diagnostics(model, path):
             "controller": {
                 "iterations": router.balance_iterations,
                 "strength": router.balance_strength,
+                "max_strength": router.balance_max_strength,
+                "ema_smoothing": router.balance_ema_smoothing,
+                "shrinkage": getattr(router, f"balance_shrinkage_{bank}")
+                .cpu()
+                .tolist(),
+                "normalization": float(
+                    getattr(router, f"balance_normalization_{bank}")
+                ),
                 "last_batch_traffic": getattr(router, f"batch_traffic_{bank}")
                 .cpu()
                 .tolist(),

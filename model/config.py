@@ -55,15 +55,23 @@ class ModelConfig(LayerStacksConfig):
     moe_balance_power: float = 0.0
     """Target traffic proportional to initial global-batch traffic rank ** (-power); zero is uniform."""
     moe_balance_strength: float = 0.25
-    """Fraction of each batch's traffic gap to close toward the ranked power target."""
+    """Baseline fraction of the batch traffic gap to close toward the power target."""
+    moe_balance_max_strength: float = 0.75
+    """Maximum correction strength for experts with persistently low EMA traffic."""
+    moe_balance_ema_smoothing: float = 0.01
+    """Uniform smoothing of EMA traffic when calculating KL-gradient recovery weights."""
     moe_balance_max_range: float = 4.0
     """Maximum difference between routing offsets, in squared-distance units."""
 
     def __post_init__(self):
         if not math.isfinite(self.moe_balance_power) or self.moe_balance_power < 0:
             raise ValueError("MoE balancing power must be finite and nonnegative")
-        if not 0 <= self.moe_balance_strength <= 1:
-            raise ValueError("MoE balancing strength must be between zero and one")
+        if not 0 <= self.moe_balance_strength <= self.moe_balance_max_strength <= 1:
+            raise ValueError(
+                "MoE balancing strengths must satisfy 0 <= baseline <= maximum <= 1"
+            )
+        if not 0 < self.moe_balance_ema_smoothing <= 1:
+            raise ValueError("MoE balancing EMA smoothing must be in (0, 1]")
         if not (2 <= self.moe_fc0_experts <= 64 and 2 <= self.moe_tail_experts <= 256):
             raise ValueError(
                 "MoE table counts must be first layer 2–64 and later layers 2–256"

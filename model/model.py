@@ -49,6 +49,8 @@ class NNUEModel(nn.Module):
             context_commitment_cost=config.moe_context_commitment_cost,
             centroid_commitment_cost=config.moe_centroid_commitment_cost,
             balance_strength=config.moe_balance_strength,
+            balance_max_strength=config.moe_balance_max_strength,
+            balance_ema_smoothing=config.moe_balance_ema_smoothing,
             balance_max_range=config.moe_balance_max_range,
             balance_power=config.moe_balance_power,
         )

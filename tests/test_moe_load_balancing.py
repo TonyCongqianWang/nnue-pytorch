@@ -495,8 +495,17 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
     scores = torch.randn(2048, 8) * 0.3 + torch.linspace(0.5, -0.5, 8)
     ranked = torch.arange(1, 9).float().pow(-0.4658379531227075)
     ranked /= ranked.sum()
-    result = solve_biases(scores, torch.zeros(8), ranked, 0.25, 4.0)
-    biases, after, before, target = result
+    result = solve_biases(
+        scores,
+        torch.zeros(8),
+        ranked,
+        torch.full_like(ranked, 1 / len(ranked)),
+        0.25,
+        0.25,
+        0.01,
+        4.0,
+    )
+    biases, after, before, target, _shrinkage, _normalization = result
     assert ITERATIONS == 4
     initial = before / before.sum()
     order = before.argsort(descending=True, stable=True)
@@ -504,13 +513,32 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
     assert (after / after.sum() - target).abs().sum() < (initial - target).abs().sum()
     assert biases.max() - biases.min() <= 4.000001
     assert after.sum() == len(scores)
-    untouched = solve_biases(scores, torch.zeros(8), ranked, 0.0, 4.0)
+    untouched = solve_biases(
+        scores,
+        torch.zeros(8),
+        ranked,
+        torch.full_like(ranked, 1 / len(ranked)),
+        0.0,
+        0.0,
+        0.01,
+        4.0,
+    )
     torch.testing.assert_close(untouched[0], torch.zeros(8))
     torch.testing.assert_close(untouched[1], untouched[2])
     # All iterations are tensor operations, suitable for one root-GPU graph.
     compiled = torch.compile(solve_biases, backend="eager", fullgraph=True)
     torch.testing.assert_close(
-        compiled(scores, torch.zeros(8), ranked, 0.25, 4.0), result
+        compiled(
+            scores,
+            torch.zeros(8),
+            ranked,
+            torch.full_like(ranked, 1 / len(ranked)),
+            0.25,
+            0.25,
+            0.01,
+            4.0,
+        ),
+        result,
     )
 
 
@@ -591,10 +619,12 @@ def test_gather_solver_runs_only_on_root_and_broadcasts_global_result(monkeypatc
     monkeypatch.setattr(module.dist, "broadcast", broadcast)
     monkeypatch.setattr(module, "solve_biases", solve)
     target = torch.full((4,), 0.25)
-    root, world = module.gather_and_solve(parts[0], torch.zeros(4), target, 0.25, 4.0)
+    root, world = module.gather_and_solve(
+        parts[0], torch.zeros(4), target, target, 0.25, 0.75, 0.01, 4.0
+    )
     rank[0] = 1
     other, other_world = module.gather_and_solve(
-        parts[1], torch.zeros(4), target, 0.25, 4.0
+        parts[1], torch.zeros(4), target, target, 0.25, 0.75, 0.01, 4.0
     )
     assert world == other_world == 2
     torch.testing.assert_close(root, other)
@@ -613,5 +643,41 @@ def test_constant_margin_quantiles_remain_finite():
     values = torch.tensor([0.2, -0.1, 0.0, 2.0]).repeat(16, 1)
     quantiles = column_quantiles(values, torch.tensor([0.1, 0.5, 0.9, 1.0]))
     torch.testing.assert_close(quantiles, values[0], rtol=0, atol=1e-12)
-    result = solve_biases(values, torch.zeros(4), torch.full((4,), 0.25), 0.25, 4.0)
+    result = solve_biases(
+        values,
+        torch.zeros(4),
+        torch.full((4,), 0.25),
+        torch.full((4,), 0.25),
+        0.25,
+        0.75,
+        0.01,
+        4.0,
+    )
     assert result.isfinite().all() and result[1].sum() == 16
+
+
+def test_ema_recovery_weights_and_global_normalization():
+    from model.modules.quantile_routing import routing_targets
+
+    # The EMA changes recovery strength, not the batch ranking or target curve.
+    initial = torch.tensor([0.7, 0.2, 0.1, 0.0])
+    ranked = torch.tensor([0.4, 0.3, 0.2, 0.1])
+    ema = torch.tensor([0.6, 0.3, 0.1, 0.0])
+    target, alpha, normalization = routing_targets(
+        initial, ranked, ema, 0.25, 0.75, 0.01
+    )
+    expected_alpha = 0.25 + 0.5 * (1 - (0.99 * ema + 0.01 / 4) / ranked).clamp(0, 1)
+    raw = initial + expected_alpha * (ranked - initial)
+    torch.testing.assert_close(alpha, expected_alpha)
+    torch.testing.assert_close(target, raw / raw.sum())
+    torch.testing.assert_close(normalization, raw.sum())
+    assert target.sum().isclose(torch.tensor(1.0)) and (target >= 0).all()
+    assert alpha[0] == 0.25 and alpha[-1] > 0.73
+    baseline, _, _ = routing_targets(initial, ranked, ema, 0.25, 0.25, 0.01)
+    assert target[-1] > baseline[-1]
+    # A stale starvation EMA also increases downward shrinkage after recovery.
+    recovered = torch.tensor([0.1, 0.2, 0.3, 0.4])
+    _, recovered_alpha, _ = routing_targets(recovered, ranked, ema, 0.25, 0.75, 0.01)
+    assert recovered_alpha[-1] > 0.74
+    # No backward path is used by the actual routing controller.
+    assert not target.requires_grad

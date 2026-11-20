@@ -202,6 +202,8 @@ class MoERouter(nn.Module):
         centroid_commitment_cost=DEFAULT_CENTROID_COMMITMENT_COST,
         balance_power=0.0,
         balance_strength=0.25,
+        balance_max_strength=0.75,
+        balance_ema_smoothing=0.01,
         balance_max_range=4.0,
         reseed_dead_experts=True,
         ema_decay=0.99,
@@ -236,6 +238,8 @@ class MoERouter(nn.Module):
         self.balance_power = balance_power
         self.balance_iterations = ITERATIONS
         self.balance_strength = balance_strength
+        self.balance_max_strength = balance_max_strength
+        self.balance_ema_smoothing = balance_ema_smoothing
         self.balance_max_range = balance_max_range
         self.reseed_dead_experts, self.ema_decay = reseed_dead_experts, ema_decay
         self.codebook_target_norm = codebook_target_norm
@@ -291,6 +295,10 @@ class MoERouter(nn.Module):
             self.register_buffer(f"batch_traffic_{name}", torch.zeros(count))
             self.register_buffer(f"provisional_traffic_{name}", torch.zeros(count))
             self.register_buffer(f"requested_traffic_{name}", torch.zeros(count))
+            self.register_buffer(
+                f"balance_shrinkage_{name}", torch.full((count,), balance_strength)
+            )
+            self.register_buffer(f"balance_normalization_{name}", torch.ones(()))
             self.register_buffer(
                 f"validation_counts_{name}", torch.zeros(count, dtype=torch.int64)
             )
@@ -624,10 +632,17 @@ class MoERouter(nn.Module):
                     scores,
                     offsets,
                     getattr(self, f"balance_rank_target_{name}"),
+                    getattr(self, f"ema_traffic_{name}"),
                     self.balance_strength,
+                    self.balance_max_strength,
+                    self.balance_ema_smoothing,
                     self.balance_max_range,
                 )
-                new_offsets, counts, before, target = result.unbind(0)
+                new_offsets, counts, before, target, shrinkage, normalization = (
+                    result.unbind(0)
+                )
+                getattr(self, f"balance_shrinkage_{name}").copy_(shrinkage)
+                getattr(self, f"balance_normalization_{name}").copy_(normalization[0])
                 getattr(self, f"offset_adjustment_{name}").copy_(new_offsets - offsets)
                 offsets.copy_(new_offsets)
                 getattr(self, f"provisional_traffic_{name}").copy_(

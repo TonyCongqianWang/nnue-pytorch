@@ -1029,12 +1029,19 @@ class MoEDeadExpertReseeder(Callback):
             provisional = getattr(router, f"provisional_traffic_{name}")
             actual = getattr(router, f"batch_traffic_{name}")
             requested = getattr(router, f"requested_traffic_{name}")
+            shrinkage = getattr(router, f"balance_shrinkage_{name}")
+            normalization = getattr(router, f"balance_normalization_{name}")
+            lowest = requested.argsort()[:5]
             rank_mask = provisional[:, None] > provisional[None, :]
             reversal = (
                 (actual[None, :] - actual[:, None]).clamp_min(0) * rank_mask
             ).max()
             print(
                 f"[Routing quantile solver {label}] iterations={router.balance_iterations} strength={router.balance_strength:g} "
+                f"max_strength={router.balance_max_strength:g} ema_smoothing={router.balance_ema_smoothing:g} "
+                f"shrinkage_min/max={float(shrinkage.min()):.6g}/{float(shrinkage.max()):.6g} normalization={float(normalization):.6g} "
+                f"requested_min/achieved_same_id={float(requested[lowest[0]]):.6g}/{float(actual[lowest[0]]):.6g} "
+                f"bottom5_requested/achieved={float(requested[lowest].sum()):.6g}/{float(actual[lowest].sum()):.6g} "
                 f"power={router.balance_power:g} ema_decay={router.ema_decay:g} "
                 f"effective_momentum={float(router.traffic_momentum(name)):.6g} "
                 f"power_target_top/bottom={100 * float(target[0]):.4f}%/{100 * float(target[-1]):.4f}% "

@@ -107,6 +107,12 @@ def write_export_diagnostics(model, path):
             .cpu()
             .tolist(),
             "controller": {
+                "baseline": "inference_offsets",
+                "target_rank": "training_ema",
+                "full_batch_offset_delta": getattr(router, f"offset_adjustment_{bank}")
+                .cpu()
+                .tolist(),
+                "persistent_step_size": 1 - router.offset_ema_decay,
                 "iterations": router.balance_iterations,
                 "strength": router.balance_strength,
                 "max_strength": router.balance_max_strength,

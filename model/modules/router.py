@@ -308,9 +308,7 @@ class MoERouter(nn.Module):
             self.register_buffer(
                 f"validation_unbiased_{name}", torch.zeros(count, dtype=torch.int64)
             )
-            self.register_buffer(
-                f"offset_adjustment_{name}", torch.zeros(count), persistent=False
-            )
+            self.register_buffer(f"offset_adjustment_{name}", torch.zeros(count))
             self.register_buffer(
                 f"recent_contexts_{name}",
                 torch.zeros(2048, dtype=torch.long),
@@ -632,9 +630,11 @@ class MoERouter(nn.Module):
             scores = -self.distances(z, codebook, name, biased=False).detach()
             offsets = getattr(self, f"routing_offset_{name}")
             if update:
+                # The lagging inference offsets initialize every independent batch solve.
+                baseline = getattr(self, f"running_offset_{name}")
                 result, world = gather_and_solve(
                     scores,
-                    offsets,
+                    baseline,
                     getattr(self, f"balance_rank_target_{name}"),
                     getattr(self, f"ema_traffic_{name}"),
                     self.balance_strength,
@@ -647,12 +647,10 @@ class MoERouter(nn.Module):
                 )
                 getattr(self, f"balance_shrinkage_{name}").copy_(shrinkage)
                 getattr(self, f"balance_normalization_{name}").copy_(normalization[0])
-                getattr(self, f"offset_adjustment_{name}").copy_(new_offsets - offsets)
+                getattr(self, f"offset_adjustment_{name}").copy_(new_offsets - baseline)
                 offsets.copy_(new_offsets)
-                # BatchNorm-style running mean: zero initialization, no bias correction.
-                getattr(self, f"running_offset_{name}").lerp_(
-                    new_offsets, 1 - self.offset_ema_decay
-                )
+                # Training keeps the full correction; only the persistent baseline lags.
+                baseline.lerp_(new_offsets, 1 - self.offset_ema_decay)
                 getattr(self, f"provisional_traffic_{name}").copy_(
                     before / before.sum().clamp_min(1)
                 )

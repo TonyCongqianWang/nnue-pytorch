@@ -56,6 +56,7 @@ def test_power_target_and_controller_state_roundtrip():
     torch.testing.assert_close(target.sum(), torch.tensor(1.0))
     router.update_traffic("tail", traffic)
     router.running_offset_tail.copy_(torch.linspace(-0.3, 0.3, 64))
+    router.offset_adjustment_tail.fill_(0.2)
     router.routing_diagnostics["tail"] = {"context_RMS": 0.001}
     other = MoERouter(
         64,
@@ -69,6 +70,9 @@ def test_power_target_and_controller_state_roundtrip():
     other.load_state_dict(router.state_dict())
     torch.testing.assert_close(other.routing_offset_tail, router.routing_offset_tail)
     torch.testing.assert_close(other.running_offset_tail, router.running_offset_tail)
+    torch.testing.assert_close(
+        other.offset_adjustment_tail, router.offset_adjustment_tail
+    )
     torch.testing.assert_close(other.ema_traffic_tail, router.ema_traffic_tail)
     assert other.routing_diagnostics == router.routing_diagnostics
 
@@ -518,7 +522,7 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
         scores,
         torch.zeros(8),
         ranked,
-        torch.full_like(ranked, 1 / len(ranked)),
+        ranked.flip(0),
         0.25,
         0.25,
         0.01,
@@ -527,7 +531,7 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
     biases, after, before, target, _shrinkage, _normalization = result
     assert ITERATIONS == 4
     initial = before / before.sum()
-    order = before.argsort(descending=True, stable=True)
+    order = ranked.flip(0).argsort(descending=True, stable=True)
     torch.testing.assert_close(target[order], 0.75 * initial[order] + 0.25 * ranked)
     assert (after / after.sum() - target).abs().sum() < (initial - target).abs().sum()
     assert biases.max() - biases.min() <= 4.000001
@@ -536,7 +540,7 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
         scores,
         torch.zeros(8),
         ranked,
-        torch.full_like(ranked, 1 / len(ranked)),
+        ranked.flip(0),
         0.0,
         0.0,
         0.01,
@@ -551,7 +555,7 @@ def test_quantile_solver_uses_fixed_rank_target_and_reduces_imbalance():
             scores,
             torch.zeros(8),
             ranked,
-            torch.full_like(ranked, 1 / len(ranked)),
+            ranked.flip(0),
             0.25,
             0.25,
             0.01,
@@ -678,7 +682,7 @@ def test_constant_margin_quantiles_remain_finite():
 def test_ema_recovery_weights_and_global_normalization():
     from model.modules.quantile_routing import routing_targets
 
-    # The EMA changes recovery strength, not the batch ranking or target curve.
+    # EMA determines both target ranking and recovery strength.
     initial = torch.tensor([0.7, 0.2, 0.1, 0.0])
     ranked = torch.tensor([0.4, 0.3, 0.2, 0.1])
     ema = torch.tensor([0.6, 0.3, 0.1, 0.0])
@@ -697,7 +701,7 @@ def test_ema_recovery_weights_and_global_normalization():
     # A stale starvation EMA also increases downward shrinkage after recovery.
     recovered = torch.tensor([0.1, 0.2, 0.3, 0.4])
     _, recovered_alpha, _ = routing_targets(recovered, ranked, ema, 0.25, 0.75, 0.01)
-    assert recovered_alpha[-1] > 0.74
+    torch.testing.assert_close(recovered_alpha, alpha)
     # No backward path is used by the actual routing controller.
     assert not target.requires_grad
 
@@ -716,3 +720,40 @@ def test_running_offsets_use_batchnorm_style_mean_without_bias_correction():
         torch.testing.assert_close(
             router.running_offset_tail, 0.9 * 0.1 * first + 0.1 * second
         )
+
+
+def test_batch_solve_starts_from_persistent_baseline_and_keeps_full_correction(
+    monkeypatch,
+):
+    import model.modules.router as module
+
+    router = small_router(offset_ema_decay=0.9)
+    baseline = torch.tensor([0.3, -0.2, 0.1, -0.2])
+    candidate = torch.tensor([-0.1, 2.0, -0.4, -0.5])
+    traffic = torch.tensor([0.1, 0.4, 0.3, 0.2])
+    router.running_offset_tail.copy_(baseline)
+    router.routing_offset_tail.fill_(99)  # Last batch must not initialize this solve.
+    router.ema_traffic_tail.copy_(traffic)
+    z = torch.zeros(8, 8)
+    cb = torch.eye(4, 8)
+
+    def solve(scores, offsets, target, ema, *args):
+        torch.testing.assert_close(offsets, baseline)
+        torch.testing.assert_close(ema, traffic)
+        counts = torch.bincount((scores + candidate).argmax(1), minlength=4).float()
+        before = torch.bincount((scores + offsets).argmax(1), minlength=4).float()
+        return torch.stack(
+            (candidate, counts, before, target, target * 0 + 0.5, target * 0 + 1)
+        ), 1
+
+    monkeypatch.setattr(module, "gather_and_solve", solve)
+    indices, *_ = router.quantize(z, cb, "tail")
+    assert (indices == 1).all()  # Full correction, not the damped persistent update.
+    torch.testing.assert_close(router.routing_offset_tail, candidate)
+    torch.testing.assert_close(
+        router.running_offset_tail, baseline + 0.1 * (candidate - baseline)
+    )
+    torch.testing.assert_close(router.offset_adjustment_tail, candidate - baseline)
+    torch.testing.assert_close(
+        router.batch_traffic_tail, torch.tensor([0.0, 1.0, 0.0, 0.0])
+    )

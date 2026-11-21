@@ -1045,7 +1045,7 @@ class MoEDeadExpertReseeder(Callback):
                 (actual[None, :] - actual[:, None]).clamp_min(0) * rank_mask
             ).max()
             print(
-                f"[Routing quantile solver {label}] iterations={router.balance_iterations} strength={router.balance_strength:g} "
+                f"[Routing quantile solver {label}] baseline=inference_offsets target_rank=training_ema iterations={router.balance_iterations} strength={router.balance_strength:g} "
                 f"max_strength={router.balance_max_strength:g} ema_smoothing={router.balance_ema_smoothing:g} "
                 f"shrinkage_min/max={float(shrinkage.min()):.6g}/{float(shrinkage.max()):.6g} normalization={float(normalization):.6g} "
                 f"requested_min/achieved_same_id={float(requested[lowest[0]]):.6g}/{float(actual[lowest[0]]):.6g} "
@@ -1055,8 +1055,9 @@ class MoEDeadExpertReseeder(Callback):
                 f"power_target_top/bottom={100 * float(target[0]):.4f}%/{100 * float(target[-1]):.4f}% "
                 f"offset_min/max={float(offsets.min()):.6g}/{float(offsets.max()):.6g} "
                 f"range={float(offsets.max() - offsets.min()):.6g}/{router.balance_max_range:g} "
-                f"max_adjustment={float(adjustment.abs().max()):.6g} "
-                f"batch_top_before/after={float(provisional.max()):.6g}/{float(actual.max()):.6g} "
+                f"full_batch_delta_max={float(adjustment.abs().max()):.6g} "
+                f"persistent_delta_max={(1 - router.offset_ema_decay) * float(adjustment.abs().max()):.6g} "
+                f"batch_top_baseline/corrected={float(provisional.max()):.6g}/{float(actual.max()):.6g} "
                 f"target_L1_before/after={float((provisional - requested).abs().sum()):.6g}/{float((actual - requested).abs().sum()):.6g} "
                 f"max_rank_reversal_pp={100 * float(reversal):.6g}",
                 flush=True,

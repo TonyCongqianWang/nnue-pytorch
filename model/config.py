@@ -53,7 +53,7 @@ class ModelConfig(LayerStacksConfig):
     moe_centroid_commitment_cost: float = DEFAULT_CENTROID_COMMITMENT_COST
     """Centroid attraction, averaged within each expert then across all experts."""
     moe_balance_power: float = 0.0
-    """Target traffic proportional to initial global-batch traffic rank ** (-power); zero is uniform."""
+    """Target traffic proportional to corrected training-traffic EMA rank ** (-power); zero is uniform."""
     moe_balance_strength: float = 0.25
     """Baseline fraction of the batch traffic gap to close toward the power target."""
     moe_balance_max_strength: float = 0.75

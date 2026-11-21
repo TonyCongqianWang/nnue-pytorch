@@ -60,7 +60,7 @@ def assignment_counts(scores, biases):
 
 def routing_targets(initial, rank_target, ema, strength, max_strength, smoothing):
     """Detached KL-gradient weights: EMA sets strength, current traffic sets direction."""
-    order = initial.argsort(descending=True, stable=True)
+    order = ema.argsort(descending=True, stable=True)
     power_target = torch.empty_like(rank_target)
     power_target[order] = rank_target
     smoothed = (1 - smoothing) * ema + smoothing / len(ema)

@@ -103,3 +103,21 @@ def test_search_tree_schedule_interpolates_and_resumes():
 def test_invalid_search_tree_schedule(spec):
     with pytest.raises(ValueError, match="search-tree-schedule|Search-tree schedule"):
         parse_search_tree_schedule(spec)
+
+def test_triangle_search_tree_schedule():
+    """Start with games, peak halfway, then hold a lower tree mix."""
+    knots = parse_search_tree_schedule("0:0.0,0.5:0.1,0.75:0.05,1.0:0.05")
+    dataset = Mock()
+    callback = SearchTreeMix(dataset, 0.0, ramp_steps=800, knots=knots)
+    callback.on_train_start(SimpleNamespace(global_step=0))
+    for step, expected in [
+        (0, 0.0),
+        (200, 0.05),
+        (400, 0.1),
+        (500, 0.075),
+        (600, 0.05),
+        (700, 0.05),
+        (800, 0.05),
+    ]:
+        callback._update(step)
+        assert callback.target == pytest.approx(expected)

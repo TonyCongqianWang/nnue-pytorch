@@ -1,11 +1,13 @@
 """Plain-Python training callbacks for SimpleTrainer."""
 
 import copy
+import json
 import math
 import os
 import re
 import time
 from datetime import timedelta
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -929,3 +931,66 @@ class DataLoaderBottleneckMonitor(Callback):
                 f"avg fill {fill:.1f}/{capacity}{startup} -> {verdict}",
                 flush=True,
             )
+
+
+class LayerStackTraffic(Callback):
+    """Consumed raw-leaf counts, and separately provider-delivered source mix.
+
+    Source counters include prefetch; they are NOT claimed to be the exact
+    source mixture of this epoch's optimizer steps. No assumed 95/5 target.
+    """
+
+    def __init__(self, dataset, raw_count):
+        self.dataset = dataset
+        self.raw_count = raw_count
+
+    def on_train_epoch_start(self, trainer):
+        self.counts = torch.zeros(
+            self.raw_count, dtype=torch.int64, device=trainer.device
+        )
+        self.source_start = self.dataset.get_source_traffic()
+
+    @torch.compiler.disable
+    def on_train_batch_end(self, trainer, batch, batch_idx, outputs):
+        self.counts.add_(torch.bincount(batch[-1].flatten(), minlength=self.raw_count))
+
+    @torch.compiler.disable
+    def on_train_epoch_end(self, trainer):
+        end = self.dataset.get_source_traffic()
+        source = torch.tensor(
+            [end[i] - self.source_start[i] for i in range(2)],
+            dtype=torch.int64,
+            device=trainer.device,
+        )
+        counts = self.counts.clone()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+            dist.all_reduce(source, op=dist.ReduceOp.SUM)
+        if not trainer.is_global_zero:
+            return
+        total, tree = source.tolist()
+        report = {
+            "epoch": trainer.current_epoch,
+            "global_step": trainer.global_step,
+            "consumed_leaf_counts": counts.tolist(),
+            "provider_postfilter_positions": total,
+            "provider_postfilter_tree_positions": tree,
+            "provider_tree_fraction": tree / total if total else None,
+            "source_scope": "provider-delivered snapshot delta; includes prefetch",
+            "leaf_scope": "optimizer-consumed batches in this process epoch segment",
+            "analysis_weighting": "95/5 is router-analysis weighting, not a training-mixture guarantee",
+        }
+        path = Path(trainer.default_root_dir) / "layer_stack_traffic.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(json.dumps(report) + "\n")
+        trainer._log_metrics(
+            {
+                f"leaf_traffic/{i}": v
+                for i, v in enumerate(report["consumed_leaf_counts"])
+            },
+            step=trainer.global_step,
+        )
+        print(
+            f"  Leaf traffic: {int(counts.sum())} consumed; {int((counts > 0).sum())}/{self.raw_count} supported; provider tree fraction={report['provider_tree_fraction']}"
+        )

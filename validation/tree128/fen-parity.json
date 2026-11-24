@@ -1,0 +1,8 @@
+{
+  "fens": 7200,
+  "legal": true,
+  "side_to_move_mirrors": true,
+  "promoted_material": true,
+  "en_passant_and_castling": true,
+  "python_native_engine_context_and_leaf_parity": true
+}

@@ -2,6 +2,7 @@
 #include "training_data_loader_abi.h"
 
 #include "lib/unique_counter.h"
+#include "tree128.h"
 
 using namespace binpack;
 using namespace chess;
@@ -240,4 +241,12 @@ NNUE_API std::size_t NNUE_CDECL get_io_stats(SparseBatchStream*   stream,
                                              std::size_t          max_files) {
     auto* s = reinterpret_cast<FeaturedBatchStream*>(stream);
     return s->get_io_stats(out, max_files);
+}
+
+// Diagnostics uses the same lazy extractor and selector as layer_stack_index.
+NNUE_API int NNUE_CDECL tree128_context_for_fen(const char* fen, int* fields) {
+    auto pos = Position::fromFen(fen);
+    frozen_tree128::Context<tree128_loader::Tree128Board> context(tree128_loader::Tree128Board{pos});
+    for (int i=0; i<8; ++i) fields[i] = context.get(i);
+    return tree128_loader::tree128(pos);
 }

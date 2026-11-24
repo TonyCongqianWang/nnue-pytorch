@@ -28,6 +28,7 @@ class SparseBatch(ctypes.Structure):
         ("white", ctypes.POINTER(ctypes.c_int)),
         ("black", ctypes.POINTER(ctypes.c_int)),
         ("layer_stack_index", ctypes.POINTER(ctypes.c_int)),
+        ("num_tree_samples", ctypes.c_int),
     ]
 
     def get_tensors(

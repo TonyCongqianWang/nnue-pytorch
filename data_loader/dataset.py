@@ -160,6 +160,7 @@ class TrainingDataProvider:
         self.use_pinned_memory = use_pinned_memory
         self.device = device
         self.native_fetch_s = 0.0
+        self.postfilter_source_traffic = (0, 0)
 
         if batch_size:
             self.stream = self.create_stream(
@@ -200,6 +201,11 @@ class TrainingDataProvider:
         self.native_fetch_s += time.perf_counter() - t0
 
         if v:
+            total, tree = self.postfilter_source_traffic
+            self.postfilter_source_traffic = (
+                total + v.contents.size,
+                tree + v.contents.num_tree_samples,
+            )
             tensors = v.contents.get_tensors(
                 self.device, use_pinned_memory=self.use_pinned_memory
             )
@@ -211,6 +217,9 @@ class TrainingDataProvider:
     def get_unique_stats(self) -> tuple[int, int, int]:
         """Return (preskip, total, unique)."""
         return stream.get_unique_position_stats(self.stream)
+
+    def get_source_traffic(self):
+        return self.postfilter_source_traffic
 
     def get_hll_state(self) -> bytes:
         """Serialize the HLL state for checkpoint storage."""
@@ -575,6 +584,11 @@ class FixedNumBatchesDataset(Dataset):
         # host-to-device transport); only this part scales with workers.
         snap["native_fetch_s"] = getattr(self.iter, "native_fetch_s", 0.0)
         return snap
+
+    def get_source_traffic(self):
+        if self.iter is not None and hasattr(self.iter, "get_source_traffic"):
+            return self.iter.get_source_traffic()
+        return 0, 0
 
     def get_unique_stats(self) -> tuple[int, int, int]:
         """Return (preskip, total, unique) from the underlying data provider.

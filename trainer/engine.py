@@ -136,6 +136,7 @@ class SimpleTrainer:
         self.should_stop: bool = False
 
         self.current_epoch: int = 0
+        self._epoch_finished: bool = False
         self.global_step: int = 0
         self.num_training_batches: int | None = None
         self.num_val_batches: int | None = None
@@ -243,6 +244,7 @@ class SimpleTrainer:
         unwrapped = _unwrap_module(self.model)
         checkpoint = {
             "epoch": self.current_epoch,
+            "epoch_finished": self._epoch_finished,
             "global_step": self.global_step,
             "state_dict": unwrapped.state_dict(),
             "lr_schedulers": [sch.state_dict() for sch in self._schedulers],
@@ -278,7 +280,12 @@ class SimpleTrainer:
 
         unwrapped = _unwrap_module(self.model)
         unwrapped.load_state_dict(checkpoint["state_dict"])
-        self.current_epoch = checkpoint.get("epoch", 0)
+        # Epoch-end checkpoints resume at the next epoch. Mid-epoch saves
+        # repeat the unfinished epoch; old checkpoints were epoch-end saves.
+        self.current_epoch = checkpoint.get("epoch", 0) + int(
+            checkpoint.get("epoch_finished", True)
+        )
+        self._epoch_finished = False
         self.global_step = checkpoint.get("global_step", 0)
 
         # Restore scheduler states if they were saved.
@@ -306,6 +313,7 @@ class SimpleTrainer:
 
         for epoch in range(self.current_epoch, self.max_epochs):
             self.current_epoch = epoch
+            self._epoch_finished = False
             self._train_epoch(train_loader)
 
             if (
@@ -392,14 +400,16 @@ class SimpleTrainer:
             step=self.global_step,
         )
 
-        if hasattr(self.model, "on_train_epoch_end"):
-            self.model.on_train_epoch_end()
-        self._call_callbacks("on_train_epoch_end", self)
-
         # Step epoch-interval schedulers (e.g. StepLR) once per epoch.
+        # Do this before callbacks save completed-epoch checkpoints.
         for sch in self._schedulers:
             if not is_one_cycle(sch):
                 sch.step()
+
+        self._epoch_finished = True
+        if hasattr(self.model, "on_train_epoch_end"):
+            self.model.on_train_epoch_end()
+        self._call_callbacks("on_train_epoch_end", self)
 
     # ------------------------------------------------------------------
     # Validation loop

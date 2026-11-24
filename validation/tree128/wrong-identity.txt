@@ -1,0 +1,6 @@
+Stockfish dev-20261122-m-3e8fde75 by the Stockfish developers (see AUTHORS file)
+info string ERROR: Network evaluation parameters compatible with the engine must be available.
+info string ERROR: The network file /home/twang/projects/repos/stockfish/data/frozen_tree128/networks/wrong-identity.nnue was not loaded successfully.
+info string ERROR: The UCI option EvalFile might need to specify the full path, including the directory name, to the network file.
+info string ERROR: The default net can be downloaded from: https://tests.stockfishchess.org/api/nn/nn-bddd9d57eb87.nnue
+info string ERROR: The engine will be terminated now.

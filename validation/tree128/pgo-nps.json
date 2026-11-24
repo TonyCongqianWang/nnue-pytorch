@@ -1,0 +1,177 @@
+{
+  "depth": 13,
+  "repeats": 7,
+  "results": {
+    "binary": [
+      {
+        "nps": 1009172,
+        "nodes": 1600547,
+        "time_ms": 1586
+      },
+      {
+        "nps": 1032610,
+        "nodes": 1600547,
+        "time_ms": 1550
+      },
+      {
+        "nps": 987382,
+        "nodes": 1600547,
+        "time_ms": 1621
+      },
+      {
+        "nps": 1020757,
+        "nodes": 1600547,
+        "time_ms": 1568
+      },
+      {
+        "nps": 1035282,
+        "nodes": 1600547,
+        "time_ms": 1546
+      },
+      {
+        "nps": 1002221,
+        "nodes": 1600547,
+        "time_ms": 1597
+      },
+      {
+        "nps": 1002848,
+        "nodes": 1600547,
+        "time_ms": 1596
+      }
+    ],
+    "small_switch": [
+      {
+        "nps": 1030616,
+        "nodes": 1600547,
+        "time_ms": 1553
+      },
+      {
+        "nps": 1005368,
+        "nodes": 1600547,
+        "time_ms": 1592
+      },
+      {
+        "nps": 1023367,
+        "nodes": 1600547,
+        "time_ms": 1564
+      },
+      {
+        "nps": 1017512,
+        "nodes": 1600547,
+        "time_ms": 1573
+      },
+      {
+        "nps": 1006633,
+        "nodes": 1600547,
+        "time_ms": 1590
+      },
+      {
+        "nps": 1017512,
+        "nodes": 1600547,
+        "time_ms": 1573
+      },
+      {
+        "nps": 997847,
+        "nodes": 1600547,
+        "time_ms": 1604
+      }
+    ],
+    "mixed": [
+      {
+        "nps": 1025334,
+        "nodes": 1600547,
+        "time_ms": 1561
+      },
+      {
+        "nps": 1011084,
+        "nodes": 1600547,
+        "time_ms": 1583
+      },
+      {
+        "nps": 1010446,
+        "nodes": 1600547,
+        "time_ms": 1584
+      },
+      {
+        "nps": 1001593,
+        "nodes": 1600547,
+        "time_ms": 1598
+      },
+      {
+        "nps": 1021408,
+        "nodes": 1600547,
+        "time_ms": 1567
+      },
+      {
+        "nps": 1018159,
+        "nodes": 1600547,
+        "time_ms": 1572
+      },
+      {
+        "nps": 1022060,
+        "nodes": 1600547,
+        "time_ms": 1566
+      }
+    ],
+    "control": [
+      {
+        "nps": 820629,
+        "nodes": 3824953,
+        "time_ms": 4661
+      },
+      {
+        "nps": 824698,
+        "nodes": 3824953,
+        "time_ms": 4638
+      },
+      {
+        "nps": 821863,
+        "nodes": 3824953,
+        "time_ms": 4654
+      },
+      {
+        "nps": 822570,
+        "nodes": 3824953,
+        "time_ms": 4650
+      },
+      {
+        "nps": 812091,
+        "nodes": 3824953,
+        "time_ms": 4710
+      },
+      {
+        "nps": 813473,
+        "nodes": 3824953,
+        "time_ms": 4702
+      },
+      {
+        "nps": 800366,
+        "nodes": 3824953,
+        "time_ms": 4779
+      }
+    ]
+  },
+  "summary": {
+    "binary": {
+      "median_nps": 1009172,
+      "min_nps": 987382,
+      "max_nps": 1035282
+    },
+    "small_switch": {
+      "median_nps": 1017512,
+      "min_nps": 997847,
+      "max_nps": 1030616
+    },
+    "mixed": {
+      "median_nps": 1018159,
+      "min_nps": 1001593,
+      "max_nps": 1025334
+    },
+    "control": {
+      "median_nps": 820629,
+      "min_nps": 800366,
+      "max_nps": 824698
+    }
+  },
+  "note": "PGO profiles used each matching validation network. The tree layouts have identical outputs/search signatures. Randomly initialized networks; control search signature differs; no strength inference."
+}

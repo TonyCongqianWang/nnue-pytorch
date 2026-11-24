@@ -72,6 +72,14 @@ STACK_TABLE_HASH = 0x5A7AB1E5
 DEFAULT_DESCRIPTION = "Network trained with the https://github.com/official-stockfish/nnue-pytorch trainer."
 
 
+def stack_table_hash(ls_keys):
+    if ls_keys == "tree128":
+        from routing.tree128 import TABLE_HASH
+
+        return TABLE_HASH
+    return STACK_TABLE_HASH
+
+
 class BufferExporter:
     """The default exporter — an in-memory buffer."""
 
@@ -115,11 +123,17 @@ class NNUEWriter:
 
         fc_hash = self.fc_hash(model)
         layer_stacks = model.layer_stacks
+        layer_stacks.validate_routing_identity()
 
         # 1. Plaintext header
-        self.write_header(model, fc_hash ^ STACK_TABLE_HASH, description)
+        table_hash = stack_table_hash(model.ls_keys)
+        self.write_header(model, fc_hash ^ table_hash, description)
 
-        self.int32(STACK_TABLE_HASH)
+        self.int32(table_hash)
+        if model.ls_keys == "tree128":
+            from routing.tree128 import IDENTITY
+
+            self.exporter.extend(bytes.fromhex(IDENTITY))
         self.int32(layer_stacks.raw_count)
         self.int32(layer_stacks.count)
         self.exporter.extend(
@@ -259,7 +273,13 @@ class NNUEReader:
         self.feature_name = feature_name
 
         header_hash = self.read_header()
-        self.read_int32(STACK_TABLE_HASH)
+        table_hash = stack_table_hash(config.ls_keys)
+        self.read_int32(table_hash)
+        if config.ls_keys == "tree128":
+            from routing.tree128 import IDENTITY
+
+            if self.f.read(32) != bytes.fromhex(IDENTITY):
+                raise ValueError("tree128 network routing identity mismatch")
         raw_count = self.read_int32()
         stored_count = self.read_int32()
         remap = list(struct.unpack(f"<{raw_count}H", self.f.read(2 * raw_count)))
@@ -275,9 +295,7 @@ class NNUEReader:
         self.config = config
         fc_hash = NNUEWriter.fc_hash(self.model)
         ls = self.model.layer_stacks
-        expected = (
-            fc_hash ^ self.model.feature_hash ^ (config.L1 * 2) ^ STACK_TABLE_HASH
-        )
+        expected = fc_hash ^ self.model.feature_hash ^ (config.L1 * 2) ^ table_hash
         if header_hash != expected:
             raise ValueError(f"Expected: {expected:x}, got: {header_hash:x}")
         assert ls.count == stored_count and ls.raw_count == raw_count, (

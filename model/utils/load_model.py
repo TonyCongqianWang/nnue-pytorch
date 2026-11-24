@@ -12,6 +12,7 @@ def load_model(
 ) -> NNUEModel:
     if filename.endswith(".pt"):
         model = torch.load(filename, weights_only=False)
+        model.model.layer_stacks.validate_routing_identity()
         model.eval()
         return model.model
 

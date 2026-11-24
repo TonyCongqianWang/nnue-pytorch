@@ -9,12 +9,20 @@ from .stack_table import table_from_str
 from .stacked_linear import FactorizedStackedLinear, StackedLinear
 
 # Number of states of each layer-stack key (see LayerStacksConfig.ls_keys)
-STACK_KEY_STATES = {"piececount": 8, "queen": 4, "pawnhalf": 3, "manyoffi": 2}
+STACK_KEY_STATES = {
+    "piececount": 8,
+    "queen": 4,
+    "pawnhalf": 3,
+    "manyoffi": 2,
+    "tree128": 128,
+}
 
 
 def stack_keys(ls_keys: str) -> list[str]:
     """The layer-stack keys (--ls-keys) in index order."""
     keys = [k for k in ls_keys.split(":") if k]
+    if "tree128" in keys and ls_keys != "tree128":
+        raise ValueError("tree128 must be the sole layer-stack key")
     for k in keys:
         assert k in STACK_KEY_STATES, (
             f"unknown layer-stack key {k!r} (known: {sorted(STACK_KEY_STATES)})"
@@ -35,6 +43,21 @@ class LayerStacks(nn.Module):
         self, count: int, config: LayerStacksConfig, quantization: QuantizationManager
     ):
         super().__init__()
+
+        self.tree128 = config.ls_keys == "tree128"
+        if self.tree128:
+            from routing.tree128 import IDENTITY
+
+            if config.ls_tree_identity != IDENTITY:
+                raise ValueError("tree128 semantic identity mismatch")
+            if config.ls_remap_data:
+                raise ValueError(
+                    "tree128 first experiment requires identity remap; omit ls-remap-data"
+                )
+            self.register_buffer(
+                "routing_identity",
+                torch.tensor(list(bytes.fromhex(IDENTITY)), dtype=torch.uint8),
+            )
 
         raw_count = count
         if config.ls_remap_table:
@@ -76,12 +99,33 @@ class LayerStacks(nn.Module):
             self.output.linear.bias.zero_()
 
         factors = [f for f in config.ls_factors.split(":") if f]
+        if self.tree128 and config.ls_factors == "piececount+queen:pawnhalf:manyoffi":
+            from routing.tree128 import DEFAULT_FACTORS
+
+            factors = DEFAULT_FACTORS.split(":")
         if factors:
             maps = self.factor_maps(raw_count, factors, stack_keys(config.ls_keys))
             self.set_group_factors([m[live] for m in maps])
 
         self.register_buffer("stack_remap", stored[remap], persistent=False)
         self.register_buffer("stack_fallback", remap.clone())
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if self.tree128:
+            identity = state_dict.get(prefix + "routing_identity")
+            if identity is None or not torch.equal(
+                identity.cpu(), self.routing_identity.cpu()
+            ):
+                raise RuntimeError("tree128 checkpoint routing identity mismatch")
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def validate_routing_identity(self):
+        """Also validate whole-object .pt loads, which bypass state-dict hooks."""
+        if getattr(self, "tree128", False):
+            from routing.tree128 import IDENTITY
+
+            if bytes(self.routing_identity.cpu().tolist()) != bytes.fromhex(IDENTITY):
+                raise ValueError("tree128 model routing identity mismatch")
 
     def forward(
         self,
@@ -146,6 +190,17 @@ class LayerStacks(nn.Module):
         """Group id of every stack under each named factor: a key, or keys joined by '+' (e.g.
         "piececount+queen"). The stack index is the mixed-radix index of the keys."""
         assert count == stack_count(keys), (count, keys)
+        if keys == ["tree128"]:
+            from routing.tree128 import ancestor_map
+
+            maps = []
+            for name in names:
+                if not name.startswith("tree-depth") or not name[10:].isdigit():
+                    raise ValueError(
+                        f"tree128 factor must be tree-depth1..10, got {name!r}"
+                    )
+                maps.append(torch.tensor(ancestor_map(int(name[10:]))))
+            return maps
         rest = torch.arange(count)
         values = {}
         for k in reversed(keys):

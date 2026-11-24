@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "lib/rng.h"
+#include "tree128.h"
 
 using namespace binpack;
 using namespace chess;
@@ -493,6 +494,8 @@ int LayerStackKeys::index(const Position& pos) const {
 }
 
 std::optional<LayerStackKeys> get_layer_stack_keys(std::string_view names) {
+    if (names.find("tree128") != std::string_view::npos && names != "tree128")
+        return std::nullopt;
     LayerStackKeys result;
     std::size_t    start = 0;
 
@@ -503,6 +506,8 @@ std::optional<LayerStackKeys> get_layer_stack_keys(std::string_view names) {
 
         if (name == "piececount")
             result.keys.push_back({8, piece_count});
+        else if (name == "tree128")
+            result.keys.push_back({128, tree128_loader::tree128});
         else if (name == "queen")
             result.keys.push_back({4, queens});
         else if (name == "pawnhalf")
@@ -608,6 +613,7 @@ SparseBatch::SparseBatch(const IFeatureExtractor&               feature_set,
     m_buffer_pool(std::move(buffer_pool)) {
     num_inputs                = feature_set.inputs();
     size                      = entries.size();
+    num_tree_samples = std::count_if(entries.begin(), entries.end(), [](const auto& e) { return e.ply == TREE_SAMPLE_PLY; });
     max_active_features       = feature_set.max_active_features();
     const size_t total_floats = size * 3;
     const size_t total_ints   = size + size * max_active_features * 2;

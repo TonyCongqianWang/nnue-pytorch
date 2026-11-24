@@ -1,0 +1,2 @@
+Network saved successfully to /home/twang/projects/repos/stockfish/data/frozen_tree128/networks/tree128-engine-roundtrip.nnue
+Verified 3768 incremental/fresh positions and undo branches

@@ -27,6 +27,7 @@ from trainer.callbacks import (
     CheckpointManager,
     DataLoaderBottleneckMonitor,
     ExplicitSWA,
+    LayerStackTraffic,
     SimpleLineLogger,
     TerminateOnNaN,
     TimeLimit,
@@ -166,6 +167,10 @@ def _normalize_optimizer_and_schedulers(optimizer_and_schedulers):
 def prepare_stack_table(args) -> None:
     """Take the layer-stack table from the checkpoint being resumed, or build it from --ls-remap-data."""
     mc = args.nnue_config.model_config
+    if mc.ls_keys == "tree128" and mc.ls_remap_data:
+        raise ValueError(
+            "tree128 first experiment requires identity remap; omit ls-remap-data"
+        )
     if mc.ls_remap_table:
         return
     if args.resume_from_checkpoint:
@@ -305,6 +310,7 @@ def main():
             nnue = torch.load(
                 args.resume_from_model, weights_only=False, map_location="cpu"
             )
+            nnue.model.layer_stacks.validate_routing_identity()
             nnue.train()
         except ModuleNotFoundError as e:
             raise RuntimeError(
@@ -434,6 +440,8 @@ def main():
         TimeLimit(args.max_time),
         nan_callback,
     ]
+    if args.nnue_config.model_config.ls_keys == "tree128":
+        trainer_callbacks.insert(0, LayerStackTraffic(train.dataset, 128))
     if 0 <= args.swa_start_epoch < args.max_epochs:
         swa_callback = ExplicitSWA(args.swa_start_epoch, tb_logger.log_dir)
         trainer_callbacks.append(swa_callback)

@@ -110,6 +110,7 @@ struct SparseBatch final {
     int*   white;
     int*   black;
     int*   layer_stack_index;
+    int    num_tree_samples;
 
 #ifdef NNUE_LOADER_STATISTICS
     std::vector<struct binpack::TrainingDataEntry> entries_copy;

@@ -106,3 +106,6 @@ NNUE_API void NNUE_CDECL hll_count_from_state(const std::uint8_t* data,
 NNUE_API std::size_t NNUE_CDECL get_io_stats(SparseBatchStream*   stream,
                                              DataloaderFileStats* out,
                                              std::size_t          max_files);
+
+// Writes the eight frozen context fields; returns the canonical leaf ID.
+NNUE_API int NNUE_CDECL tree128_context_for_fen(const char* fen, int* fields);

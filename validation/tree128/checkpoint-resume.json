@@ -1,0 +1,10 @@
+{
+  "initial_epoch": 0,
+  "initial_steps": 2,
+  "resumed_epoch": 1,
+  "resumed_steps": 4,
+  "routing_identity_preserved": true,
+  "identity_remap_preserved": true,
+  "completed_epoch_not_repeated": true,
+  "scope": "tiny CPU K32H3^ 32/8/8 local smoke, not recipe training"
+}

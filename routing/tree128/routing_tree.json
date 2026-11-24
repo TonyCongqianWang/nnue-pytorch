@@ -1,0 +1,4403 @@
+{
+  "canonical_leaf_node_ids": [
+    27,
+    49,
+    50,
+    68,
+    69,
+    81,
+    95,
+    96,
+    112,
+    113,
+    115,
+    117,
+    118,
+    121,
+    122,
+    123,
+    124,
+    125,
+    127,
+    133,
+    134,
+    135,
+    136,
+    137,
+    140,
+    142,
+    143,
+    145,
+    147,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    155,
+    156,
+    157,
+    158,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178,
+    179,
+    180,
+    181,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187,
+    188,
+    189,
+    191,
+    193,
+    194,
+    196,
+    198,
+    199,
+    201,
+    202,
+    203,
+    204,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    211,
+    212,
+    213,
+    214,
+    215,
+    216,
+    217,
+    218,
+    219,
+    220,
+    221,
+    222,
+    223,
+    224,
+    225,
+    226,
+    227,
+    228,
+    229,
+    230,
+    231,
+    232,
+    233,
+    234,
+    235,
+    236,
+    237,
+    238,
+    239,
+    240,
+    241,
+    242,
+    243,
+    244,
+    245,
+    246,
+    247,
+    248,
+    249,
+    250,
+    251,
+    252,
+    253,
+    254
+  ],
+  "derived_features": {
+    "heavy_category_1_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1
+        ]
+      }
+    },
+    "heavy_category_equal": {
+      "relation": "equal",
+      "them": {
+        "raw": 5
+      },
+      "us": {
+        "raw": 2
+      }
+    },
+    "major_present_absolute_difference": {
+      "relation": "absolute_difference",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "minor_rich_absolute_difference": {
+      "relation": "absolute_difference",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          3,
+          5
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          3,
+          5
+        ]
+      }
+    },
+    "minor_rich_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          3,
+          5
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          3,
+          5
+        ]
+      }
+    },
+    "opposite_single_pawn_wings": {
+      "op": "membership",
+      "raw": 7,
+      "values": [
+        3
+      ]
+    },
+    "paired_own_heavy_0123_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "paired_own_heavy_0234_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          2,
+          3,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_0234_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          2,
+          3,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_023_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          2,
+          3
+        ]
+      }
+    },
+    "paired_own_heavy_024_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          2,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          2,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_02_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          2
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          2
+        ]
+      }
+    },
+    "paired_own_heavy_034_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          0,
+          3,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          0,
+          3,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_123_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "paired_own_heavy_124_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          2,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          2,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_12_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          2
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          2
+        ]
+      }
+    },
+    "paired_own_heavy_134_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          3,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          3,
+          4
+        ]
+      }
+    },
+    "paired_own_heavy_14_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          1,
+          4
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          1,
+          4
+        ]
+      }
+    },
+    "paired_own_pieces_0123456789101112_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    "paired_own_pieces_0123456789_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      }
+    },
+    "paired_own_relative_pawns_01_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 4,
+        "values": [
+          0,
+          1
+        ]
+      },
+      "us": {
+        "raw": 1,
+        "values": [
+          0,
+          1
+        ]
+      }
+    },
+    "paired_own_relative_pawns_01_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 4,
+        "values": [
+          0,
+          1
+        ]
+      },
+      "us": {
+        "raw": 1,
+        "values": [
+          0,
+          1
+        ]
+      }
+    },
+    "pawn_band_category_1_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 4,
+        "values": [
+          1
+        ]
+      },
+      "us": {
+        "raw": 1,
+        "values": [
+          1
+        ]
+      }
+    },
+    "pawn_band_category_2_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 4,
+        "values": [
+          2
+        ]
+      },
+      "us": {
+        "raw": 1,
+        "values": [
+          2
+        ]
+      }
+    },
+    "pawn_band_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 4
+      },
+      "us": {
+        "raw": 1
+      }
+    },
+    "pawns_span_both_wings_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 7,
+        "values": [
+          0,
+          2
+        ]
+      },
+      "us": {
+        "raw": 7,
+        "values": [
+          0,
+          1
+        ]
+      }
+    },
+    "piece_count_absolute_difference": {
+      "relation": "absolute_difference",
+      "them": {
+        "raw": 3
+      },
+      "us": {
+        "raw": 0
+      }
+    },
+    "piece_count_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3
+      },
+      "us": {
+        "raw": 0
+      }
+    },
+    "piece_count_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3
+      },
+      "us": {
+        "raw": 0
+      }
+    },
+    "piece_range_10_14_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      }
+    },
+    "piece_range_13_14_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          13,
+          14
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          13,
+          14
+        ]
+      }
+    },
+    "piece_range_1_1_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          1
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          1
+        ]
+      }
+    },
+    "piece_range_1_3_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          1,
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "piece_range_2_6_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          2,
+          3,
+          4,
+          5,
+          6
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          2,
+          3,
+          4,
+          5,
+          6
+        ]
+      }
+    },
+    "piece_range_3_10_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "piece_range_3_12_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    "piece_range_3_8_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "piece_range_4_11_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ]
+      }
+    },
+    "piece_range_4_5_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          4,
+          5
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          4,
+          5
+        ]
+      }
+    },
+    "piece_range_5_10_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "piece_range_5_9_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      }
+    },
+    "piece_range_6_10_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "piece_range_6_10_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "piece_range_6_14_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      }
+    },
+    "piece_range_7_10_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "piece_range_7_14_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 3,
+        "values": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      }
+    },
+    "piece_range_9_11_difference": {
+      "relation": "difference",
+      "them": {
+        "raw": 3,
+        "values": [
+          9,
+          10,
+          11
+        ]
+      },
+      "us": {
+        "raw": 0,
+        "values": [
+          9,
+          10,
+          11
+        ]
+      }
+    },
+    "queenless_rooks_sum": {
+      "relation": "sum",
+      "them": {
+        "raw": 5,
+        "values": [
+          2,
+          3
+        ]
+      },
+      "us": {
+        "raw": 2,
+        "values": [
+          2,
+          3
+        ]
+      }
+    }
+  },
+  "derived_operations": {
+    "absolute_difference": "abs(us-them)",
+    "bit_set": "int((raw & bit)!=0)",
+    "difference": "us-them",
+    "equal": "int(us==them)",
+    "membership": "int(raw in values)",
+    "sum": "us+them"
+  },
+  "leaf_count": 128,
+  "material_context_states": [
+    [
+      0,
+      0,
+      4
+    ],
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      0,
+      2
+    ],
+    [
+      1,
+      0,
+      5
+    ],
+    [
+      1,
+      2,
+      4
+    ],
+    [
+      2,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      2
+    ],
+    [
+      2,
+      0,
+      5
+    ],
+    [
+      2,
+      1,
+      0
+    ],
+    [
+      2,
+      1,
+      2
+    ],
+    [
+      2,
+      1,
+      5
+    ],
+    [
+      2,
+      2,
+      4
+    ],
+    [
+      3,
+      0,
+      0
+    ],
+    [
+      3,
+      0,
+      1
+    ],
+    [
+      3,
+      0,
+      2
+    ],
+    [
+      3,
+      0,
+      3
+    ],
+    [
+      3,
+      0,
+      5
+    ],
+    [
+      3,
+      1,
+      0
+    ],
+    [
+      3,
+      1,
+      2
+    ],
+    [
+      3,
+      1,
+      5
+    ],
+    [
+      3,
+      2,
+      0
+    ],
+    [
+      3,
+      2,
+      2
+    ],
+    [
+      3,
+      2,
+      5
+    ],
+    [
+      3,
+      3,
+      4
+    ],
+    [
+      4,
+      0,
+      0
+    ],
+    [
+      4,
+      0,
+      1
+    ],
+    [
+      4,
+      0,
+      2
+    ],
+    [
+      4,
+      0,
+      3
+    ],
+    [
+      4,
+      0,
+      5
+    ],
+    [
+      4,
+      1,
+      0
+    ],
+    [
+      4,
+      1,
+      1
+    ],
+    [
+      4,
+      1,
+      2
+    ],
+    [
+      4,
+      1,
+      3
+    ],
+    [
+      4,
+      1,
+      5
+    ],
+    [
+      4,
+      2,
+      0
+    ],
+    [
+      4,
+      2,
+      2
+    ],
+    [
+      4,
+      2,
+      5
+    ],
+    [
+      4,
+      3,
+      4
+    ],
+    [
+      5,
+      0,
+      0
+    ],
+    [
+      5,
+      0,
+      1
+    ],
+    [
+      5,
+      0,
+      2
+    ],
+    [
+      5,
+      0,
+      3
+    ],
+    [
+      5,
+      0,
+      5
+    ],
+    [
+      5,
+      1,
+      0
+    ],
+    [
+      5,
+      1,
+      1
+    ],
+    [
+      5,
+      1,
+      2
+    ],
+    [
+      5,
+      1,
+      3
+    ],
+    [
+      5,
+      1,
+      5
+    ],
+    [
+      5,
+      2,
+      0
+    ],
+    [
+      5,
+      2,
+      2
+    ],
+    [
+      5,
+      2,
+      5
+    ],
+    [
+      5,
+      3,
+      0
+    ],
+    [
+      5,
+      3,
+      2
+    ],
+    [
+      5,
+      3,
+      4
+    ],
+    [
+      5,
+      3,
+      5
+    ],
+    [
+      6,
+      0,
+      0
+    ],
+    [
+      6,
+      0,
+      1
+    ],
+    [
+      6,
+      0,
+      2
+    ],
+    [
+      6,
+      0,
+      3
+    ],
+    [
+      6,
+      0,
+      5
+    ],
+    [
+      6,
+      1,
+      0
+    ],
+    [
+      6,
+      1,
+      1
+    ],
+    [
+      6,
+      1,
+      2
+    ],
+    [
+      6,
+      1,
+      3
+    ],
+    [
+      6,
+      1,
+      5
+    ],
+    [
+      6,
+      2,
+      0
+    ],
+    [
+      6,
+      2,
+      2
+    ],
+    [
+      6,
+      2,
+      5
+    ],
+    [
+      6,
+      3,
+      0
+    ],
+    [
+      6,
+      3,
+      2
+    ],
+    [
+      6,
+      3,
+      4
+    ],
+    [
+      6,
+      3,
+      5
+    ],
+    [
+      7,
+      0,
+      0
+    ],
+    [
+      7,
+      0,
+      1
+    ],
+    [
+      7,
+      0,
+      2
+    ],
+    [
+      7,
+      0,
+      3
+    ],
+    [
+      7,
+      0,
+      5
+    ],
+    [
+      7,
+      1,
+      0
+    ],
+    [
+      7,
+      1,
+      1
+    ],
+    [
+      7,
+      1,
+      2
+    ],
+    [
+      7,
+      1,
+      3
+    ],
+    [
+      7,
+      1,
+      5
+    ],
+    [
+      7,
+      2,
+      0
+    ],
+    [
+      7,
+      2,
+      1
+    ],
+    [
+      7,
+      2,
+      2
+    ],
+    [
+      7,
+      2,
+      3
+    ],
+    [
+      7,
+      2,
+      5
+    ],
+    [
+      7,
+      3,
+      0
+    ],
+    [
+      7,
+      3,
+      2
+    ],
+    [
+      7,
+      3,
+      4
+    ],
+    [
+      7,
+      3,
+      5
+    ],
+    [
+      8,
+      0,
+      0
+    ],
+    [
+      8,
+      0,
+      1
+    ],
+    [
+      8,
+      0,
+      2
+    ],
+    [
+      8,
+      0,
+      3
+    ],
+    [
+      8,
+      0,
+      5
+    ],
+    [
+      8,
+      1,
+      0
+    ],
+    [
+      8,
+      1,
+      1
+    ],
+    [
+      8,
+      1,
+      2
+    ],
+    [
+      8,
+      1,
+      3
+    ],
+    [
+      8,
+      1,
+      5
+    ],
+    [
+      8,
+      2,
+      0
+    ],
+    [
+      8,
+      2,
+      1
+    ],
+    [
+      8,
+      2,
+      2
+    ],
+    [
+      8,
+      2,
+      3
+    ],
+    [
+      8,
+      2,
+      5
+    ],
+    [
+      8,
+      3,
+      0
+    ],
+    [
+      8,
+      3,
+      2
+    ],
+    [
+      8,
+      3,
+      4
+    ],
+    [
+      8,
+      3,
+      5
+    ],
+    [
+      9,
+      0,
+      0
+    ],
+    [
+      9,
+      0,
+      1
+    ],
+    [
+      9,
+      0,
+      2
+    ],
+    [
+      9,
+      0,
+      3
+    ],
+    [
+      9,
+      0,
+      5
+    ],
+    [
+      9,
+      1,
+      0
+    ],
+    [
+      9,
+      1,
+      1
+    ],
+    [
+      9,
+      1,
+      2
+    ],
+    [
+      9,
+      1,
+      3
+    ],
+    [
+      9,
+      1,
+      5
+    ],
+    [
+      9,
+      2,
+      0
+    ],
+    [
+      9,
+      2,
+      1
+    ],
+    [
+      9,
+      2,
+      2
+    ],
+    [
+      9,
+      2,
+      3
+    ],
+    [
+      9,
+      2,
+      5
+    ],
+    [
+      9,
+      3,
+      0
+    ],
+    [
+      9,
+      3,
+      1
+    ],
+    [
+      9,
+      3,
+      2
+    ],
+    [
+      9,
+      3,
+      3
+    ],
+    [
+      9,
+      3,
+      5
+    ],
+    [
+      10,
+      0,
+      0
+    ],
+    [
+      10,
+      0,
+      1
+    ],
+    [
+      10,
+      0,
+      2
+    ],
+    [
+      10,
+      0,
+      3
+    ],
+    [
+      10,
+      0,
+      5
+    ],
+    [
+      10,
+      1,
+      0
+    ],
+    [
+      10,
+      1,
+      1
+    ],
+    [
+      10,
+      1,
+      2
+    ],
+    [
+      10,
+      1,
+      3
+    ],
+    [
+      10,
+      1,
+      5
+    ],
+    [
+      10,
+      2,
+      0
+    ],
+    [
+      10,
+      2,
+      1
+    ],
+    [
+      10,
+      2,
+      2
+    ],
+    [
+      10,
+      2,
+      3
+    ],
+    [
+      10,
+      2,
+      5
+    ],
+    [
+      10,
+      3,
+      0
+    ],
+    [
+      10,
+      3,
+      1
+    ],
+    [
+      10,
+      3,
+      2
+    ],
+    [
+      10,
+      3,
+      3
+    ],
+    [
+      10,
+      3,
+      5
+    ],
+    [
+      11,
+      0,
+      0
+    ],
+    [
+      11,
+      0,
+      1
+    ],
+    [
+      11,
+      0,
+      2
+    ],
+    [
+      11,
+      0,
+      3
+    ],
+    [
+      11,
+      0,
+      5
+    ],
+    [
+      11,
+      1,
+      0
+    ],
+    [
+      11,
+      1,
+      1
+    ],
+    [
+      11,
+      1,
+      2
+    ],
+    [
+      11,
+      1,
+      3
+    ],
+    [
+      11,
+      1,
+      5
+    ],
+    [
+      11,
+      2,
+      0
+    ],
+    [
+      11,
+      2,
+      1
+    ],
+    [
+      11,
+      2,
+      2
+    ],
+    [
+      11,
+      2,
+      3
+    ],
+    [
+      11,
+      2,
+      5
+    ],
+    [
+      11,
+      3,
+      0
+    ],
+    [
+      11,
+      3,
+      1
+    ],
+    [
+      11,
+      3,
+      2
+    ],
+    [
+      11,
+      3,
+      3
+    ],
+    [
+      11,
+      3,
+      5
+    ],
+    [
+      12,
+      0,
+      0
+    ],
+    [
+      12,
+      0,
+      1
+    ],
+    [
+      12,
+      0,
+      2
+    ],
+    [
+      12,
+      0,
+      3
+    ],
+    [
+      12,
+      0,
+      5
+    ],
+    [
+      12,
+      1,
+      0
+    ],
+    [
+      12,
+      1,
+      1
+    ],
+    [
+      12,
+      1,
+      2
+    ],
+    [
+      12,
+      1,
+      3
+    ],
+    [
+      12,
+      1,
+      5
+    ],
+    [
+      12,
+      2,
+      0
+    ],
+    [
+      12,
+      2,
+      1
+    ],
+    [
+      12,
+      2,
+      2
+    ],
+    [
+      12,
+      2,
+      3
+    ],
+    [
+      12,
+      2,
+      5
+    ],
+    [
+      12,
+      3,
+      0
+    ],
+    [
+      12,
+      3,
+      1
+    ],
+    [
+      12,
+      3,
+      2
+    ],
+    [
+      12,
+      3,
+      3
+    ],
+    [
+      12,
+      3,
+      5
+    ],
+    [
+      13,
+      0,
+      0
+    ],
+    [
+      13,
+      0,
+      1
+    ],
+    [
+      13,
+      0,
+      2
+    ],
+    [
+      13,
+      0,
+      3
+    ],
+    [
+      13,
+      0,
+      5
+    ],
+    [
+      13,
+      1,
+      0
+    ],
+    [
+      13,
+      1,
+      1
+    ],
+    [
+      13,
+      1,
+      2
+    ],
+    [
+      13,
+      1,
+      3
+    ],
+    [
+      13,
+      1,
+      5
+    ],
+    [
+      13,
+      2,
+      0
+    ],
+    [
+      13,
+      2,
+      1
+    ],
+    [
+      13,
+      2,
+      2
+    ],
+    [
+      13,
+      2,
+      3
+    ],
+    [
+      13,
+      2,
+      5
+    ],
+    [
+      13,
+      3,
+      0
+    ],
+    [
+      13,
+      3,
+      1
+    ],
+    [
+      13,
+      3,
+      2
+    ],
+    [
+      13,
+      3,
+      3
+    ],
+    [
+      13,
+      3,
+      5
+    ],
+    [
+      14,
+      0,
+      0
+    ],
+    [
+      14,
+      0,
+      1
+    ],
+    [
+      14,
+      0,
+      2
+    ],
+    [
+      14,
+      0,
+      3
+    ],
+    [
+      14,
+      0,
+      5
+    ],
+    [
+      14,
+      1,
+      0
+    ],
+    [
+      14,
+      1,
+      1
+    ],
+    [
+      14,
+      1,
+      2
+    ],
+    [
+      14,
+      1,
+      3
+    ],
+    [
+      14,
+      1,
+      5
+    ],
+    [
+      14,
+      2,
+      0
+    ],
+    [
+      14,
+      2,
+      1
+    ],
+    [
+      14,
+      2,
+      2
+    ],
+    [
+      14,
+      2,
+      3
+    ],
+    [
+      14,
+      2,
+      5
+    ],
+    [
+      15,
+      0,
+      0
+    ],
+    [
+      15,
+      0,
+      1
+    ],
+    [
+      15,
+      0,
+      2
+    ],
+    [
+      15,
+      0,
+      3
+    ],
+    [
+      15,
+      0,
+      5
+    ],
+    [
+      15,
+      1,
+      0
+    ],
+    [
+      15,
+      1,
+      1
+    ],
+    [
+      15,
+      1,
+      2
+    ],
+    [
+      15,
+      1,
+      3
+    ],
+    [
+      15,
+      1,
+      5
+    ],
+    [
+      15,
+      2,
+      0
+    ],
+    [
+      15,
+      2,
+      1
+    ],
+    [
+      15,
+      2,
+      2
+    ],
+    [
+      15,
+      2,
+      3
+    ],
+    [
+      15,
+      2,
+      5
+    ]
+  ],
+  "max_depth": 10,
+  "nodes": [
+    {
+      "condition": {
+        "feature": "piece_range_4_11_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 2,
+      "node_id": 0,
+      "yes": 1
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 3,
+        "values": [
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ]
+      },
+      "no": 3,
+      "node_id": 1,
+      "yes": 4
+    },
+    {
+      "condition": {
+        "feature": "piece_range_6_10_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 6,
+      "node_id": 2,
+      "yes": 5
+    },
+    {
+      "condition": {
+        "feature": "paired_own_pieces_0123456789_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 12,
+      "node_id": 3,
+      "yes": 11
+    },
+    {
+      "condition": {
+        "feature": "piece_count_absolute_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 16,
+      "node_id": 4,
+      "yes": 15
+    },
+    {
+      "condition": {
+        "feature": "piece_range_4_5_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 10,
+      "node_id": 5,
+      "yes": 9
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_02_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 8,
+      "node_id": 6,
+      "yes": 7
+    },
+    {
+      "condition": {
+        "feature": "heavy_category_equal",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 24,
+      "node_id": 7,
+      "yes": 23
+    },
+    {
+      "condition": {
+        "feature": "pawn_band_sum",
+        "op": "derived_leq",
+        "threshold": 4.5
+      },
+      "no": 14,
+      "node_id": 8,
+      "yes": 13
+    },
+    {
+      "condition": {
+        "feature": "piece_range_3_10_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 36,
+      "node_id": 9,
+      "yes": 35
+    },
+    {
+      "condition": {
+        "feature": "piece_range_5_10_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 26,
+      "node_id": 10,
+      "yes": 25
+    },
+    {
+      "condition": {
+        "feature": "piece_range_7_14_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 28,
+      "node_id": 11,
+      "yes": 27
+    },
+    {
+      "condition": {
+        "feature": "piece_range_3_12_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 20,
+      "node_id": 12,
+      "yes": 19
+    },
+    {
+      "condition": {
+        "feature": "paired_own_relative_pawns_01_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 18,
+      "node_id": 13,
+      "yes": 17
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 37,
+      "node_id": 14,
+      "yes": 38
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "no": 33,
+      "node_id": 15,
+      "yes": 34
+    },
+    {
+      "condition": {
+        "feature": "piece_count_difference",
+        "op": "derived_leq",
+        "threshold": 0.0
+      },
+      "no": 22,
+      "node_id": 16,
+      "yes": 21
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_12_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 30,
+      "node_id": 17,
+      "yes": 29
+    },
+    {
+      "condition": {
+        "feature": "pawn_band_sum",
+        "op": "derived_leq",
+        "threshold": 2.5
+      },
+      "no": 40,
+      "node_id": 18,
+      "yes": 39
+    },
+    {
+      "condition": {
+        "feature": "piece_range_1_1_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 32,
+      "node_id": 19,
+      "yes": 31
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 3,
+        "values": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      "no": 57,
+      "node_id": 20,
+      "yes": 58
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 3,
+        "values": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "no": 51,
+      "node_id": 21,
+      "yes": 52
+    },
+    {
+      "condition": {
+        "feature": "piece_range_13_14_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 48,
+      "node_id": 22,
+      "yes": 47
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_023_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 60,
+      "node_id": 23,
+      "yes": 59
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 53,
+      "node_id": 24,
+      "yes": 54
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          3,
+          4
+        ]
+      },
+      "no": 61,
+      "node_id": 25,
+      "yes": 62
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0,
+          3
+        ]
+      },
+      "no": 45,
+      "node_id": 26,
+      "yes": 46
+    },
+    {
+      "leaf_id": 0,
+      "node_id": 27
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_12_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 50,
+      "node_id": 28,
+      "yes": 49
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 83,
+      "node_id": 29,
+      "yes": 84
+    },
+    {
+      "condition": {
+        "feature": "piece_range_2_6_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 90,
+      "node_id": 30,
+      "yes": 89
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ]
+      },
+      "no": 73,
+      "node_id": 31,
+      "yes": 74
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          1
+        ]
+      },
+      "no": 69,
+      "node_id": 32,
+      "yes": 70
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_123_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 78,
+      "node_id": 33,
+      "yes": 77
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_134_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 108,
+      "node_id": 34,
+      "yes": 107
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_024_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 76,
+      "node_id": 35,
+      "yes": 75
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 3,
+        "values": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "no": 55,
+      "node_id": 36,
+      "yes": 56
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          2,
+          5,
+          6
+        ]
+      },
+      "no": 99,
+      "node_id": 37,
+      "yes": 100
+    },
+    {
+      "condition": {
+        "feature": "piece_range_7_10_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 42,
+      "node_id": 38,
+      "yes": 41
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 3,
+        "values": [
+          10,
+          11,
+          12
+        ]
+      },
+      "no": 67,
+      "node_id": 39,
+      "yes": 68
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 4,
+        "values": [
+          0,
+          1
+        ]
+      },
+      "no": 65,
+      "node_id": 40,
+      "yes": 66
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "no": 121,
+      "node_id": 41,
+      "yes": 122
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 5,
+        "values": [
+          2,
+          3
+        ]
+      },
+      "no": 43,
+      "node_id": 42,
+      "yes": 44
+    },
+    {
+      "condition": {
+        "feature": "piece_range_3_8_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 96,
+      "node_id": 43,
+      "yes": 95
+    },
+    {
+      "condition": {
+        "feature": "piece_range_9_11_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 136,
+      "node_id": 44,
+      "yes": 135
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          2
+        ]
+      },
+      "no": 87,
+      "node_id": 45,
+      "yes": 88
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2,
+          6
+        ]
+      },
+      "no": 71,
+      "node_id": 46,
+      "yes": 72
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_023_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 80,
+      "node_id": 47,
+      "yes": 79
+    },
+    {
+      "condition": {
+        "feature": "heavy_category_equal",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 234,
+      "node_id": 48,
+      "yes": 233
+    },
+    {
+      "leaf_id": 1,
+      "node_id": 49
+    },
+    {
+      "leaf_id": 2,
+      "node_id": 50
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_0234_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 124,
+      "node_id": 51,
+      "yes": 123
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_02_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 138,
+      "node_id": 52,
+      "yes": 137
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          5,
+          6
+        ]
+      },
+      "no": 141,
+      "node_id": 53,
+      "yes": 142
+    },
+    {
+      "condition": {
+        "feature": "queenless_rooks_sum",
+        "op": "derived_leq",
+        "threshold": 1.0
+      },
+      "no": 64,
+      "node_id": 54,
+      "yes": 63
+    },
+    {
+      "condition": {
+        "feature": "paired_own_relative_pawns_01_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 104,
+      "node_id": 55,
+      "yes": 103
+    },
+    {
+      "condition": {
+        "feature": "pawn_band_category_1_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 110,
+      "node_id": 56,
+      "yes": 109
+    },
+    {
+      "condition": {
+        "feature": "piece_range_1_3_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 86,
+      "node_id": 57,
+      "yes": 85
+    },
+    {
+      "condition": {
+        "feature": "opposite_single_pawn_wings",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 198,
+      "node_id": 58,
+      "yes": 197
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_0234_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 130,
+      "node_id": 59,
+      "yes": 129
+    },
+    {
+      "condition": {
+        "feature": "minor_rich_difference",
+        "op": "derived_leq",
+        "threshold": 0.0
+      },
+      "no": 92,
+      "node_id": 60,
+      "yes": 91
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2,
+          6
+        ]
+      },
+      "no": 131,
+      "node_id": 61,
+      "yes": 132
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 94,
+      "node_id": 62,
+      "yes": 93
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 2,
+        "values": [
+          0,
+          1,
+          3,
+          4
+        ]
+      },
+      "no": 149,
+      "node_id": 63,
+      "yes": 150
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 114,
+      "node_id": 64,
+      "yes": 113
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 128,
+      "node_id": 65,
+      "yes": 127
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 126,
+      "node_id": 66,
+      "yes": 125
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 98,
+      "node_id": 67,
+      "yes": 97
+    },
+    {
+      "leaf_id": 3,
+      "node_id": 68
+    },
+    {
+      "leaf_id": 4,
+      "node_id": 69
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 2,
+        "values": [
+          3,
+          4
+        ]
+      },
+      "no": 167,
+      "node_id": 70,
+      "yes": 168
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          4,
+          5
+        ]
+      },
+      "no": 163,
+      "node_id": 71,
+      "yes": 164
+    },
+    {
+      "condition": {
+        "feature": "piece_range_6_10_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 82,
+      "node_id": 72,
+      "yes": 81
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 1,
+        "values": [
+          0
+        ]
+      },
+      "no": 111,
+      "node_id": 73,
+      "yes": 112
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          3
+        ]
+      },
+      "no": 203,
+      "node_id": 74,
+      "yes": 204
+    },
+    {
+      "condition": {
+        "feature": "heavy_category_1_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 178,
+      "node_id": 75,
+      "yes": 177
+    },
+    {
+      "condition": {
+        "feature": "pawn_band_sum",
+        "op": "derived_leq",
+        "threshold": 4.5
+      },
+      "no": 102,
+      "node_id": 76,
+      "yes": 101
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          2,
+          4
+        ]
+      },
+      "no": 171,
+      "node_id": 77,
+      "yes": 172
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_034_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 250,
+      "node_id": 78,
+      "yes": 249
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_124_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 214,
+      "node_id": 79,
+      "yes": 213
+    },
+    {
+      "condition": {
+        "feature": "paired_own_pieces_0123456789101112_sum",
+        "op": "derived_leq",
+        "threshold": 1.0
+      },
+      "no": 118,
+      "node_id": 80,
+      "yes": 117
+    },
+    {
+      "leaf_id": 5,
+      "node_id": 81
+    },
+    {
+      "condition": {
+        "feature": "piece_range_6_14_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 120,
+      "node_id": 82,
+      "yes": 119
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 243,
+      "node_id": 83,
+      "yes": 244
+    },
+    {
+      "condition": {
+        "feature": "piece_range_7_14_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 116,
+      "node_id": 84,
+      "yes": 115
+    },
+    {
+      "condition": {
+        "feature": "opposite_single_pawn_wings",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 196,
+      "node_id": 85,
+      "yes": 195
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          3
+        ]
+      },
+      "no": 161,
+      "node_id": 86,
+      "yes": 162
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          1
+        ]
+      },
+      "no": 143,
+      "node_id": 87,
+      "yes": 144
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 223,
+      "node_id": 88,
+      "yes": 224
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2,
+          6
+        ]
+      },
+      "no": 145,
+      "node_id": 89,
+      "yes": 146
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 165,
+      "node_id": 90,
+      "yes": 166
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2,
+          6
+        ]
+      },
+      "no": 237,
+      "node_id": 91,
+      "yes": 238
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2,
+          6
+        ]
+      },
+      "no": 201,
+      "node_id": 92,
+      "yes": 202
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0,
+          1,
+          3
+        ]
+      },
+      "no": 221,
+      "node_id": 93,
+      "yes": 222
+    },
+    {
+      "condition": {
+        "feature": "piece_range_5_9_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 106,
+      "node_id": 94,
+      "yes": 105
+    },
+    {
+      "leaf_id": 6,
+      "node_id": 95
+    },
+    {
+      "leaf_id": 7,
+      "node_id": 96
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0,
+          1,
+          3
+        ]
+      },
+      "no": 169,
+      "node_id": 97,
+      "yes": 170
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 181,
+      "node_id": 98,
+      "yes": 182
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          3,
+          4,
+          6
+        ]
+      },
+      "no": 153,
+      "node_id": 99,
+      "yes": 154
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 185,
+      "node_id": 100,
+      "yes": 186
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          2,
+          4
+        ]
+      },
+      "no": 151,
+      "node_id": 101,
+      "yes": 152
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 239,
+      "node_id": 102,
+      "yes": 240
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_02_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 184,
+      "node_id": 103,
+      "yes": 183
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_134_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 156,
+      "node_id": 104,
+      "yes": 155
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 159,
+      "node_id": 105,
+      "yes": 160
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 173,
+      "node_id": 106,
+      "yes": 174
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 179,
+      "node_id": 107,
+      "yes": 180
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 2,
+        "values": [
+          1
+        ]
+      },
+      "no": 229,
+      "node_id": 108,
+      "yes": 230
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_124_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 188,
+      "node_id": 109,
+      "yes": 187
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_02_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 194,
+      "node_id": 110,
+      "yes": 193
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          3
+        ]
+      },
+      "no": 139,
+      "node_id": 111,
+      "yes": 140
+    },
+    {
+      "leaf_id": 8,
+      "node_id": 112
+    },
+    {
+      "leaf_id": 9,
+      "node_id": 113
+    },
+    {
+      "condition": {
+        "feature": "piece_range_10_14_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 190,
+      "node_id": 114,
+      "yes": 189
+    },
+    {
+      "leaf_id": 10,
+      "node_id": 115
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0,
+          3
+        ]
+      },
+      "no": 133,
+      "node_id": 116,
+      "yes": 134
+    },
+    {
+      "leaf_id": 11,
+      "node_id": 117
+    },
+    {
+      "leaf_id": 12,
+      "node_id": 118
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          3,
+          4,
+          5,
+          6
+        ]
+      },
+      "no": 205,
+      "node_id": 119,
+      "yes": 206
+    },
+    {
+      "condition": {
+        "feature": "minor_rich_absolute_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 248,
+      "node_id": 120,
+      "yes": 247
+    },
+    {
+      "leaf_id": 13,
+      "node_id": 121
+    },
+    {
+      "leaf_id": 14,
+      "node_id": 122
+    },
+    {
+      "leaf_id": 15,
+      "node_id": 123
+    },
+    {
+      "leaf_id": 16,
+      "node_id": 124
+    },
+    {
+      "leaf_id": 17,
+      "node_id": 125
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          1,
+          2
+        ]
+      },
+      "no": 199,
+      "node_id": 126,
+      "yes": 200
+    },
+    {
+      "leaf_id": 18,
+      "node_id": 127
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 0,
+        "values": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "no": 147,
+      "node_id": 128,
+      "yes": 148
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 2,
+        "values": [
+          0,
+          1,
+          2,
+          4
+        ]
+      },
+      "no": 217,
+      "node_id": 129,
+      "yes": 218
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 5,
+        "values": [
+          1
+        ]
+      },
+      "no": 219,
+      "node_id": 130,
+      "yes": 220
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          0,
+          2,
+          4,
+          5
+        ]
+      },
+      "no": 245,
+      "node_id": 131,
+      "yes": 246
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0,
+          1
+        ]
+      },
+      "no": 157,
+      "node_id": 132,
+      "yes": 158
+    },
+    {
+      "leaf_id": 19,
+      "node_id": 133
+    },
+    {
+      "leaf_id": 20,
+      "node_id": 134
+    },
+    {
+      "leaf_id": 21,
+      "node_id": 135
+    },
+    {
+      "leaf_id": 22,
+      "node_id": 136
+    },
+    {
+      "leaf_id": 23,
+      "node_id": 137
+    },
+    {
+      "condition": {
+        "feature": "piece_count_difference",
+        "op": "derived_leq",
+        "threshold": -1.5
+      },
+      "no": 208,
+      "node_id": 138,
+      "yes": 207
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_14_sum",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 176,
+      "node_id": 139,
+      "yes": 175
+    },
+    {
+      "leaf_id": 24,
+      "node_id": 140
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 211,
+      "node_id": 141,
+      "yes": 212
+    },
+    {
+      "leaf_id": 25,
+      "node_id": 142
+    },
+    {
+      "leaf_id": 26,
+      "node_id": 143
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          3,
+          4,
+          5
+        ]
+      },
+      "no": 227,
+      "node_id": 144,
+      "yes": 228
+    },
+    {
+      "leaf_id": 27,
+      "node_id": 145
+    },
+    {
+      "condition": {
+        "feature": "pawns_span_both_wings_sum",
+        "op": "derived_leq",
+        "threshold": 1.5
+      },
+      "no": 232,
+      "node_id": 146,
+      "yes": 231
+    },
+    {
+      "leaf_id": 28,
+      "node_id": 147
+    },
+    {
+      "leaf_id": 29,
+      "node_id": 148
+    },
+    {
+      "leaf_id": 30,
+      "node_id": 149
+    },
+    {
+      "leaf_id": 31,
+      "node_id": 150
+    },
+    {
+      "leaf_id": 32,
+      "node_id": 151
+    },
+    {
+      "leaf_id": 33,
+      "node_id": 152
+    },
+    {
+      "leaf_id": 34,
+      "node_id": 153
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 6,
+        "values": [
+          1,
+          2,
+          4,
+          6
+        ]
+      },
+      "no": 225,
+      "node_id": 154,
+      "yes": 226
+    },
+    {
+      "leaf_id": 35,
+      "node_id": 155
+    },
+    {
+      "leaf_id": 36,
+      "node_id": 156
+    },
+    {
+      "leaf_id": 37,
+      "node_id": 157
+    },
+    {
+      "leaf_id": 38,
+      "node_id": 158
+    },
+    {
+      "condition": {
+        "feature": "major_present_absolute_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 236,
+      "node_id": 159,
+      "yes": 235
+    },
+    {
+      "leaf_id": 39,
+      "node_id": 160
+    },
+    {
+      "leaf_id": 40,
+      "node_id": 161
+    },
+    {
+      "leaf_id": 41,
+      "node_id": 162
+    },
+    {
+      "leaf_id": 42,
+      "node_id": 163
+    },
+    {
+      "leaf_id": 43,
+      "node_id": 164
+    },
+    {
+      "leaf_id": 44,
+      "node_id": 165
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 7,
+        "values": [
+          0
+        ]
+      },
+      "no": 253,
+      "node_id": 166,
+      "yes": 254
+    },
+    {
+      "leaf_id": 45,
+      "node_id": 167
+    },
+    {
+      "leaf_id": 46,
+      "node_id": 168
+    },
+    {
+      "leaf_id": 47,
+      "node_id": 169
+    },
+    {
+      "leaf_id": 48,
+      "node_id": 170
+    },
+    {
+      "leaf_id": 49,
+      "node_id": 171
+    },
+    {
+      "leaf_id": 50,
+      "node_id": 172
+    },
+    {
+      "leaf_id": 51,
+      "node_id": 173
+    },
+    {
+      "leaf_id": 52,
+      "node_id": 174
+    },
+    {
+      "leaf_id": 53,
+      "node_id": 175
+    },
+    {
+      "leaf_id": 54,
+      "node_id": 176
+    },
+    {
+      "leaf_id": 55,
+      "node_id": 177
+    },
+    {
+      "leaf_id": 56,
+      "node_id": 178
+    },
+    {
+      "leaf_id": 57,
+      "node_id": 179
+    },
+    {
+      "leaf_id": 58,
+      "node_id": 180
+    },
+    {
+      "leaf_id": 59,
+      "node_id": 181
+    },
+    {
+      "leaf_id": 60,
+      "node_id": 182
+    },
+    {
+      "leaf_id": 61,
+      "node_id": 183
+    },
+    {
+      "leaf_id": 62,
+      "node_id": 184
+    },
+    {
+      "leaf_id": 63,
+      "node_id": 185
+    },
+    {
+      "leaf_id": 64,
+      "node_id": 186
+    },
+    {
+      "leaf_id": 65,
+      "node_id": 187
+    },
+    {
+      "leaf_id": 66,
+      "node_id": 188
+    },
+    {
+      "leaf_id": 67,
+      "node_id": 189
+    },
+    {
+      "condition": {
+        "feature": "pawn_band_category_2_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 192,
+      "node_id": 190,
+      "yes": 191
+    },
+    {
+      "leaf_id": 68,
+      "node_id": 191
+    },
+    {
+      "condition": {
+        "op": "raw_membership",
+        "raw_feature": 1,
+        "values": [
+          0,
+          1
+        ]
+      },
+      "no": 241,
+      "node_id": 192,
+      "yes": 242
+    },
+    {
+      "leaf_id": 69,
+      "node_id": 193
+    },
+    {
+      "leaf_id": 70,
+      "node_id": 194
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_0234_difference",
+        "op": "derived_leq",
+        "threshold": -0.5
+      },
+      "no": 216,
+      "node_id": 195,
+      "yes": 215
+    },
+    {
+      "leaf_id": 71,
+      "node_id": 196
+    },
+    {
+      "condition": {
+        "feature": "paired_own_heavy_0123_difference",
+        "op": "derived_leq",
+        "threshold": 0.5
+      },
+      "no": 210,
+      "node_id": 197,
+      "yes": 209
+    },
+    {
+      "leaf_id": 72,
+      "node_id": 198
+    },
+    {
+      "leaf_id": 73,
+      "node_id": 199
+    },
+    {
+      "condition": {
+        "feature": "piece_count_sum",
+        "op": "derived_leq",
+        "threshold": 17.5
+      },
+      "no": 252,
+      "node_id": 200,
+      "yes": 251
+    },
+    {
+      "leaf_id": 74,
+      "node_id": 201
+    },
+    {
+      "leaf_id": 75,
+      "node_id": 202
+    },
+    {
+      "leaf_id": 76,
+      "node_id": 203
+    },
+    {
+      "leaf_id": 77,
+      "node_id": 204
+    },
+    {
+      "leaf_id": 78,
+      "node_id": 205
+    },
+    {
+      "leaf_id": 79,
+      "node_id": 206
+    },
+    {
+      "leaf_id": 80,
+      "node_id": 207
+    },
+    {
+      "leaf_id": 81,
+      "node_id": 208
+    },
+    {
+      "leaf_id": 82,
+      "node_id": 209
+    },
+    {
+      "leaf_id": 83,
+      "node_id": 210
+    },
+    {
+      "leaf_id": 84,
+      "node_id": 211
+    },
+    {
+      "leaf_id": 85,
+      "node_id": 212
+    },
+    {
+      "leaf_id": 86,
+      "node_id": 213
+    },
+    {
+      "leaf_id": 87,
+      "node_id": 214
+    },
+    {
+      "leaf_id": 88,
+      "node_id": 215
+    },
+    {
+      "leaf_id": 89,
+      "node_id": 216
+    },
+    {
+      "leaf_id": 90,
+      "node_id": 217
+    },
+    {
+      "leaf_id": 91,
+      "node_id": 218
+    },
+    {
+      "leaf_id": 92,
+      "node_id": 219
+    },
+    {
+      "leaf_id": 93,
+      "node_id": 220
+    },
+    {
+      "leaf_id": 94,
+      "node_id": 221
+    },
+    {
+      "leaf_id": 95,
+      "node_id": 222
+    },
+    {
+      "leaf_id": 96,
+      "node_id": 223
+    },
+    {
+      "leaf_id": 97,
+      "node_id": 224
+    },
+    {
+      "leaf_id": 98,
+      "node_id": 225
+    },
+    {
+      "leaf_id": 99,
+      "node_id": 226
+    },
+    {
+      "leaf_id": 100,
+      "node_id": 227
+    },
+    {
+      "leaf_id": 101,
+      "node_id": 228
+    },
+    {
+      "leaf_id": 102,
+      "node_id": 229
+    },
+    {
+      "leaf_id": 103,
+      "node_id": 230
+    },
+    {
+      "leaf_id": 104,
+      "node_id": 231
+    },
+    {
+      "leaf_id": 105,
+      "node_id": 232
+    },
+    {
+      "leaf_id": 106,
+      "node_id": 233
+    },
+    {
+      "leaf_id": 107,
+      "node_id": 234
+    },
+    {
+      "leaf_id": 108,
+      "node_id": 235
+    },
+    {
+      "leaf_id": 109,
+      "node_id": 236
+    },
+    {
+      "leaf_id": 110,
+      "node_id": 237
+    },
+    {
+      "leaf_id": 111,
+      "node_id": 238
+    },
+    {
+      "leaf_id": 112,
+      "node_id": 239
+    },
+    {
+      "leaf_id": 113,
+      "node_id": 240
+    },
+    {
+      "leaf_id": 114,
+      "node_id": 241
+    },
+    {
+      "leaf_id": 115,
+      "node_id": 242
+    },
+    {
+      "leaf_id": 116,
+      "node_id": 243
+    },
+    {
+      "leaf_id": 117,
+      "node_id": 244
+    },
+    {
+      "leaf_id": 118,
+      "node_id": 245
+    },
+    {
+      "leaf_id": 119,
+      "node_id": 246
+    },
+    {
+      "leaf_id": 120,
+      "node_id": 247
+    },
+    {
+      "leaf_id": 121,
+      "node_id": 248
+    },
+    {
+      "leaf_id": 122,
+      "node_id": 249
+    },
+    {
+      "leaf_id": 123,
+      "node_id": 250
+    },
+    {
+      "leaf_id": 124,
+      "node_id": 251
+    },
+    {
+      "leaf_id": 125,
+      "node_id": 252
+    },
+    {
+      "leaf_id": 126,
+      "node_id": 253
+    },
+    {
+      "leaf_id": 127,
+      "node_id": 254
+    }
+  ],
+  "raw_definitions": {
+    "categorical_arithmetic": "Heavy/category IDs are not numeric material values. Paired tests use membership indicators, equality, sums and signed differences of indicators.",
+    "coarseness": "Use only these coarse fields; no exact piece-count vectors, king coordinates, or invented opponent advancement flag.",
+    "heavy": "2*(0 if Q>0 else 1 if R>0 else 2) + int(N+B+opposite_coloured_bishop_pair_bonus > R+2*Q); unclipped Q/R/N/B counts.",
+    "king_state": "4*int(our_relative_rank>=2) + 2*int(our_relative_rank>their_relative_rank) + int(king files are on opposite a-d/e-h halves).",
+    "pawn_wings": "Let us/them be 0 (pawnless), 1 (a-d pawns only), 2 (e-h pawns only), 3 (both wings). Code 0 if both==3; 1 if only us==3; 2 if only them==3; 3 if both nonzero single wings differ; otherwise 4.",
+    "perspective": "Us is side to move; each king relative rank is measured from that king own home rank, 0..7.",
+    "pieces": "min(15, occupied pieces of that side minus its king); includes pawns.",
+    "relative_pawns": "p=min(8,total,pawn count); 0 if p==0, else 1 if p<=total-p, else 2 if p<=total-p+2, else 3.",
+    "signed_arithmetic": "Promote operands before subtraction; no unsigned underflow."
+  },
+  "raw_features": [
+    {
+      "index": 0,
+      "name": "own_pieces",
+      "size": 16
+    },
+    {
+      "index": 1,
+      "name": "own_relative_pawns",
+      "size": 4
+    },
+    {
+      "index": 2,
+      "name": "own_heavy",
+      "size": 6
+    },
+    {
+      "index": 3,
+      "name": "opp_pieces",
+      "size": 16
+    },
+    {
+      "index": 4,
+      "name": "opp_relative_pawns",
+      "size": 4
+    },
+    {
+      "index": 5,
+      "name": "opp_heavy",
+      "size": 6
+    },
+    {
+      "index": 6,
+      "name": "king_state",
+      "size": 8
+    },
+    {
+      "index": 7,
+      "name": "pawn_wings",
+      "size": 5
+    }
+  ],
+  "root": 0,
+  "schema": "nnue-fixed-context-tree/v1"
+}

@@ -88,13 +88,21 @@ def main():
         check=True,
     )
     lib = ctypes.CDLL(str(shared))
-    lib.tree128_check_cartesian.restype = ctypes.c_int
-    assert lib.tree128_check_cartesian() == 1
     fn = lib.tree128_select_many
     ptr = np.ctypeslib.ndpointer(dtype=np.int16, flags="C_CONTIGUOUS")
     fn.argtypes = [ptr, ctypes.c_int, ptr]
+    sizes = [f["size"] for f in SPEC["raw_features"]]
+    for start in range(0, 5898240, 16384):
+        indexes = np.arange(start, min(start + 16384, 5898240), dtype=np.int64)
+        raw = np.empty((len(indexes), 8), dtype=np.int16)
+        for column in reversed(range(8)):
+            raw[:, column] = indexes % sizes[column]
+            indexes //= sizes[column]
+        native = np.empty(len(raw), np.int16)
+        fn(raw, len(raw), native)
+        assert np.array_equal(native, predict(raw)), start
     print(
-        "All 5,898,240 bounded contexts: reference/binary/small_switch/mixed exact parity",
+        "All 5,898,240 bounded contexts: single binary evaluator matches frozen JSON",
         flush=True,
     )
     X, teacher, net_sha = load_lut(args.analysis / "nn-5ea7f7979fc4.nnue")
@@ -104,10 +112,10 @@ def main():
     result = np.empty(len(X), np.int16)
     for start in range(0, len(X), 16384):
         raw = np.ascontiguousarray(X[start : start + 16384], dtype=np.int16)
-        native = np.empty((len(raw), 4), np.int16)
+        native = np.empty(len(raw), np.int16)
         fn(raw, len(raw), native)
         expected = predict(raw)
-        assert np.all(native == expected[:, None]), start
+        assert np.array_equal(native, expected), start
         sklearn = np.array(
             [
                 canonical[int(n)]

@@ -7,7 +7,6 @@ The semantic SHA is independent of lowering/layout SHA. No analysis imports.
 import argparse
 import hashlib
 import json
-import math
 from pathlib import Path
 
 from . import IDENTITY, ROOT, SPEC, TABLE_HASH
@@ -34,47 +33,19 @@ def member(i, values):
 
 def expression(e):
     op = e["op"]
-    if op == "constant":
-        return str(e["value"]).lower()
     if op == "member":
         return member(e["field"], e["values"])
-    if op == "not":
-        return f"!({expression(e['arg'])})"
     if op in ("and", "or", "bool_equal"):
         symbol = {"and": "&&", "or": "||", "bool_equal": "=="}[op]
         return f"({expression(e['left'])} {symbol} {expression(e['right'])})"
     a, b = map(field, e["fields"])
     r, k = e["relation"], e["threshold"]
     return {
-        "always": lambda: "true",
         "ne": lambda: f"({a} != {b})",
         "sum": lambda: f"({a} + {b} <= {k})",
         "difference": lambda: f"({a} - {b} <= {k})",
         "absolute_difference": lambda: f"(std::abs({a} - {b}) <= {k})",
     }[r]()
-
-
-def operand(d):
-    return f"int({member(d['raw'], d['values'])})" if "values" in d else field(d["raw"])
-
-
-def original(c):
-    if c["op"] == "raw_membership":
-        return member(c["raw_feature"], c["values"])
-    d = SPEC["derived_features"][c["feature"]]
-    if d.get("op") == "bit_set":
-        v = f"int(bool({field(d['raw'])} & {d['bit']}))"
-    elif d.get("op") == "membership":
-        v = f"int({member(d['raw'], d['values'])})"
-    else:
-        a, b = operand(d["us"]), operand(d["them"])
-        v = {
-            "sum": lambda: f"({a} + {b})",
-            "difference": lambda: f"({a} - {b})",
-            "absolute_difference": lambda: f"std::abs({a} - {b})",
-            "equal": lambda: f"int({a} == {b})",
-        }[d["relation"]]()
-    return f"({v} <= {math.floor(c['threshold'])})"
 
 
 def generate():
@@ -100,64 +71,22 @@ def generate():
         + ",".join(str(x) for x in bytes.fromhex(IDENTITY))
         + "};",
     ]
+    rules = json.loads((ROOT / "binary_routing.json").read_text())
+    assert rules["source_routing_sha256"] == IDENTITY
     out += [
-        "template<class Context> inline int select_reference(const Context& c) {",
-        f"goto n{SPEC['root']};",
-    ]
-    for n in SPEC["nodes"]:
-        out.append(f"n{n['node_id']}:")
-        out.append(
-            f"return {n['leaf_id']};"
-            if "leaf_id" in n
-            else f"if ({original(n['condition'])}) goto n{n['yes']}; else goto n{n['no']};"
-        )
-    out.append("}")
-    for name in ("binary", "small_switch", "mixed"):
-        s = json.loads((ROOT / f"{name}_routing.json").read_text())
-        assert s["source_routing_sha256"] == IDENTITY
-        out += [
-            f"template<class Context> inline int select_{name}(const Context& c) {{",
-            f"goto n{s['root']};",
-        ]
-        for n in s["nodes"]:
-            out.append(f"n{n['id']}:")
-            if n["kind"] == "leaf":
-                out.append(f"return {n['leaf_id']};")
-            elif n["kind"] == "binary":
-                out.append(
-                    f"if ({expression(n['condition'])}) goto n{n['yes']}; else goto n{n['no']};"
-                )
-            else:
-                fields = n["fields"]
-                key = (
-                    field(fields[0])
-                    if len(fields) == 1
-                    else f"{SPEC['raw_features'][fields[1]]['size']} * {field(fields[0])} + {field(fields[1])}"
-                )
-                out.append(f"switch ({key}) {{")
-                for case in n["cases"]:
-                    out.append(
-                        " ".join(f"case {v}:" for v in case["values"])
-                        + f" goto n{case['target']};"
-                    )
-                out += [f"default: goto n{n['default']};", "}"]
-        out.append("}")
-    out += [
-        "// 0=binary (conservative default); 1=small switches; 2=full mixed.",
-        "#ifndef TREE128_LAYOUT",
-        "#define TREE128_LAYOUT 0",
-        "#endif",
         "template<class Context> inline int select(const Context& c) {",
-        "#if TREE128_LAYOUT == 2",
-        "return select_mixed(c);",
-        "#elif TREE128_LAYOUT == 1",
-        "return select_small_switch(c);",
-        "#else",
-        "return select_binary(c);",
-        "#endif",
-        "}",
-        "}",
+        f"goto n{rules['root']};",
     ]
+    for node in rules["nodes"]:
+        out.append(f"n{node['id']}:")
+        if node["kind"] == "leaf":
+            out.append(f"return {node['leaf_id']};")
+        else:
+            assert node["kind"] == "binary"
+            out.append(
+                f"if ({expression(node['condition'])}) goto n{node['yes']}; else goto n{node['no']};"
+            )
+    out += ["}", "}"]
     return "\n".join(out) + "\n"
 
 

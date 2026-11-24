@@ -27,7 +27,7 @@ def test_stack_configuration_and_factor_coalescing():
     stacks = LayerStacks(128, c, q)
     assert stacks.count == stacks.raw_count == 128
     assert torch.equal(stacks.stack_remap, torch.arange(128))
-    assert [len(set(ancestor_map(d))) for d in (2, 4, 6)] == [4, 16, 59]
+    assert [len(set(ancestor_map(d))) for d in (2, 3)] == [4, 8]
     for layer in (stacks.l1, stacks.l2, stacks.output):
         for p in (*layer.group_factor_w, *layer.group_factor_b):
             p.data.uniform_(-0.01, 0.01)
@@ -46,8 +46,9 @@ def test_stack_configuration_and_factor_coalescing():
     state["routing_identity"][0] ^= 1
     with pytest.raises(RuntimeError, match="routing identity"):
         clone.load_state_dict(state)
-    with pytest.raises(ValueError):
-        LayerStacks(128, config(ls_factors="queen"), q)
+    for factors in ("queen", "tree-depth6"):
+        with pytest.raises(ValueError):
+            LayerStacks(128, config(ls_factors=factors), q)
 
 
 def test_tree128_export_roundtrip_and_identity():

@@ -18,7 +18,7 @@ class LayerStacksConfig:
     )
     """Factorized layer stacks: ':'-separated factors, each a --ls-keys key or keys joined by '+' (e.g.
     "piececount+queen"), shared by the stacks with the same values of those keys, added to every stack layer during
-    training and folded into the stacks at export. For tree128, use tree-depthN ancestors; the default Cartesian factors are replaced with tree-depth2:tree-depth4:tree-depth6. Empty = off."""
+    training and folded into the stacks at export. For tree128, use tree-depth2 and tree-depth3 ancestors; the default Cartesian factors are replaced with tree-depth2:tree-depth3. Empty = off."""
     ls_keys: Annotated[str, tyro.conf.arg(name="ls-keys")] = (
         "piececount:queen:pawnhalf:manyoffi"
     )

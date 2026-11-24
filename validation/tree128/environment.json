@@ -15,5 +15,6 @@
   },
   "pgo_flags": "GCC ordinary profile-build, ARCH=x86-64-avx2, CPPFLAGS=-DNNUE_EMBEDDING_OFF -DTREE128_LAYOUT=0/1/2; control additionally -DTREE128_CONTROL",
   "pgo_profile": "normal bench with matching external validation network",
-  "pgo_selection": "binary default; switch median improvement under 1% overlaps run variability; retest with trained nets"
+  "pgo_selection": "single simplified binary; alternative layouts and control-build options removed",
+  "measurement_scope": "Historical layout comparison; only the simplified binary evaluator is retained in source."
 }

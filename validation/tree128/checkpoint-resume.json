@@ -5,6 +5,14 @@
   "resumed_steps": 4,
   "routing_identity_preserved": true,
   "identity_remap_preserved": true,
+  "ancestor_depths": [
+    2,
+    3
+  ],
+  "ancestor_groups": [
+    4,
+    8
+  ],
   "completed_epoch_not_repeated": true,
   "scope": "tiny CPU K32H3^ 32/8/8 local smoke, not recipe training"
 }

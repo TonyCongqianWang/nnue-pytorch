@@ -13,13 +13,11 @@
   "canonical_leaves": 128,
   "ancestor_depths": [
     2,
-    4,
-    6
+    3
   ],
   "ancestor_groups": [
     4,
-    16,
-    59
+    8
   ],
   "legal_fen_parity": 7200,
   "incremental_fresh_and_undo_positions": 3768,
@@ -58,5 +56,10 @@
     "chess-strength tests and NPS rerun with matched trained networks"
   ],
   "remote_training_launched": false,
-  "pushed": false
+  "pushed": false,
+  "inference_representation": "single simplified binary",
+  "legacy_layout_controls_removed": true,
+  "depth23_regression": {
+    "passed": 10
+  }
 }

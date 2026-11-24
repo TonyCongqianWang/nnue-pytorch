@@ -195,9 +195,9 @@ class LayerStacks(nn.Module):
 
             maps = []
             for name in names:
-                if not name.startswith("tree-depth") or not name[10:].isdigit():
+                if name not in ("tree-depth2", "tree-depth3"):
                     raise ValueError(
-                        f"tree128 factor must be tree-depth1..10, got {name!r}"
+                        f"tree128 factor must be tree-depth2 or tree-depth3, got {name!r}"
                     )
                 maps.append(torch.tensor(ancestor_map(int(name[10:]))))
             return maps

@@ -14,30 +14,24 @@ Explicit remap tables and existing serialization/coalescing remain available.
 
 ## Factorization
 
-`--ls-factors tree-depth2:tree-depth4:tree-depth6` shares additional weights and
-biases among leaves with a common ancestor in the **original semantic tree**.
-The three maps have 4, 16 and 59 groups. Leaves ending above a requested depth
-retain their terminal node as their group. Group IDs are derived from sorted
-semantic node IDs; they do not depend on machine dispatch layout. Every leaf
-also keeps independent residual stack parameters. Factors start at zero and
+`--ls-factors tree-depth2:tree-depth3` shares additional weights and biases
+among leaves with a common ancestor in the original semantic tree. The maps
+have 4 and 8 groups. Every leaf retains independent residual stack parameters,
+and master's global FC0 factorization is retained. Factors start at zero and
 use the existing optimizer, clipping, coalescing and export code.
 
-When `tree128` is selected, the original default Cartesian factor string is
-replaced by this ancestry setting. Other Cartesian factor names are rejected.
-Use `--ls-factors ''` to disable group factors while retaining global FC0
-factorization. The strict routing/count experiment is the unfactorized tree
-versus the unfactorized 192-stack master control; ancestry factors are a
-separate experimental arm. They are a reasonable structural prior, not a
-measured strength improvement.
+For `tree128`, the default Cartesian factor string resolves to these two
+ancestry factors. The only supported ancestry factors are depth 2 and depth 3.
+Use the same global FC0 factorization with group factors disabled in the
+master-based control when isolating the routing/count change.
 
 ## Frozen specification and compatibility
 
 `routing/tree128/routing_tree.json` is the semantic source, SHA256
 `c0ee18ceb89d0871c63f593ef4ff1a3f5d3d6e4d26652cbb35f5e89342c085f2`.
-Canonical IDs are the frozen leaf IDs, never the teacher class IDs. Lowering
-artifacts are pinned separately and retain their original path preconditions.
-Actual switches dispatch on one raw field or bounded pair key. Counts are
-capped at 15; material-category counts remain unclipped; differences use signed
+Canonical IDs are the frozen leaf IDs, never the teacher class IDs. The
+simplified binary lowering is pinned separately and retains its original
+path preconditions. It is the only compiled evaluator. Counts are capped at 15; material-category counts remain unclipped; differences use signed
 integers. Only needed context fields are extracted and cached on demand.
 
 Generate both consumers from this checkout:
@@ -49,9 +43,10 @@ python -m routing.tree128.generate --engine /path/to/Stockfish
 The generator verifies the bundled manifests. Exhaustive validation also
 verifies the saved sklearn joblib and leaf map against the frozen manifest.
 `implementation_hashes.json` records the generated code and shared extractor
-hashes separately. Binary/small-switch/full-mixed layouts have one semantic
-identity. `TREE128_LAYOUT=0/1/2` selects them at compile time; binary is the
-conservative default pending repeatable gains with trained matching nets.
+hashes separately. The semantic identity is fixed by the original
+specification. The original JSON is also used by
+the independent validation oracle and the ancestry maps. There are no
+alternative compiled layouts or layout-selection macros.
 
 The network table/header compatibility hash incorporates the semantic digest,
 and the table record also carries all 32 digest bytes immediately after its
@@ -70,7 +65,7 @@ cmake --build build -j4
 python -m pytest -q tests/test_tree128.py tests/test_serialization_roundtrip.py tests/test_counting_exporter.py tests/test_compact_transport.py
 python tools/validate_tree128.py --analysis /path/to/moe10_analysis --output /path/to/results/routing.json
 python tools/validate_tree128_fens.py --engine /path/to/Stockfish/src/stockfish --output /path/to/results/fens.json
-python tools/tree128_traffic.py --recipe /path/to/nettest/tree128.yaml --output /path/to/results/traffic.json /path/to/data.binpack
+python tools/tree128_traffic.py --recipe /path/to/nettest/threats.yaml --output /path/to/results/traffic.json /path/to/data.binpack
 ```
 
 `cross_check_eval.py` retains the normal export/QAT/engine flow; pass

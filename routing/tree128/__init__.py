@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 IDENTITY = "c0ee18ceb89d0871c63f593ef4ff1a3f5d3d6e4d26652cbb35f5e89342c085f2"
 TABLE_HASH = 0x5A7AB1E5 ^ int(IDENTITY[:8], 16)
-DEFAULT_FACTORS = "tree-depth2:tree-depth4:tree-depth6"
+DEFAULT_FACTORS = "tree-depth2:tree-depth3"
 
 
 def specification():
@@ -58,8 +58,8 @@ def select(raw):
 
 def ancestor_map(depth):
     """Canonical leaf -> ancestor at depth (early terminal leaves stay distinct)."""
-    if not 1 <= depth <= SPEC["max_depth"]:
-        raise ValueError("tree-depth must be in 1..10")
+    if depth not in (2, 3):
+        raise ValueError("tree128 ancestry factors use depth 2 or 3")
     result = [None] * 128
 
     def walk(node_id, path):
